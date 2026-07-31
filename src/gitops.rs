@@ -428,14 +428,7 @@ fn join(status: &str, reason: &str, msg: &str) -> String {
 
 /// Trim a revision/message to something that fits on a line.
 fn short(s: &str) -> String {
-    let s = s.trim();
-    if s.chars().count() <= 80 {
-        s.to_string()
-    } else {
-        let mut t: String = s.chars().take(79).collect();
-        t.push('…');
-        t
-    }
+    crate::text::ellipsize(s.trim(), 80)
 }
 
 #[cfg(test)]

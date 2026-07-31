@@ -451,6 +451,35 @@ impl ViewSpec {
         }
     }
 
+    /// Index of `header`'s column (case-insensitive), without allocating the
+    /// header list.
+    pub fn header_index(&self, header: &str) -> Option<usize> {
+        self.columns
+            .iter()
+            .position(|c| c.header.eq_ignore_ascii_case(header))
+    }
+
+    /// The single cell at `idx` for one object. Filter comparisons read one
+    /// column of every object — extracting the full row per object per
+    /// rebuild is what this avoids.
+    pub fn cell_at(&self, obj: &DynamicObject, idx: usize) -> Option<String> {
+        let col = self.columns.get(idx)?;
+        Some(match &col.source {
+            SpecSource::User(uc) => crate::views::render_cell(obj, uc),
+            SpecSource::Curated(extract) => {
+                let name = obj.metadata.name.clone().unwrap_or_default();
+                let age = age(obj);
+                let ctx = CellContext {
+                    obj,
+                    data: &obj.data,
+                    name: &name,
+                    age: &age,
+                };
+                extract(&ctx)
+            }
+        })
+    }
+
     /// Whether `header` is a user/printer column (typed sorting applies) as
     /// opposed to a curated one.
     pub fn is_user_column(&self, header: &str) -> bool {

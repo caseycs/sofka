@@ -555,12 +555,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let offset = app.table_state.offset();
     let selected = app.table_state.selected();
 
-    let visible_objects: Vec<_> = app
-        .rows()
-        .into_iter()
-        .skip(offset)
-        .take(visible_rows)
-        .collect();
+    let visible_objects = app.rows_window(offset, visible_rows);
     app.ensure_table_cell_cache(&visible_objects);
     let cell_cache = app.table_cell_cache();
     let spec = app.view_spec();
@@ -2203,22 +2198,7 @@ const C_MEM: usize = 8;
 const C_MEM_PCT: usize = 9;
 const C_GAP: usize = 2;
 
-/// Truncate to `max` display columns with a trailing ellipsis (character-based;
-/// container names are ASCII in practice).
-fn truncate_cols(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max {
-        return s.to_string();
-    }
-    match max {
-        0 => String::new(),
-        _ => {
-            let mut t: String = s.chars().take(max - 1).collect();
-            t.push('…');
-            t
-        }
-    }
-}
+use crate::text::ellipsize as truncate_cols;
 
 fn draw_containers(frame: &mut Frame, app: &mut App, area: Rect) {
     let gap = " ".repeat(C_GAP);

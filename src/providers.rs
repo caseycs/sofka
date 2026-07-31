@@ -457,13 +457,16 @@ pub(crate) fn parse_lookback(s: &str) -> Result<i64, String> {
     let n: i64 = digits
         .parse()
         .map_err(|_| format!("{s:?} is not a duration like \"30m\" or \"1h\""))?;
-    let secs = match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86_400,
+    let per_unit = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
         _ => return Err(format!("{s:?} has unknown unit {unit:?} (use s/m/h/d)")),
     };
+    let secs = n
+        .checked_mul(per_unit)
+        .ok_or_else(|| format!("{s:?} is too large"))?;
     if secs <= 0 {
         return Err(format!("{s:?} must be a positive duration"));
     }
@@ -692,23 +695,14 @@ impl LogProvider {
         }
     }
 
-    /// Direct-transport POST via a one-off hyper client.
+    /// Direct-transport POST via the shared process-wide hyper client.
     async fn post_direct(
         &self,
         base: &str,
         path: &str,
         params: &[(&str, &str)],
     ) -> Result<hyper::Response<hyper::body::Incoming>, String> {
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .map_err(|e| format!("loading system TLS roots: {e}"))?
-            .https_or_http()
-            .enable_http1()
-            .build();
-        let client =
-            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-                .build(https);
-
+        let client = direct_client()?;
         let url = format!("{base}{path}");
         let mut req = hyper::Request::post(&url).header(
             http::header::CONTENT_TYPE,
@@ -748,6 +742,34 @@ impl LogProvider {
         req.body(form_body(params).into_bytes())
             .map_err(|e| format!("building request: {e}"))
     }
+}
+
+type DirectHttpClient = hyper_util::client::legacy::Client<
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+    Full<Bytes>,
+>;
+
+/// The hyper client for direct-transport requests, built once per process.
+/// `with_native_roots()` reads and parses the system root store from disk —
+/// per request that dwarfed the request itself — and one client also pools
+/// connections across the burst of queries right-sizing sends.
+fn direct_client() -> Result<DirectHttpClient, String> {
+    static CLIENT: std::sync::OnceLock<Result<DirectHttpClient, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            let https = hyper_rustls::HttpsConnectorBuilder::new()
+                .with_native_roots()
+                .map_err(|e| format!("loading system TLS roots: {e}"))?
+                .https_or_http()
+                .enable_http1()
+                .build();
+            Ok(
+                hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                    .build(https),
+            )
+        })
+        .clone()
 }
 
 /// Form-urlencode `params`. Scoped helper: the serializer holds a non-`Send`
@@ -1108,16 +1130,7 @@ impl MetricsProvider {
                     .map_err(|e| format!("{}: {e}", self.location()))
             }
             Transport::Direct { url } => {
-                let https = hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_native_roots()
-                    .map_err(|e| format!("loading system TLS roots: {e}"))?
-                    .https_or_http()
-                    .enable_http1()
-                    .build();
-                let http_client = hyper_util::client::legacy::Client::builder(
-                    hyper_util::rt::TokioExecutor::new(),
-                )
-                .build(https);
+                let http_client = direct_client()?;
                 let full = format!("{url}/api/v1/query");
                 let mut req = hyper::Request::post(&full).header(
                     http::header::CONTENT_TYPE,

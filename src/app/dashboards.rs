@@ -35,14 +35,17 @@ impl App {
                     break;
                 }
                 let mut p = Pulse::default();
+                // A denied/failed list must not render as "0 healthy" tiles —
+                // record it so the view can say the numbers are incomplete.
+                let mut warn = None;
 
                 if let Some((ar, _)) = &nodes {
-                    let items = list_kind(&client, ar, false, "").await;
+                    let items = list_or_warn(&client, ar, false, "", &mut warn).await;
                     p.nodes_total = items.len();
                     p.nodes_ready = items.iter().filter(|o| node_ready(o)).count();
                 }
                 if let Some((ar, nsd)) = &pods {
-                    let items = list_kind(&client, ar, *nsd, &ns).await;
+                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
                     p.pods_total = items.len();
                     for o in &items {
                         match phase(o).as_str() {
@@ -55,7 +58,7 @@ impl App {
                     }
                 }
                 if let Some((ar, nsd)) = &deploys {
-                    let items = list_kind(&client, ar, *nsd, &ns).await;
+                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
                     p.deploys_total = items.len();
                     p.deploys_ready = items
                         .iter()
@@ -63,7 +66,7 @@ impl App {
                         .count();
                 }
                 if let Some((ar, nsd)) = &sts {
-                    let items = list_kind(&client, ar, *nsd, &ns).await;
+                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
                     p.sts_total = items.len();
                     p.sts_ready = items
                         .iter()
@@ -71,7 +74,7 @@ impl App {
                         .count();
                 }
                 if let Some((ar, nsd)) = &ds {
-                    let items = list_kind(&client, ar, *nsd, &ns).await;
+                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
                     p.ds_total = items.len();
                     p.ds_ready = items
                         .iter()
@@ -81,13 +84,14 @@ impl App {
                         .count();
                 }
                 if let Some((ar, nsd)) = &jobs {
-                    p.jobs_total = list_kind(&client, ar, *nsd, &ns).await.len();
+                    p.jobs_total = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await.len();
                 }
                 if let Some((ar, nsd)) = &pvc {
-                    let items = list_kind(&client, ar, *nsd, &ns).await;
+                    let items = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
                     p.pvc_total = items.len();
                     p.pvc_bound = items.iter().filter(|o| phase(o) == "Bound").count();
                 }
+                p.warn = warn;
 
                 if tx
                     .send(Msg::PulseData {
@@ -160,10 +164,11 @@ impl App {
                 if flag.load(Ordering::SeqCst) != genr {
                     break;
                 }
-                let roots = list_kind(&client, &root_ar, root_nsd, &ns).await;
+                let mut warn = None;
+                let roots = list_or_warn(&client, &root_ar, root_nsd, &ns, &mut warn).await;
                 let mut pool: Vec<(String, DynamicObject)> = Vec::new();
                 for (label, ar, namespaced) in &pool_kinds {
-                    for o in list_kind(&client, ar, *namespaced, &ns).await {
+                    for o in list_or_warn(&client, ar, *namespaced, &ns, &mut warn).await {
                         pool.push((label.clone(), o));
                     }
                 }
@@ -190,6 +195,7 @@ impl App {
                     .send(Msg::XrayData {
                         generation: genr,
                         items,
+                        warn,
                     })
                     .await
                     .is_err()
@@ -211,7 +217,11 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => list_step(&mut self.xray_state, len, true),
             KeyCode::Char('k') | KeyCode::Up => list_step(&mut self.xray_state, len, false),
-            KeyCode::Char('g') | KeyCode::Home => self.xray_state.select(Some(0)),
+            KeyCode::Char('g') | KeyCode::Home => {
+                if len > 0 {
+                    self.xray_state.select(Some(0));
+                }
+            }
             KeyCode::Char('G') | KeyCode::End => {
                 if len > 0 {
                     self.xray_state.select(Some(len - 1));

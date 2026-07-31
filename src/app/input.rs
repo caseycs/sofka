@@ -106,7 +106,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Char('g') | KeyCode::Home => self.table_state.select(Some(0)),
             KeyCode::Char('G') | KeyCode::End => {
-                let len = self.rows().len();
+                let len = self.row_count();
                 if len > 0 {
                     self.table_state.select(Some(len - 1));
                 }

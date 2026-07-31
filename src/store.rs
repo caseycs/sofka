@@ -48,6 +48,15 @@ pub enum Msg {
     XrayData {
         generation: u64,
         items: Vec<XrayItem>,
+        /// A list that failed during the gather — the tree may be incomplete.
+        warn: Option<String>,
+    },
+    /// The metrics poll loop failed (a broken metrics-server, not an absent
+    /// one — an absent API never starts the loop). Cleared by the next
+    /// successful [`Msg::Metrics`].
+    MetricsError {
+        generation: u64,
+        error: String,
     },
     /// Findings for the explain-unhealthy view, gathered off-thread.
     Explain {
@@ -181,6 +190,10 @@ pub enum Msg {
         generation: u64,
         error: String,
     },
+    /// A panic in a background task, reported by the process panic hook.
+    /// Deliberately generation-free: it must surface no matter which view is
+    /// current.
+    Panic(String),
 }
 
 /// Cluster-health snapshot for the pulse dashboard.
@@ -202,6 +215,8 @@ pub struct Pulse {
     pub jobs_total: usize,
     pub pvc_bound: usize,
     pub pvc_total: usize,
+    /// A list that failed during the gather — the tiles above under-count.
+    pub warn: Option<String>,
 }
 
 /// A flattened node in the xray tree (owner → children → containers).

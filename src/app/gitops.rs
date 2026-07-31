@@ -78,13 +78,14 @@ impl App {
         self.flash_err = false;
 
         tokio::spawn(async move {
+            let mut warn = None;
             // Owner: the selection itself, or fetched from its label reference.
             let owner = match owner_ref {
                 None => None,
                 Some(r) => {
                     let (plural, obj) = match (owner_inline, owner_plural_inline) {
                         (Some(o), Some(p)) => (p, Some(o)),
-                        _ => fetch_flux(&client, &flux, &r).await,
+                        _ => fetch_flux(&client, &flux, &r, &mut warn).await,
                     };
                     Some(Node {
                         reference: r,
@@ -99,7 +100,7 @@ impl App {
             let mut deps = Vec::new();
             if let Some(owner_obj) = owner.as_ref().and_then(|n| n.obj.as_ref()) {
                 if let Some(sr) = gitops::source_ref(owner_obj) {
-                    let (plural, obj) = fetch_flux(&client, &flux, &sr).await;
+                    let (plural, obj) = fetch_flux(&client, &flux, &sr, &mut warn).await;
                     source = Some(Node {
                         reference: sr,
                         plural,
@@ -107,7 +108,7 @@ impl App {
                     });
                 }
                 for dr in gitops::depends_on(owner_obj) {
-                    let (plural, obj) = fetch_flux(&client, &flux, &dr).await;
+                    let (plural, obj) = fetch_flux(&client, &flux, &dr, &mut warn).await;
                     deps.push(Node {
                         reference: dr,
                         plural,
@@ -123,7 +124,8 @@ impl App {
                 source,
                 deps,
             };
-            let findings = gitops::describe(&ev);
+            let mut findings = gitops::describe(&ev);
+            prepend_warn_finding(&mut findings, warn);
             let _ = tx
                 .send(Msg::Gitops {
                     generation: genr,
@@ -191,10 +193,13 @@ impl App {
 
 /// Fetch one Flux object by reference, returning its resolved plural (empty if
 /// the kind is unknown to the cluster) and the object (`None` if not found).
+/// A read *failure* (a 403, a timeout) is recorded in `warn` — folding it into
+/// `None` would make the chain view assert the object doesn't exist.
 async fn fetch_flux(
     client: &Client,
     flux: &FluxKinds,
     r: &FluxRef,
+    warn: &mut Option<String>,
 ) -> (String, Option<DynamicObject>) {
     let Some((ar, namespaced, plural)) = flux.get(&r.kind.to_lowercase()) else {
         return (String::new(), None);
@@ -204,5 +209,13 @@ async fn fetch_flux(
     } else {
         Api::all_with(client.clone(), ar)
     };
-    (plural.clone(), api.get(&r.name).await.ok())
+    let obj = match api.get(&r.name).await {
+        Ok(o) => Some(o),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => None,
+        Err(e) => {
+            warn.get_or_insert(format!("reading {}/{}: {e}", plural, r.name));
+            None
+        }
+    };
+    (plural.clone(), obj)
 }

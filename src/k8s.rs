@@ -166,10 +166,13 @@ impl Cluster {
     }
 
     /// All context names from the kubeconfig.
-    pub fn list_contexts() -> Vec<String> {
+    /// Context names from the kubeconfig. A read/parse failure is an error,
+    /// not an empty list — "no contexts" and "your kubeconfig is invalid"
+    /// must not look the same in the picker.
+    pub fn list_contexts() -> Result<Vec<String>, String> {
         Kubeconfig::read()
             .map(|k| k.contexts.into_iter().map(|c| c.name).collect())
-            .unwrap_or_default()
+            .map_err(|e| format!("reading kubeconfig: {e}"))
     }
 
     /// Merge user-defined aliases (alias -> canonical) into the registry.

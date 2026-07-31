@@ -11,12 +11,14 @@ impl App {
         cache.dirty = true;
         cache.keys.clear();
         cache.cells.clear();
+        cache.sort_keys.clear();
     }
 
     pub(super) fn invalidate_row(&self, key: &str) {
         let mut cache = self.rows_cache.borrow_mut();
         cache.dirty = true;
         cache.cells.remove(key);
+        cache.sort_keys.remove(key);
     }
 
     /// The parsed form of the active filter, reparsed only when the string
@@ -93,15 +95,14 @@ impl App {
 
     /// The displayed cell a comparison key names (case-insensitive column
     /// header), plus NAMESPACE and a `/status/phase` fallback for kinds
-    /// without a STATUS column.
+    /// without a STATUS column. Extracts only the named column — this runs
+    /// per object per rebuild when a structured filter is active.
     fn column_cell(&self, o: &DynamicObject, key: &str) -> Option<String> {
         if key.eq_ignore_ascii_case("namespace") || key.eq_ignore_ascii_case("ns") {
             return Some(o.metadata.namespace.clone().unwrap_or_default());
         }
-        let base = self.spec.headers();
-        if let Some(i) = base.iter().position(|h| h.eq_ignore_ascii_case(key)) {
-            let (cells, _) = self.spec.cells(o);
-            return cells.get(i).cloned();
+        if let Some(i) = self.spec.header_index(key) {
+            return self.spec.cell_at(o, i);
         }
         if key.eq_ignore_ascii_case("status") {
             let phase = phase(o);
@@ -153,12 +154,16 @@ impl App {
         let sort_header = self
             .sort_column
             .and_then(|i| headers.get(i).map(String::as_str));
+        // CPU/MEM sort by the live metrics snapshot, which moves without a new
+        // resourceVersion, so those keys can never be cached.
+        let volatile_sort = matches!(sort_header, Some("CPU" | "MEM"));
         // The aggregated Helm release list (`helm list` semantics) shows only
         // the latest revision per release; `helmhistory` (one release's full
         // history) shows every revision, so it skips this.
         let helm_latest = (self.kind_plural == "helm").then(|| self.helm_latest_revision_keys());
+        let sort_keys = &mut cache.sort_keys;
         // (primary sort key, (ns, name) tiebreak, store key)
-        let mut entries: Vec<(SortKey, (String, String), String)> = self
+        let mut entries: Vec<(SortKey, (&str, &str), &String)> = self
             .store
             .iter()
             .filter(|(_, o)| self.matches_filter(o))
@@ -167,15 +172,40 @@ impl App {
                 None => true,
             })
             .map(|(k, o)| {
+                // One watch event marks the whole ordering dirty, so the
+                // rebuild touches every object — computed sort keys are
+                // cached per resourceVersion so the N-1 unchanged rows reuse
+                // theirs instead of re-extracting (and, for helm, re-gunzipping)
+                // their cells.
                 let primary = match sort_header {
-                    Some(h) => self.column_sort_key(o, h),
                     None => SortKey::Text(String::new()),
+                    Some(h) if volatile_sort => self.column_sort_key(o, h),
+                    Some(h) => {
+                        let rv = o.metadata.resource_version.as_deref();
+                        match sort_keys.get(k) {
+                            Some(e) if e.header == h && e.resource_version.as_deref() == rv => {
+                                e.key.clone()
+                            }
+                            _ => {
+                                let key = self.column_sort_key(o, h);
+                                sort_keys.insert(
+                                    k.clone(),
+                                    SortKeyEntry {
+                                        header: h.to_string(),
+                                        resource_version: o.metadata.resource_version.clone(),
+                                        key: key.clone(),
+                                    },
+                                );
+                                key
+                            }
+                        }
+                    }
                 };
                 let tie = (
-                    o.metadata.namespace.clone().unwrap_or_default(),
-                    o.metadata.name.clone().unwrap_or_default(),
+                    o.metadata.namespace.as_deref().unwrap_or(""),
+                    o.metadata.name.as_deref().unwrap_or(""),
                 );
-                (primary, tie, k.clone())
+                (primary, tie, k)
             })
             .collect();
         let desc = self.sort_desc && sort_header.is_some();
@@ -187,7 +217,7 @@ impl App {
             // Ties always fall back to namespace/name ascending.
             ord.then_with(|| a.1.cmp(&b.1))
         });
-        cache.keys = entries.into_iter().map(|(_, _, k)| k).collect();
+        cache.keys = entries.into_iter().map(|(_, _, k)| k.clone()).collect();
         cache.dirty = false;
     }
 
@@ -227,6 +257,21 @@ impl App {
             .borrow()
             .keys
             .iter()
+            .filter_map(|k| self.store.get(k))
+            .collect()
+    }
+
+    /// The rows for one viewport: `n` display-ordered rows starting at
+    /// `offset`. What the table renderer wants per frame — it must not pay
+    /// for materializing every off-screen row just to draw one screenful.
+    pub fn rows_window(&self, offset: usize, n: usize) -> Vec<&DynamicObject> {
+        self.ensure_rows_cache();
+        self.rows_cache
+            .borrow()
+            .keys
+            .iter()
+            .skip(offset)
+            .take(n)
             .filter_map(|k| self.store.get(k))
             .collect()
     }
@@ -455,9 +500,10 @@ impl App {
     }
 
     pub fn selected_ref(&self) -> Option<&DynamicObject> {
-        let rows = self.rows();
         let idx = self.table_state.selected()?;
-        rows.get(idx).copied()
+        self.ensure_rows_cache();
+        let cache = self.rows_cache.borrow();
+        self.store.get(cache.keys.get(idx)?)
     }
 
     pub fn selected(&self) -> Option<DynamicObject> {
@@ -529,7 +575,7 @@ impl App {
     }
 
     pub(super) fn move_selection(&mut self, delta: i32) {
-        let len = self.rows().len() as i32;
+        let len = self.row_count() as i32;
         if len == 0 {
             return;
         }

@@ -47,6 +47,9 @@ impl App {
                 "no data yet"
             }
         ));
+        if let Some(e) = &self.metrics_error {
+            lines.push(format!("  metrics poll error: {e}"));
+        }
 
         lines.push(String::new());
         lines.push("Watch health".into());

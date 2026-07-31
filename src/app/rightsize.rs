@@ -79,28 +79,37 @@ impl App {
             let step = provider.step.clone();
             let headroom = provider.headroom;
 
+            // All containers (and all eight queries within each) gathered
+            // concurrently — serialized this was 8N round trips.
+            let results = futures_util::future::join_all(containers.iter().map(|c| {
+                gather_container(&provider, &ns, &pod_matcher, c, &window, &step, headroom)
+            }))
+            .await;
             let mut recs = Vec::new();
-            for c in &containers {
-                recs.push(
-                    gather_container(&provider, &ns, &pod_matcher, c, &window, &step, headroom)
-                        .await,
-                );
+            let mut errors = Vec::new();
+            for (rec, errs) in results {
+                recs.push(rec);
+                errors.extend(errs);
             }
 
-            let lines = render_report(&provider.location(), &window, headroom, &recs);
+            let lines = render_report(&provider.location(), &window, headroom, &recs, &errors);
+            let warn =
+                (!errors.is_empty()).then(|| format!("{} metrics queries failed", errors.len()));
             let _ = tx
                 .send(Msg::Detail {
                     generation: genr,
                     title,
                     lines,
-                    warn: None,
+                    warn,
                 })
                 .await;
         });
     }
 }
 
-/// Query the four PromQL series for one container and assemble its rec.
+/// Query the eight PromQL series for one container (concurrently) and
+/// assemble its rec, plus any query errors. A failed query yields `None` —
+/// never a zero the report would then present as measured usage.
 async fn gather_container(
     provider: &crate::providers::MetricsProvider,
     ns: &str,
@@ -109,7 +118,7 @@ async fn gather_container(
     window: &str,
     step: &str,
     headroom: u32,
-) -> ContainerRec {
+) -> (ContainerRec, Vec<String>) {
     let sel = format!(
         "namespace=\"{ns}\",pod=~\"{pod_matcher}\",container=\"{}\"",
         spec.name
@@ -124,47 +133,56 @@ async fn gather_container(
             "max(quantile_over_time({q}, container_memory_working_set_bytes{{{sel}}}[{window}]))"
         )
     };
-    let q =
-        |promql: String| async move { provider.query(&promql).await.ok().flatten().unwrap_or(0.0) };
+    let q = |promql: String| async move { provider.query(&promql).await };
 
+    let (c50, c95, c99, m50, m95, m99, oom, throttle) = tokio::join!(
+        q(cpu_q("0.5")),
+        q(cpu_q("0.95")),
+        q(cpu_q("0.99")),
+        q(mem_q("0.5")),
+        q(mem_q("0.95")),
+        q(mem_q("0.99")),
+        q(format!(
+            "sum(increase(container_oom_events_total{{{sel}}}[{window}]))"
+        )),
+        q(format!(
+            "sum(increase(container_cpu_cfs_throttled_periods_total{{{sel}}}[{window}]))"
+        )),
+    );
+
+    let mut errors = Vec::new();
+    let mut take = |r: Result<Option<f64>, String>| match r {
+        Ok(v) => v,
+        Err(e) => {
+            errors.push(e);
+            None
+        }
+    };
     let cpu = Quantiles {
-        p50: q(cpu_q("0.5")).await,
-        p95: q(cpu_q("0.95")).await,
-        p99: q(cpu_q("0.99")).await,
+        p50: take(c50),
+        p95: take(c95),
+        p99: take(c99),
     };
     let mem = Quantiles {
-        p50: q(mem_q("0.5")).await,
-        p95: q(mem_q("0.95")).await,
-        p99: q(mem_q("0.99")).await,
+        p50: take(m50),
+        p95: take(m95),
+        p99: take(m99),
     };
-    let oom = q(format!(
-        "sum(increase(container_oom_events_total{{{sel}}}[{window}]))"
-    ))
-    .await;
-    let throttle = q(format!(
-        "sum(increase(container_cpu_cfs_throttled_periods_total{{{sel}}}[{window}]))"
-    ))
-    .await;
+    let oom = take(oom);
+    let throttle = take(throttle);
 
-    ContainerRec {
+    let rec = ContainerRec {
         container: spec.name.clone(),
-        suggested_cpu: if cpu.p95 > 0.0 {
-            suggest(cpu.p95, headroom)
-        } else {
-            0.0
-        },
-        suggested_mem: if mem.p95 > 0.0 {
-            suggest(mem.p95, headroom)
-        } else {
-            0.0
-        },
+        suggested_cpu: cpu.p95.filter(|v| *v > 0.0).map(|p| suggest(p, headroom)),
+        suggested_mem: mem.p95.filter(|v| *v > 0.0).map(|p| suggest(p, headroom)),
         cpu,
         mem,
         cpu_request: spec.cpu_request,
         mem_request: spec.mem_request,
         oom,
         throttle,
-    }
+    };
+    (rec, errors)
 }
 
 /// Render the recommendation report as document lines.
@@ -173,6 +191,7 @@ fn render_report(
     window: &str,
     headroom: u32,
     recs: &[ContainerRec],
+    errors: &[String],
 ) -> Vec<String> {
     let opt_cpu = |v: Option<f64>| v.map(|n| fmt_cpu(n as i64)).unwrap_or_else(|| "—".into());
     let opt_mem = |v: Option<f64>| v.map(|n| fmt_mem(n as i64)).unwrap_or_else(|| "—".into());
@@ -182,31 +201,40 @@ fn render_report(
         format!("window:  {window}   headroom: +{headroom}% over P95"),
         String::new(),
     ];
+    if !errors.is_empty() {
+        lines.push(format!(
+            "⚠ {} metrics quer{} failed — '—' below means unknown, not zero",
+            errors.len(),
+            if errors.len() == 1 { "y" } else { "ies" },
+        ));
+        lines.push(format!("  first error: {}", errors[0]));
+        lines.push(String::new());
+    }
     for r in recs {
         lines.push(format!("container: {}", r.container));
         lines.push(format!(
             "  cpu   request {:<8} P50 {:<8} P95 {:<8} P99 {:<8} → suggest {}   [{}]",
             opt_cpu(r.cpu_request),
-            fmt_cpu(r.cpu.p50 as i64),
-            fmt_cpu(r.cpu.p95 as i64),
-            fmt_cpu(r.cpu.p99 as i64),
-            fmt_cpu(r.suggested_cpu as i64),
+            opt_cpu(r.cpu.p50),
+            opt_cpu(r.cpu.p95),
+            opt_cpu(r.cpu.p99),
+            opt_cpu(r.suggested_cpu),
             r.cpu_verdict().label(),
         ));
         lines.push(format!(
             "  mem   request {:<8} P50 {:<8} P95 {:<8} P99 {:<8} → suggest {}   [{}]",
             opt_mem(r.mem_request),
-            fmt_mem(r.mem.p50 as i64),
-            fmt_mem(r.mem.p95 as i64),
-            fmt_mem(r.mem.p99 as i64),
-            fmt_mem(r.suggested_mem as i64),
+            opt_mem(r.mem.p50),
+            opt_mem(r.mem.p95),
+            opt_mem(r.mem.p99),
+            opt_mem(r.suggested_mem),
             r.mem_verdict().label(),
         ));
-        if r.oom > 0.0 || r.throttle > 0.0 {
+        if r.oom.unwrap_or(0.0) > 0.0 || r.throttle.unwrap_or(0.0) > 0.0 {
             lines.push(format!(
                 "  evidence: {} OOM kill(s) · {} throttled CPU period(s) over {window}",
-                r.oom.round() as i64,
-                r.throttle.round() as i64,
+                r.oom.unwrap_or(0.0).round() as i64,
+                r.throttle.unwrap_or(0.0).round() as i64,
             ));
         }
         lines.push(String::new());

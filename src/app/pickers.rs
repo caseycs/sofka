@@ -357,14 +357,27 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
-            let mut list = Cluster::list_contexts();
-            list.sort();
-            let _ = tx
-                .send(Msg::Contexts {
-                    generation: genr,
-                    list,
-                })
-                .await;
+            match Cluster::list_contexts() {
+                Ok(mut list) => {
+                    list.sort();
+                    let _ = tx
+                        .send(Msg::Contexts {
+                            generation: genr,
+                            list,
+                        })
+                        .await;
+                }
+                // An unreadable kubeconfig must say so — an empty picker
+                // over a parse error looks like "you have no contexts".
+                Err(e) => {
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: e,
+                        })
+                        .await;
+                }
+            }
         });
     }
 
