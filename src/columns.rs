@@ -352,7 +352,10 @@ fn spec_curated(c: &Column) -> SpecColumn {
 fn spec_user(uc: &crate::views::UserColumn) -> SpecColumn {
     SpecColumn {
         header: uc.header.clone(),
-        is_status: uc.kind == crate::views::ColumnKind::Status,
+        is_status: matches!(
+            uc.kind,
+            crate::views::ColumnKind::Status | crate::views::ColumnKind::Condition
+        ),
         wide: uc.wide,
         source: SpecSource::User(uc.clone()),
     }
@@ -1489,6 +1492,23 @@ pub fn parse_mem_bytes(s: &str) -> i64 {
         }
     }
     s.parse::<f64>().unwrap_or(0.0) as i64
+}
+
+/// A node's allocatable CPU (millicores) and memory (bytes) from
+/// `status.allocatable` — the pool the scheduler actually hands out, i.e. the
+/// right denominator for "how full is this node".
+pub fn node_allocatable(o: &DynamicObject) -> (Option<i64>, Option<i64>) {
+    let read = |field: &str, parse: fn(&str) -> i64| {
+        o.data
+            .pointer(&format!("/status/allocatable/{field}"))
+            .and_then(Value::as_str)
+            .map(parse)
+            .filter(|v| *v > 0)
+    };
+    (
+        read("cpu", parse_cpu_milli),
+        read("memory", parse_mem_bytes),
+    )
 }
 
 pub fn fmt_cpu(milli: i64) -> String {

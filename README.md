@@ -129,7 +129,10 @@ numbers.
   resource uses its CRD `additionalPrinterColumns` automatically. Press `w` to
   show or hide the wide-only columns (kubectl `-o wide`).
 - **Live CPU and MEM columns** for pods and nodes from the metrics API, with
-  color for unusual values. The pod container picker also shows CPU and memory
+  color for unusual values. Nodes also get **%CPU and %MEM of allocatable**
+  (`status.allocatable` — the pool the scheduler hands out), colored by the
+  configurable `utilization` thresholds and sortable, so "which node is full"
+  is one glance and one `S`. The pod container picker also shows CPU and memory
   for each container, each container usage as a percent of its request and its
   limit (`-` marks an unset request or limit), and the pod QoS class. All of it
   works correctly when metrics-server is not present.
@@ -156,13 +159,24 @@ numbers.
   label and field selectors (the API server evaluates them on ⏎), and typed
   column comparisons (`status=CrashLoopBackOff`, `cpu>500m`, `memory>1Gi`,
   `restarts>=5`, `age<2h`). Terms with a space between them use AND.
+- **Global fuzzy find** (`:find <text>`) — search object names across the
+  common kinds (workloads, pods, services, config, ingresses, jobs, storage,
+  nodes, namespaces, Flux objects) in every namespace at once, concurrently.
+  Results rank by fuzzy score; `⏎` jumps straight to the object. When a kind
+  can't be listed (RBAC), the result says it's incomplete instead of
+  pretending otherwise.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
 - **Pulse dashboard** (`:pulse`) — cluster-health tiles. sofka refreshes them
   every 5 seconds.
 - **Xray tree** (`:xray`) — a hierarchical view from the current kind down
   through owner references to pods and containers.
 - **Flux CD controls** (`t`) — a suspend/resume/reconcile menu that uses native
-  Kubernetes API patches.
+  Kubernetes API patches. Press `⏎` on a **HelmRelease** to open the revision
+  history of the Helm release it manages (resolved the way helm-controller
+  composes `releaseName`/`storageNamespace`): from there `⏎` shows a
+  revision's values, `y` the rendered manifest, `d` the NOTES, and `r` rolls
+  back — the Flux object and the Helm storage inspector are one keystroke
+  apart.
 - **CronJob controls** (`t`) — trigger now (creates a Job from the jobTemplate,
   like `kubectl create job --from`), suspend, and resume.
 - **Background port-forwards** (`f`/`F` to start, `:pf` to manage).
@@ -193,7 +207,11 @@ numbers.
   keep working. Toggle it off with `:notify` on the same row; everything is
   session-local.
 - **Diff** (`:diff`) — a unified diff of the live object and its
-  `last-applied-configuration`.
+  `last-applied-configuration`. When that annotation is absent — as it is for
+  every Flux- or Helm-managed object, which nothing ever `kubectl apply`s —
+  sofka diffs against the **previous revision the session's watch saw**
+  instead, so "what just changed?" has an answer on GitOps clusters. sofka
+  keeps the last revision of up to 256 changed objects in memory for this.
 - **Events** (`:events` / `E`) — live Kubernetes Events for the selected
   object. sofka filters by UID when the UID is available.
 - **GitOps view** (`:gitops` / `:flux`) — for the selected object, the Flux
@@ -389,8 +407,8 @@ sort = "EXPIRES:desc"     # initial sort column, ":asc" (default) or ":desc"
 
 [[views."cert-manager.io/v1/certificates".columns]]
 name = "READY"
-path = "/status/conditions/0/status"
-type = "status"           # colors the row like other status columns
+path = "Ready"            # the condition *type* name, found wherever it is
+type = "condition"        # in the array — order isn't guaranteed by anything
 
 [[views."cert-manager.io/v1/certificates".columns]]
 name = "EXPIRES"
@@ -405,17 +423,25 @@ wide = true               # only shown in wide mode (`w`)
 
 `path` is a JSON Pointer (RFC 6901) into the object as the API serves it:
 `/metadata/…`, `/spec/…`, `/status/…`, and array indices like
-`/status/conditions/0/status`. The column `type` is `text` (default), `status`,
-`number`, `quantity` (`500m`, `1Gi`), or `time`. Typed columns sort by value,
-not by text. The optional `width` (for fixed columns) and `align`
-(`left`/`center`/`right`) tune the layout. By default, columns overlay the
-selected ones: a header that matches replaces it in place, and new columns go
-before AGE. sofka skips invalid entries and shows a warning in the app. They
-never stop the TUI.
+`/spec/ports/0/port`. The column `type` is `text` (default), `status`,
+`number`, `quantity` (`500m`, `1Gi`), `time`, or `condition`. Typed columns
+sort by value, not by text. For a `condition` column, `path` is the condition
+**type name** (`Ready`, `Available`, `Reconciling`…): sofka finds it in
+`status.conditions` by name — never by array index, whose order nothing
+guarantees — renders its `status` (`True`/`False`/`Unknown`), and colors the
+row like a `status` column. The optional `width` (for fixed columns) and
+`align` (`left`/`center`/`right`) tune the layout. By default, columns overlay
+the selected ones: a header that matches replaces it in place, and new columns
+go before AGE. sofka skips invalid entries and shows a warning in the app.
+They never stop the TUI.
 
 A custom resource that has no explicit view uses its CRD
 `additionalPrinterColumns` automatically (columns with `priority > 0` become
-wide-only). So most custom resources get useful columns with no configuration.
+wide-only). The canonical condition lookup
+(`.status.conditions[?(@.type=="Ready")].status` — how most CRDs express
+their READY printer column) becomes a `condition` column; other JSONPath
+filter or wildcard expressions aren't representable and those columns are
+skipped. So most custom resources get useful columns with no configuration.
 
 ### Thresholds
 

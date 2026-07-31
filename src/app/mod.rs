@@ -126,6 +126,8 @@ pub enum Mode {
     Snapshots,
     /// Cross-context fleet health dashboard (`:fleet`).
     Fleet,
+    /// Global fuzzy-find results picker (`:find <text>`).
+    Find,
 }
 
 /// A request for the run loop to suspend the TUI and run an interactive
@@ -417,6 +419,7 @@ enum PaletteAction {
     Info,
     Fleet,
     Rightsize,
+    Find,
     Diff,
     Events,
     PortForwards,
@@ -492,6 +495,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Notify,
         names: &["notify", "bell"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Find,
+        names: &["find", "fd"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -730,6 +737,38 @@ impl SortKey {
     }
 }
 
+/// Maximum previous object revisions retained for the session diff.
+const PREV_REVISIONS_MAX: usize = 256;
+
+/// Previous revisions of objects the watch saw change, so `:diff` can show
+/// previous → live for GitOps-managed objects (whose
+/// `last-applied-configuration` is empty — nothing `kubectl apply`s them).
+/// Bounded FIFO keyed by (kind plural, store key); survives view switches so
+/// drilling away and back keeps the baseline.
+#[derive(Default)]
+pub(super) struct PrevRevisions {
+    map: HashMap<(String, String), DynamicObject>,
+    order: VecDeque<(String, String)>,
+}
+
+impl PrevRevisions {
+    pub(super) fn insert(&mut self, kind: &str, key: &str, obj: DynamicObject) {
+        let k = (kind.to_string(), key.to_string());
+        if self.map.insert(k.clone(), obj).is_none() {
+            self.order.push_back(k);
+            while self.order.len() > PREV_REVISIONS_MAX {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.map.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    pub(super) fn get(&self, kind: &str, key: &str) -> Option<&DynamicObject> {
+        self.map.get(&(kind.to_string(), key.to_string()))
+    }
+}
+
 /// The active filter string alongside its parsed form, so the grammar is
 /// reparsed only when the string actually changes — never per frame or row.
 struct FilterCache {
@@ -940,6 +979,10 @@ pub struct App {
     /// context's summary lands.
     pub fleet_rows: Vec<crate::fleet::FleetRow>,
     pub fleet_state: ListState,
+    /// Global fuzzy-find (`:find`) results and picker cursor.
+    pub find_items: Vec<crate::store::FindItem>,
+    pub find_state: ListState,
+    pub find_query: String,
     /// The last bundle assembled by `:bundle`, previewed in the detail view and
     /// written to disk by `:bundle-save`: `(filename, text)`.
     pub pending_bundle: Option<(String, String)>,
@@ -1048,6 +1091,8 @@ pub struct App {
     /// A notification waiting for the main loop to ring the terminal bell and
     /// emit an OSC 9 desktop notification for.
     pub(super) pending_notify: Option<String>,
+    /// Previous object revisions for the session diff (`:diff` fallback).
+    pub(super) prev_revisions: PrevRevisions,
     /// The `(plural, row_key)` the timeline view is showing, and its cursor.
     pub timeline_target: Option<(String, String)>,
     pub timeline_state: ListState,
@@ -1171,6 +1216,9 @@ impl App {
             fleet_cfg: crate::config::FleetConfig::default(),
             fleet_rows: Vec::new(),
             fleet_state: ListState::default(),
+            find_items: Vec::new(),
+            find_state: ListState::default(),
+            find_query: String::new(),
             pending_bundle: None,
             journal: crate::journal::Journal::default(),
             watch_errors: 0,
@@ -1221,6 +1269,7 @@ impl App {
             timeline: crate::timeline::Timeline::default(),
             notify_tasks: HashMap::new(),
             pending_notify: None,
+            prev_revisions: PrevRevisions::default(),
             timeline_target: None,
             timeline_state: ListState::default(),
             confirm_label: String::new(),
@@ -1280,6 +1329,7 @@ mod dashboards;
 mod details;
 mod diagnostics;
 mod explain;
+mod find;
 mod fleet;
 mod gitops;
 mod guardrails;

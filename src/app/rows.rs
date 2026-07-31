@@ -154,9 +154,10 @@ impl App {
         let sort_header = self
             .sort_column
             .and_then(|i| headers.get(i).map(String::as_str));
-        // CPU/MEM sort by the live metrics snapshot, which moves without a new
-        // resourceVersion, so those keys can never be cached.
-        let volatile_sort = matches!(sort_header, Some("CPU" | "MEM"));
+        // CPU/MEM (and the node capacity percentages) sort by the live metrics
+        // snapshot, which moves without a new resourceVersion, so those keys
+        // can never be cached.
+        let volatile_sort = matches!(sort_header, Some("CPU" | "MEM" | "%CPU" | "%MEM"));
         // The aggregated Helm release list (`helm list` semantics) shows only
         // the latest revision per release; `helmhistory` (one release's full
         // history) shows every revision, so it skips this.
@@ -318,7 +319,18 @@ impl App {
             h.push("CPU".into());
             h.push("MEM".into());
         }
+        if self.node_capacity_columns() {
+            h.push("%CPU".into());
+            h.push("%MEM".into());
+        }
         h
+    }
+
+    /// Nodes get usage as a percentage of `status.allocatable` next to the
+    /// absolute CPU/MEM — "how full is this node" is the number a nodes view
+    /// is opened for.
+    pub fn node_capacity_columns(&self) -> bool {
+        self.kind_plural == "nodes"
     }
 
     pub(crate) fn view_spec(&self) -> &crate::columns::ViewSpec {
@@ -445,6 +457,23 @@ impl App {
             "AGE" => SortKey::Num(crate::columns::age_secs(o).unwrap_or(i64::MAX) as f64),
             "CPU" => SortKey::Num(self.metrics_for(o).0 as f64),
             "MEM" => SortKey::Num(self.metrics_for(o).1 as f64),
+            // Unknown allocatable sorts below every real percentage.
+            "%CPU" if self.node_capacity_columns() => SortKey::Num(
+                crate::columns::usage_pct(
+                    self.metrics_for(o).0,
+                    crate::columns::node_allocatable(o).0,
+                )
+                .map(|p| p as f64)
+                .unwrap_or(-1.0),
+            ),
+            "%MEM" if self.node_capacity_columns() => SortKey::Num(
+                crate::columns::usage_pct(
+                    self.metrics_for(o).1,
+                    crate::columns::node_allocatable(o).1,
+                )
+                .map(|p| p as f64)
+                .unwrap_or(-1.0),
+            ),
             // Humanized time cells ("5d23h") must sort by the underlying
             // timestamp, never the rendered string. Negated epoch seconds so
             // ascending = most recent first, matching AGE; unknowns last.

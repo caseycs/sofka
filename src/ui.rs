@@ -151,6 +151,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Timeline => draw_timeline(frame, app, chunks[1]),
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
         Mode::Fleet => draw_fleet(frame, app, chunks[1]),
+        Mode::Find => draw_find(frame, app, chunks[1]),
         _ => draw_table(frame, app, chunks[1]),
     }
 
@@ -460,6 +461,9 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
     if app.flux_suspendable() {
         lines.push(hint_line(&[("t", "flux menu")]));
     }
+    if app.kind_plural == "helmreleases" {
+        lines.push(hint_line(&[("⏎", "helm history")]));
+    }
     if app.cronjob_kind() {
         lines.push(hint_line(&[("t", "trigger/suspend")]));
     }
@@ -532,6 +536,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let restarts_idx = headers.iter().position(|h| h == "RESTARTS");
     let cpu_idx = headers.iter().position(|h| h == "CPU");
     let mem_idx = headers.iter().position(|h| h == "MEM");
+    let pct_cpu_idx = headers.iter().position(|h| h == "%CPU");
+    let pct_mem_idx = headers.iter().position(|h| h == "%MEM");
 
     let count = app.row_count();
     let visible_rows = area.height.saturating_sub(3).max(1) as usize;
@@ -585,6 +591,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
             let mut metrics_raw = None;
+            let mut node_pcts: (Option<i64>, Option<i64>) = (None, None);
             if metrics_cols {
                 let name = obj.metadata.name.as_deref().unwrap_or_default();
                 let key = if pods_view {
@@ -600,6 +607,15 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 metrics_raw = Some((cpu, mem));
                 cells.push(TableCellText::Owned(columns::fmt_cpu(cpu)));
                 cells.push(TableCellText::Owned(columns::fmt_mem(mem)));
+                if app.node_capacity_columns() {
+                    let (alloc_cpu, alloc_mem) = columns::node_allocatable(obj);
+                    node_pcts = (
+                        columns::usage_pct(cpu, alloc_cpu),
+                        columns::usage_pct(mem, alloc_mem),
+                    );
+                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.0)));
+                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.1)));
+                }
             }
             // Combined colorer: the whole row takes a k9s-style status tint
             // (errors red, pending peach, completed/terminating dimmed, healthy
@@ -665,6 +681,12 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                             .map(theme::severity_fg)
                             .unwrap_or(row_color);
                         c.into_cell_aligned(align).style(Style::default().fg(color))
+                    } else if Some(i) == pct_cpu_idx {
+                        let color = util_color(node_pcts.0, thresholds.utilization);
+                        c.into_cell_aligned(align).style(Style::default().fg(color))
+                    } else if Some(i) == pct_mem_idx {
+                        let color = util_color(node_pcts.1, thresholds.utilization);
+                        c.into_cell_aligned(align).style(Style::default().fg(color))
                     } else {
                         c.into_cell_aligned(align)
                             .style(Style::default().fg(row_color))
@@ -695,6 +717,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 "NODE" | "CLAIM" | "VOLUME" | "HOSTS" => Constraint::Fill(1),
                 "AGE" => Constraint::Length(7),
                 "CPU" | "MEM" => Constraint::Length(8),
+                "%CPU" | "%MEM" => Constraint::Length(5),
                 // Wide enough for the long pod reasons (ContainerCreating,
                 // CrashLoopBackOff, ImagePullBackOff…) so status is never clipped.
                 "STATUS" => Constraint::Length(19),
@@ -2108,6 +2131,36 @@ fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn draw_find(frame: &mut Frame, app: &mut App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .find_items
+        .iter()
+        .map(|it| {
+            let location = if it.ns.is_empty() {
+                it.name.clone()
+            } else {
+                format!("{}/{}", it.ns, it.name)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<22} ", it.plural), theme::dim()),
+                Span::styled(location, Style::default().fg(theme::text())),
+            ]))
+        })
+        .collect();
+    let title = format!(
+        " Find '{}' [{}]  (⏎ open · esc close) ",
+        app.find_query,
+        app.find_items.len()
+    );
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.find_state,
+    );
+}
+
 fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
     let items: Vec<ListItem> = app
         .skin_list
@@ -2979,6 +3032,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Mode::Fleet => Line::from(Span::styled(
             "  j/k: move   ⏎: switch to context   r: refresh   esc: back",
+            theme::dim(),
+        )),
+        Mode::Find => Line::from(Span::styled(
+            "  j/k: move   ⏎: open the object   esc: close",
             theme::dim(),
         )),
         _ => {
