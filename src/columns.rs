@@ -352,7 +352,10 @@ fn spec_curated(c: &Column) -> SpecColumn {
 fn spec_user(uc: &crate::views::UserColumn) -> SpecColumn {
     SpecColumn {
         header: uc.header.clone(),
-        is_status: uc.kind == crate::views::ColumnKind::Status,
+        is_status: matches!(
+            uc.kind,
+            crate::views::ColumnKind::Status | crate::views::ColumnKind::Condition
+        ),
         wide: uc.wide,
         source: SpecSource::User(uc.clone()),
     }
