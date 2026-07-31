@@ -424,6 +424,18 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
     Ok(())
 }
 
+/// Ring the terminal bell and emit an OSC 9 desktop notification for a
+/// `:notify` event. OSC 9 pops a system notification on terminals that
+/// support it (iTerm2, kitty, WezTerm, foot…) and is ignored by the rest;
+/// control characters are stripped so log content can't smuggle sequences.
+fn ring_notification(text: &str) {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::style::Print(format!("\x07\x1b]9;sofka: {clean}\x1b\\"))
+    );
+}
+
 /// Leave the alt-screen/raw-mode TUI, run an interactive command with inherited
 /// stdio (kubectl exec/edit/port-forward), then restore the TUI. Toggles the
 /// terminal modes directly rather than `ratatui::restore()`/`init()`: `init()`
@@ -575,6 +587,9 @@ async fn run(
                 // Batch any other queued updates before the next redraw.
                 while let Ok(m) = rx.try_recv() {
                     app.handle_msg(m);
+                }
+                if let Some(text) = app.take_notification() {
+                    ring_notification(&text);
                 }
                 dirty = true;
             }

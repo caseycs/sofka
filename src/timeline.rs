@@ -189,7 +189,14 @@ pub fn clock(at: i64) -> String {
 
 // ----- transition detection (pure) ----------------------------------------
 
-fn transitions(prev: &DynamicObject, new: &DynamicObject, plural: &str) -> Vec<(Level, String)> {
+/// Pure transition detection between two revisions of one object — what the
+/// timeline records, and what `:notify` reports. `pub(crate)` so the notify
+/// watch shares exactly the timeline's definition of "a state change".
+pub(crate) fn transitions(
+    prev: &DynamicObject,
+    new: &DynamicObject,
+    plural: &str,
+) -> Vec<(Level, String)> {
     let mut out = Vec::new();
 
     // Spec (generation) change — the rollout trigger.
