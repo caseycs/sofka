@@ -1,0 +1,106 @@
+use super::*;
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+/// Where the table landed on screen last frame, for mouse hit-testing.
+/// Recorded by `draw_table`; coordinates are terminal cells.
+#[derive(Clone, Default)]
+pub(crate) struct TableHit {
+    /// The header row's y.
+    pub header_y: u16,
+    /// First data row's y and how many rows are visible.
+    pub rows_y: u16,
+    pub rows_h: u16,
+    /// Inner x extent (inside the borders).
+    pub x_min: u16,
+    pub x_max: u16,
+    /// Per-column `[start, end)` x ranges, aligned with `display_headers()`.
+    pub cols: Vec<(u16, u16)>,
+}
+
+impl App {
+    /// Record the table geometry the renderer just used, so clicks can be
+    /// mapped back to rows and header columns. `cols` are `[start, end)` x
+    /// ranges aligned with `display_headers()`.
+    pub fn record_table_hit(
+        &self,
+        header_y: u16,
+        rows_y: u16,
+        rows_h: u16,
+        x_min: u16,
+        x_max: u16,
+        cols: Vec<(u16, u16)>,
+    ) {
+        *self.table_hit.borrow_mut() = Some(TableHit {
+            header_y,
+            rows_y,
+            rows_h,
+            x_min,
+            x_max,
+            cols,
+        });
+    }
+
+    /// Route a mouse event. The wheel is synthesized into the mode's own
+    /// up/down keys, so scrolling works identically in every view (table,
+    /// logs, documents, pickers) without a second navigation code path;
+    /// clicks are table-specific (select a row, sort by a header).
+    pub fn handle_mouse(&mut self, m: MouseEvent) -> Result<()> {
+        match m.kind {
+            MouseEventKind::ScrollUp => self.wheel(KeyCode::Up),
+            MouseEventKind::ScrollDown => self.wheel(KeyCode::Down),
+            MouseEventKind::Down(MouseButton::Left) if self.mode == Mode::Table => {
+                self.table_click(m.column, m.row);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// One wheel notch = three steps, like most list UIs.
+    fn wheel(&mut self, code: KeyCode) -> Result<()> {
+        for _ in 0..3 {
+            self.handle_key(KeyEvent::new(code, KeyModifiers::NONE))?;
+        }
+        Ok(())
+    }
+
+    fn table_click(&mut self, x: u16, y: u16) {
+        let Some(hit) = self.table_hit.borrow().clone() else {
+            return;
+        };
+        if x < hit.x_min || x >= hit.x_max {
+            return;
+        }
+        // Header row: sort by the clicked column (again = flip direction).
+        if y == hit.header_y {
+            let Some(idx) = hit.cols.iter().position(|(s, e)| x >= *s && x < *e) else {
+                return;
+            };
+            if self.sort_column == Some(idx) {
+                self.sort_desc = !self.sort_desc;
+            } else {
+                self.sort_column = Some(idx);
+                self.sort_desc = false;
+            }
+            self.invalidate_rows();
+            let label = self.display_headers().get(idx).cloned().unwrap_or_default();
+            self.flash = format!(
+                "sort by {label} {}",
+                if self.sort_desc {
+                    "↓ desc"
+                } else {
+                    "↑ asc"
+                }
+            );
+            self.flash_err = false;
+            return;
+        }
+        // Data rows: select what was clicked.
+        if y >= hit.rows_y && y < hit.rows_y + hit.rows_h {
+            let idx = self.table_state.offset() + (y - hit.rows_y) as usize;
+            if idx < self.row_count() {
+                self.table_state.select(Some(idx));
+            }
+        }
+    }
+}

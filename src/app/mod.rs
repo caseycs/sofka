@@ -1035,6 +1035,9 @@ pub struct App {
     pub gitops_source: Option<DynamicObject>,
     /// Session-local per-object state-change history, fed by the table watch.
     pub timeline: crate::timeline::Timeline,
+    /// Table geometry from the last frame, for mouse hit-testing. A RefCell
+    /// because the renderer records it while the frame still borrows rows.
+    pub(super) table_hit: RefCell<Option<mouse::TableHit>>,
     /// The `(plural, row_key)` the timeline view is showing, and its cursor.
     pub timeline_target: Option<(String, String)>,
     pub timeline_state: ListState,
@@ -1206,6 +1209,7 @@ impl App {
             gitops_title: String::new(),
             gitops_source: None,
             timeline: crate::timeline::Timeline::default(),
+            table_hit: RefCell::new(None),
             timeline_target: None,
             timeline_state: ListState::default(),
             confirm_label: String::new(),
@@ -1273,6 +1277,7 @@ mod input;
 mod journal;
 mod lifecycle;
 mod logs;
+mod mouse;
 mod navigation;
 mod overlays;
 mod pickers;

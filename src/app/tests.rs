@@ -406,6 +406,72 @@ async fn metrics_error_is_stored_and_cleared_by_next_success() {
 }
 
 #[tokio::test]
+async fn mouse_click_selects_row_header_click_sorts_wheel_moves() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let pod = |name: &str, restarts: i64| {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "default"},
+            "status": {"phase": "Running", "containerStatuses":
+                [{"ready": true, "restartCount": restarts, "state": {"running": {}}}]}
+        })
+    };
+    apply(&mut app, pod("a", 5));
+    apply(&mut app, pod("b", 1));
+    app.table_state.select(Some(0));
+
+    // A frame must render first — that's what records the hit geometry.
+    let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let hit = app.table_hit.borrow().clone().expect("geometry recorded");
+
+    let click = |column: u16, row: u16| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // Click the second data row → it becomes the selection.
+    app.handle_mouse(click(hit.x_min + 3, hit.rows_y + 1))
+        .unwrap();
+    assert_eq!(app.table_state.selected(), Some(1));
+
+    // Click the RESTARTS header → sort by it; again → flip direction.
+    let ridx = app
+        .display_headers()
+        .iter()
+        .position(|h| h == "RESTARTS")
+        .unwrap();
+    let (sx, _) = hit.cols[ridx];
+    app.handle_mouse(click(sx, hit.header_y)).unwrap();
+    assert_eq!(app.sort_column, Some(ridx));
+    assert!(!app.sort_desc);
+    app.handle_mouse(click(sx, hit.header_y)).unwrap();
+    assert!(app.sort_desc);
+
+    // Wheel scroll maps to the mode's own up/down keys (3 per notch).
+    app.table_state.select(Some(0));
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    })
+    .unwrap();
+    assert_eq!(app.table_state.selected(), Some(1), "clamped at the end");
+
+    // A click outside the table (e.g. the header panel) is ignored.
+    app.handle_mouse(click(0, 0)).unwrap();
+    assert_eq!(app.table_state.selected(), Some(1));
+}
+
+#[tokio::test]
 async fn panic_msg_flashes_regardless_of_generation() {
     let (mut app, _rx) = test_app();
     app.generation = 7; // a Panic has no generation tag and must never be dropped as stale
