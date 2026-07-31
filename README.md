@@ -156,6 +156,12 @@ numbers.
   label and field selectors (the API server evaluates them on ⏎), and typed
   column comparisons (`status=CrashLoopBackOff`, `cpu>500m`, `memory>1Gi`,
   `restarts>=5`, `age<2h`). Terms with a space between them use AND.
+- **Global fuzzy find** (`:find <text>`) — search object names across the
+  common kinds (workloads, pods, services, config, ingresses, jobs, storage,
+  nodes, namespaces, Flux objects) in every namespace at once, concurrently.
+  Results rank by fuzzy score; `⏎` jumps straight to the object. When a kind
+  can't be listed (RBAC), the result says it's incomplete instead of
+  pretending otherwise.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
 - **Pulse dashboard** (`:pulse`) — cluster-health tiles. sofka refreshes them
   every 5 seconds.
