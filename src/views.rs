@@ -31,6 +31,11 @@ pub enum ColumnKind {
     /// RFC 3339 timestamp — rendered as compact elapsed time (`3d4h`, or
     /// `in 30d` for the future), sorted by the timestamp.
     Time,
+    /// A `status.conditions` entry looked up **by its `type` name** (held in
+    /// [`UserColumn::pointer`]) instead of a fragile array index — condition
+    /// order isn't guaranteed by anything. Renders the condition's `status`
+    /// (`True`/`False`/`Unknown`) and drives row coloring like `Status`.
+    Condition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +50,8 @@ pub enum Align {
 pub struct UserColumn {
     /// Header, uppercased for display.
     pub header: String,
-    /// JSON Pointer into the object.
+    /// JSON Pointer into the object — except for [`ColumnKind::Condition`],
+    /// where it's the condition `type` name (`Ready`, `Available`, …).
     pub pointer: String,
     pub kind: ColumnKind,
     /// Shown only in wide mode (`w`).
@@ -86,7 +92,33 @@ pub fn compile(
                 warnings.push(format!("views.\"{key}\": column with empty name skipped"));
                 continue;
             }
-            if !c.path.starts_with('/') {
+            let kind = match c.kind.as_deref() {
+                None | Some("text") => ColumnKind::Text,
+                Some("status") => ColumnKind::Status,
+                Some("number") => ColumnKind::Number,
+                Some("quantity") => ColumnKind::Quantity,
+                Some("time") => ColumnKind::Time,
+                Some("condition") => ColumnKind::Condition,
+                Some(other) => {
+                    warnings.push(format!(
+                        "views.\"{key}\": column {header}: unknown type '{other}' \
+                         (expected text/status/number/quantity/time/condition); using text"
+                    ));
+                    ColumnKind::Text
+                }
+            };
+            // A condition column's path is the condition *type* name, not a
+            // pointer — conditions are found by name because their array
+            // order isn't guaranteed by anything.
+            if kind == ColumnKind::Condition {
+                if c.path.trim().is_empty() || c.path.contains('/') {
+                    warnings.push(format!(
+                        "views.\"{key}\": column {header}: a condition column's path is the \
+                         condition type name (e.g. \"Ready\"), not a JSON Pointer; column skipped"
+                    ));
+                    continue;
+                }
+            } else if !c.path.starts_with('/') {
                 warnings.push(format!(
                     "views.\"{key}\": column {header}: path '{}' is not a JSON Pointer \
                      (must start with '/', e.g. /status/phase); column skipped",
@@ -94,20 +126,6 @@ pub fn compile(
                 ));
                 continue;
             }
-            let kind = match c.kind.as_deref() {
-                None | Some("text") => ColumnKind::Text,
-                Some("status") => ColumnKind::Status,
-                Some("number") => ColumnKind::Number,
-                Some("quantity") => ColumnKind::Quantity,
-                Some("time") => ColumnKind::Time,
-                Some(other) => {
-                    warnings.push(format!(
-                        "views.\"{key}\": column {header}: unknown type '{other}' \
-                         (expected text/status/number/quantity/time); using text"
-                    ));
-                    ColumnKind::Text
-                }
-            };
             let align = match c.align.as_deref() {
                 None => None,
                 Some("left") => Some(Align::Left),
@@ -123,7 +141,7 @@ pub fn compile(
             };
             columns.push(UserColumn {
                 header,
-                pointer: c.path.clone(),
+                pointer: c.path.trim().to_string(),
                 kind,
                 wide: c.wide,
                 width: c.width,
@@ -219,6 +237,9 @@ pub fn extract(obj: &DynamicObject, pointer: &str) -> Option<Value> {
 
 /// Render one custom column's cell. Missing values read as `<none>`.
 pub fn render_cell(obj: &DynamicObject, col: &UserColumn) -> String {
+    if col.kind == ColumnKind::Condition {
+        return condition_status(obj, &col.pointer).unwrap_or_else(|| "<none>".into());
+    }
     let Some(v) = extract(obj, &col.pointer) else {
         return "<none>".into();
     };
@@ -226,6 +247,19 @@ pub fn render_cell(obj: &DynamicObject, col: &UserColumn) -> String {
         ColumnKind::Time => render_time(&v),
         _ => render_value(&v),
     }
+}
+
+/// The `status` of the `status.conditions` entry whose `type` is `cond_type`,
+/// found by name — array order isn't guaranteed by anything.
+pub fn condition_status(obj: &DynamicObject, cond_type: &str) -> Option<String> {
+    obj.data
+        .pointer("/status/conditions")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("type").and_then(Value::as_str) == Some(cond_type))?
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn render_value(v: &Value) -> String {
@@ -262,6 +296,13 @@ fn render_time(v: &Value) -> String {
 /// sort by value (missing/unparseable last in ascending order), text sorts
 /// case-insensitively.
 pub fn sort_value(obj: &DynamicObject, col: &UserColumn) -> SortValue {
+    if col.kind == ColumnKind::Condition {
+        return SortValue::Text(
+            condition_status(obj, &col.pointer)
+                .unwrap_or_default()
+                .to_lowercase(),
+        );
+    }
     let v = extract(obj, &col.pointer);
     match col.kind {
         ColumnKind::Number => SortValue::Num(v.as_ref().and_then(number_of).unwrap_or(f64::MAX)),
@@ -277,7 +318,9 @@ pub fn sort_value(obj: &DynamicObject, col: &UserColumn) -> SortValue {
                 .map(|ts| (Timestamp::now().as_second() - ts.as_second()) as f64)
                 .unwrap_or(f64::MAX),
         ),
-        ColumnKind::Text | ColumnKind::Status => SortValue::Text(
+        // Condition is handled above (its "pointer" is a condition name, not
+        // something `extract` understands).
+        ColumnKind::Text | ColumnKind::Status | ColumnKind::Condition => SortValue::Text(
             v.as_ref()
                 .map(render_value)
                 .unwrap_or_default()
@@ -345,13 +388,27 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
         .iter()
         .filter_map(|c| {
             let name = c.get("name").and_then(Value::as_str)?;
-            let pointer = json_path_to_pointer(c.get("jsonPath").and_then(Value::as_str)?)?;
+            let json_path = c.get("jsonPath").and_then(Value::as_str)?;
+            let wide = c.get("priority").and_then(Value::as_i64).unwrap_or(0) > 0;
+            // The single most common filter expression —
+            // `.status.conditions[?(@.type=="Ready")].status` — used to be
+            // dropped as untranslatable. It's a condition lookup by name.
+            if let Some(cond) = condition_json_path(json_path) {
+                return Some(UserColumn {
+                    header: name.to_uppercase(),
+                    pointer: cond,
+                    kind: ColumnKind::Condition,
+                    wide,
+                    width: None,
+                    align: None,
+                });
+            }
+            let pointer = json_path_to_pointer(json_path)?;
             let kind = match c.get("type").and_then(Value::as_str) {
                 Some("integer" | "number") => ColumnKind::Number,
                 Some("date") => ColumnKind::Time,
                 _ => ColumnKind::Text,
             };
-            let wide = c.get("priority").and_then(Value::as_i64).unwrap_or(0) > 0;
             Some(UserColumn {
                 header: name.to_uppercase(),
                 pointer,
@@ -371,6 +428,28 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
             replace: false,
         })
     }
+}
+
+/// Recognize the canonical condition-lookup JSONPath —
+/// `.status.conditions[?(@.type=="Ready")].status` (single or double quotes)
+/// — and return the condition type name. Anything else is `None`.
+pub fn condition_json_path(path: &str) -> Option<String> {
+    let p = path.trim();
+    let p = p
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or(p);
+    let rest = p.strip_prefix(".status.conditions[?(@.type==")?;
+    let (quoted, tail) = rest.split_once(")]")?;
+    if tail != ".status" {
+        return None;
+    }
+    let t = quoted.trim();
+    let t = t
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| t.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))?;
+    (!t.is_empty() && !t.contains(['"', '\''])).then(|| t.to_string())
 }
 
 /// Convert a simple kubectl JSONPath (`.status.phase`,
@@ -450,6 +529,72 @@ mod tests {
     fn compile_toml(text: &str) -> (HashMap<String, View>, Vec<String>) {
         let cfg: crate::config::Config = toml::from_str(text).unwrap();
         compile(&cfg.views)
+    }
+
+    #[test]
+    fn condition_columns_look_up_by_type_name_not_index() {
+        let (views, warnings) = compile_toml(
+            r#"
+            [views."cert-manager.io/v1/certificates"]
+            [[views."cert-manager.io/v1/certificates".columns]]
+            name = "READY"
+            path = "Ready"
+            type = "condition"
+
+            [[views."cert-manager.io/v1/certificates".columns]]
+            name = "BAD"
+            path = "/status/conditions/0/status"
+            type = "condition"
+            "#,
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("condition type name"), "{warnings:?}");
+        let view = &views["cert-manager.io/v1/certificates"];
+        assert_eq!(view.columns.len(), 1);
+        let col = &view.columns[0];
+        assert_eq!(col.kind, ColumnKind::Condition);
+        assert_eq!(col.pointer, "Ready");
+
+        // Lookup is by condition type, regardless of array order.
+        let obj: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+            "metadata": {"name": "tls"},
+            "status": {"conditions": [
+                {"type": "Issuing", "status": "True"},
+                {"type": "Ready", "status": "False"},
+            ]}
+        }))
+        .unwrap();
+        assert_eq!(render_cell(&obj, col), "False");
+        match sort_value(&obj, col) {
+            SortValue::Text(t) => assert_eq!(t, "false"),
+            SortValue::Num(_) => panic!("conditions sort as text"),
+        }
+        // A missing condition reads as <none>, not a panic or a lie.
+        let bare: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+            "metadata": {"name": "new"}
+        }))
+        .unwrap();
+        assert_eq!(render_cell(&bare, col), "<none>");
+    }
+
+    #[test]
+    fn condition_json_path_recognizes_the_canonical_filter() {
+        assert_eq!(
+            condition_json_path(r#".status.conditions[?(@.type=="Ready")].status"#),
+            Some("Ready".into())
+        );
+        assert_eq!(
+            condition_json_path(".status.conditions[?(@.type=='Available')].status"),
+            Some("Available".into())
+        );
+        // Anything that isn't the canonical status lookup stays untranslated.
+        assert_eq!(
+            condition_json_path(r#".status.conditions[?(@.type=="Ready")].message"#),
+            None
+        );
+        assert_eq!(condition_json_path(".status.phase"), None);
     }
 
     #[test]
@@ -708,8 +853,10 @@ mod tests {
                         {"name": "Age", "type": "date", "jsonPath": ".metadata.creationTimestamp"},
                         {"name": "Detail", "type": "string", "priority": 1,
                          "jsonPath": ".status.message"},
+                        {"name": "Ready", "type": "string",
+                         "jsonPath": ".status.conditions[?(@.type=='Ready')].status"},
                         {"name": "Skipped", "type": "string",
-                         "jsonPath": ".status.conditions[?(@.type=='Ready')].status"}
+                         "jsonPath": ".status.items[*].name"}
                      ]}
                 ]
             }
@@ -717,12 +864,15 @@ mod tests {
         let view = printer_columns_view(&crd, "v1").unwrap();
         assert!(!view.replace);
         let headers: Vec<&str> = view.columns.iter().map(|c| c.header.as_str()).collect();
-        // The filter-expression column is skipped, the rest map over.
-        assert_eq!(headers, vec!["PHASE", "REPLICAS", "AGE", "DETAIL"]);
+        // The condition filter translates to a by-name condition lookup; only
+        // the genuinely untranslatable wildcard column is skipped.
+        assert_eq!(headers, vec!["PHASE", "REPLICAS", "AGE", "DETAIL", "READY"]);
         assert_eq!(view.columns[0].kind, ColumnKind::Text);
         assert_eq!(view.columns[1].kind, ColumnKind::Number);
         assert_eq!(view.columns[2].kind, ColumnKind::Time);
         assert!(view.columns[3].wide, "priority>0 becomes wide-only");
+        assert_eq!(view.columns[4].kind, ColumnKind::Condition);
+        assert_eq!(view.columns[4].pointer, "Ready");
         // The version without printer columns yields nothing.
         assert!(printer_columns_view(&crd, "v1alpha1").is_none());
         assert!(printer_columns_view(&crd, "v9").is_none());

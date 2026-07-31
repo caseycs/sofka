@@ -75,6 +75,7 @@ impl App {
             Mode::Skins => self.key_skins(key),
             Mode::Snapshots => self.key_snapshots(key),
             Mode::Fleet => self.key_fleet(key),
+            Mode::Find => self.key_find(key),
         }
         Ok(())
     }
@@ -549,6 +550,7 @@ impl App {
             PaletteAction::Info => self.open_info(),
             PaletteAction::Fleet => self.open_fleet(),
             PaletteAction::Rightsize => self.open_rightsize(),
+            PaletteAction::Find => self.flash_warn("usage: :find <text>"),
             PaletteAction::Diff => self.open_diff(),
             PaletteAction::Events => self.open_events(),
             PaletteAction::PortForwards => self.open_port_forwards(),
@@ -590,6 +592,19 @@ impl App {
         {
             let rest = parts.collect::<Vec<_>>().join(" ");
             self.take_snapshot(&rest);
+            return true;
+        }
+        // `:find <text>` sweeps object names across the common kinds.
+        let mut parts = cmd.split_whitespace();
+        if let Some(first) = parts.next()
+            && matches!(first.to_ascii_lowercase().as_str(), "find" | "fd")
+        {
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            if rest.is_empty() {
+                self.flash_warn("usage: :find <text>");
+            } else {
+                self.start_find(&rest);
+            }
             return true;
         }
         // `:can-i <verb> <resource> [ns]` checks one action; bare `:can-i`

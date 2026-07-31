@@ -559,9 +559,17 @@ impl App {
                 obj,
             } if generation == self.generation => {
                 // Record state changes against the previous version before it's
-                // overwritten (session-local timeline).
-                self.timeline
-                    .observe(&self.kind_plural, &key, self.store.latest(&key), &obj);
+                // overwritten (session-local timeline), and keep that version
+                // for the session diff (`:diff` on objects with no
+                // last-applied annotation).
+                let prev = self.store.latest(&key);
+                self.timeline.observe(&self.kind_plural, &key, prev, &obj);
+                if let Some(prev) = prev
+                    && prev.metadata.resource_version != obj.metadata.resource_version
+                {
+                    self.prev_revisions
+                        .insert(&self.kind_plural, &key, prev.clone());
+                }
                 self.store.apply(key.clone(), *obj);
                 self.invalidate_row(&key);
             }
@@ -615,7 +623,7 @@ impl App {
                         let headers = self.display_headers();
                         headers.get(i).cloned()
                     })
-                    .is_some_and(|h| matches!(h.as_str(), "CPU" | "MEM"));
+                    .is_some_and(|h| matches!(h.as_str(), "CPU" | "MEM" | "%CPU" | "%MEM"));
                 if !data.is_empty() || !containers.is_empty() {
                     self.metrics_seen = true;
                 }
@@ -639,6 +647,24 @@ impl App {
                 if for_current {
                     self.refresh_view_spec();
                 }
+            }
+            Msg::FindResults {
+                generation,
+                query,
+                items,
+                warn,
+            } if generation == self.generation => {
+                if let Some(w) = warn {
+                    self.flash = format!("find is incomplete — {w}");
+                    self.flash_err = true;
+                } else {
+                    self.flash = format!("{} hit(s) for '{query}'", items.len());
+                    self.flash_err = false;
+                }
+                self.find_query = query;
+                self.find_items = items;
+                self.find_state
+                    .select((!self.find_items.is_empty()).then_some(0));
             }
             Msg::PulseData { generation, data } if generation == self.generation => {
                 if let Some(w) = &data.warn {

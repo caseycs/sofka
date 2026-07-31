@@ -365,6 +365,88 @@ async fn skin_palette_command_opens_picker() {
 }
 
 #[tokio::test]
+async fn diff_falls_back_to_session_previous_revision() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    let dep = |rv: &str, replicas: i64| {
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": rv},
+            "spec": {"replicas": replicas}
+        })
+    };
+    apply(&mut app, dep("1", 1));
+    apply(&mut app, dep("2", 3));
+    app.table_state.select(Some(0));
+    app.open_diff();
+    assert_eq!(app.mode, Mode::Diff);
+    assert!(app.detail.title.contains("session"), "{}", app.detail.title);
+    assert!(
+        app.detail
+            .lines
+            .iter()
+            .any(|l| l.starts_with('-') && l.contains("replicas: 1"))
+    );
+    assert!(
+        app.detail
+            .lines
+            .iter()
+            .any(|l| l.starts_with('+') && l.contains("replicas: 3"))
+    );
+    // resourceVersion churn must not appear as diff noise.
+    assert!(
+        !app.detail
+            .lines
+            .iter()
+            .any(|l| l.contains("resourceVersion"))
+    );
+}
+
+#[tokio::test]
+async fn diff_without_any_baseline_warns() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"replicas": 1}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.open_diff();
+    assert_ne!(app.mode, Mode::Diff);
+    assert!(app.flash.contains("nothing to diff"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn diff_prefers_last_applied_when_present() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    let last = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"default"},"spec":{"replicas":2}}"#;
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {
+                "name": "web", "namespace": "default", "resourceVersion": "1",
+                "annotations": {"kubectl.kubernetes.io/last-applied-configuration": last}
+            },
+            "spec": {"replicas": 3}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.open_diff();
+    assert_eq!(app.mode, Mode::Diff);
+    assert!(
+        app.detail.title.contains("last-applied"),
+        "{}",
+        app.detail.title
+    );
+}
+
+#[tokio::test]
 async fn pulse_and_xray_warns_surface_as_flash() {
     let (mut app, _rx) = test_app();
     let data = crate::store::Pulse {
@@ -469,6 +551,55 @@ async fn mouse_click_selects_row_header_click_sorts_wheel_moves() {
     // A click outside the table (e.g. the header panel) is ignored.
     app.handle_mouse(click(0, 0)).unwrap();
     assert_eq!(app.table_state.selected(), Some(1));
+}
+
+#[tokio::test]
+async fn find_opens_picker_and_enter_navigates_to_the_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+
+    // Bare :find is a usage hint, not a search.
+    assert!(app.run_palette_command("find"));
+    assert!(app.flash.contains("usage"), "{}", app.flash);
+
+    assert!(app.run_palette_command("find web"));
+    assert_eq!(app.mode, Mode::Find);
+    assert_eq!(app.find_query, "web");
+
+    app.handle_msg(Msg::FindResults {
+        generation: app.generation,
+        query: "web".into(),
+        items: vec![
+            crate::store::FindItem {
+                plural: "pods".into(),
+                ns: "default".into(),
+                name: "web-1".into(),
+            },
+            crate::store::FindItem {
+                plural: "deployments".into(),
+                ns: "default".into(),
+                name: "web".into(),
+            },
+        ],
+        warn: None,
+    });
+    assert_eq!(app.find_state.selected(), Some(0));
+    assert!(app.flash.contains("2 hit(s)"), "{}", app.flash);
+
+    app.key_find(press(KeyCode::Enter));
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=web-1"));
+
+    // Incomplete sweeps say so instead of pretending the list is exhaustive.
+    app.handle_msg(Msg::FindResults {
+        generation: app.generation,
+        query: "web".into(),
+        items: Vec::new(),
+        warn: Some("2 kind(s) could not be listed".into()),
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("incomplete"), "{}", app.flash);
 }
 
 #[tokio::test]
@@ -1716,6 +1847,65 @@ async fn metrics_update_invalidates_metric_sorted_rows() {
     assert_eq!(names, ["b", "a"]);
 }
 
+#[tokio::test]
+async fn node_capacity_percent_columns_render_and_sort() {
+    let (mut app, _rx) = test_app();
+    // Pods must not grow the node columns.
+    app.switch_kind("pods");
+    assert!(!app.display_headers().contains(&"%CPU".to_string()));
+
+    app.switch_kind("nodes");
+    let node = |name: &str, cpu: &str| {
+        json!({"apiVersion": "v1", "kind": "Node",
+               "metadata": {"name": name, "resourceVersion": "1"},
+               "status": {"allocatable": {"cpu": cpu, "memory": "8Gi"}}})
+    };
+    apply(&mut app, node("big", "4"));
+    apply(&mut app, node("small", "2"));
+
+    let headers = app.display_headers();
+    assert!(headers.contains(&"%CPU".to_string()), "{headers:?}");
+    assert!(headers.contains(&"%MEM".to_string()), "{headers:?}");
+
+    // Same absolute usage, different allocatable → percent sort differs from
+    // absolute sort: 1000m is 25% of big (4 cores) but 50% of small (2).
+    app.handle_msg(Msg::Metrics {
+        generation: app.generation,
+        data: HashMap::from([
+            ("big".to_string(), (1000, 0)),
+            ("small".to_string(), (1000, 0)),
+        ]),
+        containers: HashMap::new(),
+    });
+    let pct_idx = app
+        .display_headers()
+        .iter()
+        .position(|h| *h == "%CPU")
+        .unwrap();
+    app.sort_column = Some(pct_idx);
+    app.sort_desc = true;
+    app.invalidate_rows();
+    let names: Vec<String> = app
+        .rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["small", "big"]);
+}
+
+#[test]
+fn node_allocatable_reads_status_quantities() {
+    let node = obj(json!({"apiVersion": "v1", "kind": "Node",
+        "metadata": {"name": "n"},
+        "status": {"allocatable": {"cpu": "3900m", "memory": "8Gi"}}}));
+    assert_eq!(
+        crate::columns::node_allocatable(&node),
+        (Some(3900), Some(8 * 1024 * 1024 * 1024))
+    );
+    let bare = obj(json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "n"}}));
+    assert_eq!(crate::columns::node_allocatable(&bare), (None, None));
+}
+
 #[test]
 fn pod_metrics_are_split_by_container() {
     let metrics = obj(json!({
@@ -2653,6 +2843,63 @@ async fn namespace_switch_is_recorded_in_history() {
 }
 
 // ----- Helm ---------------------------------------------------------------
+
+#[test]
+fn helmrelease_storage_resolves_like_helm_controller() {
+    use crate::helm::helmrelease_storage;
+    let hr = |spec: serde_json::Value| {
+        obj(json!({
+            "apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+            "metadata": {"name": "podinfo", "namespace": "flux-system"},
+            "spec": spec
+        }))
+    };
+    // Defaults: metadata name, object namespace.
+    assert_eq!(
+        helmrelease_storage(&hr(json!({}))),
+        ("podinfo".to_string(), "flux-system".to_string())
+    );
+    // Explicit releaseName + storageNamespace win.
+    assert_eq!(
+        helmrelease_storage(&hr(
+            json!({"releaseName": "custom", "storageNamespace": "apps"})
+        )),
+        ("custom".to_string(), "apps".to_string())
+    );
+    // targetNamespace without releaseName composes `<target>-<name>`.
+    assert_eq!(
+        helmrelease_storage(&hr(json!({"targetNamespace": "prod"}))),
+        ("prod-podinfo".to_string(), "flux-system".to_string())
+    );
+}
+
+#[tokio::test]
+async fn enter_on_helmrelease_opens_helm_history() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("helmreleases");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+            "metadata": {"name": "podinfo", "namespace": "flux-system"},
+            "spec": {"storageNamespace": "apps"}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.drill();
+    assert_eq!(app.kind_plural, "helmhistory");
+    assert_eq!(app.namespace, "apps");
+    assert_eq!(app.labels.as_deref(), Some("owner=helm,name=podinfo"));
+    assert_eq!(app.fields.as_deref(), Some("type=helm.sh/release.v1"));
+    // The backing kind must be the secrets watch, not the HelmRelease CRD.
+    assert_eq!(
+        app.kind.as_ref().map(|k| k.ar.plural.as_str()),
+        Some("secrets")
+    );
+    // Esc returns to the HelmRelease list.
+    assert!(app.pop_frame());
+    assert_eq!(app.kind_plural, "helmreleases");
+}
 
 #[tokio::test]
 async fn helm_list_shows_only_latest_revision_per_release() {
