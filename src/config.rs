@@ -92,6 +92,51 @@ pub struct Config {
     /// `None` = on. Set `mouse = false` to keep the terminal's native mouse
     /// behavior (text selection) instead.
     pub mouse: Option<bool>,
+    /// How `:notify` events are delivered — see [`NotifyConfig`].
+    pub notify: NotifyConfig,
+}
+
+/// Delivery for `:notify` events, besides the status-line flash.
+///
+/// ```toml
+/// [notify]
+/// bell = true         # ring the terminal bell
+/// desktop = "osc9"    # "osc9" | "osc777" | "both" | "off"
+/// ```
+///
+/// `osc9` is the iTerm2-style body-only notification (iTerm2, Ghostty,
+/// kitty, WezTerm, foot, Windows Terminal). `osc777` is the rxvt-style
+/// title+body form (Ghostty — which recommends it — kitty, WezTerm, foot,
+/// urxvt). Terminals ignore protocols they don't speak, but one that speaks
+/// both would show two notifications under `both` — hence a choice, not a
+/// broadcast.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct NotifyConfig {
+    /// Ring the terminal bell on a notification.
+    pub bell: bool,
+    /// Desktop-notification escape protocol: `osc9`, `osc777`, `both`, `off`.
+    pub desktop: String,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            bell: true,
+            desktop: "osc9".into(),
+        }
+    }
+}
+
+/// Validate `[notify]`: an unknown `desktop` value warns and behaves as the
+/// default (`osc9`).
+pub fn notify_warnings(cfg: &NotifyConfig) -> Vec<String> {
+    match cfg.desktop.as_str() {
+        "osc9" | "osc777" | "both" | "off" => Vec::new(),
+        other => vec![format!(
+            "notify: desktop '{other}' is not osc9/osc777/both/off; using osc9"
+        )],
+    }
 }
 
 /// A named, saved port-forward. Shows up in `:pf` even when stopped, so one

@@ -1307,11 +1307,13 @@ impl App {
         self.fleet_cfg = resolved.config.fleet;
         // Running forwards keep running; :reload only refreshes what's saved.
         self.forwards_cfg = resolved.config.forwards;
+        self.notify_cfg = resolved.config.notify;
         warnings.extend(crate::config::plugin_warnings(&self.plugins));
         warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         warnings.extend(crate::config::workspace_warnings(&self.workspaces));
         warnings.extend(crate::config::guardrail_warnings(&self.guardrails));
         warnings.extend(crate::config::forward_warnings(&self.forwards_cfg));
+        warnings.extend(crate::config::notify_warnings(&self.notify_cfg));
         // Thresholds only change cell coloring (never the column layout), so —
         // unlike custom views — they're safe to re-apply live without yanking
         // the current view.

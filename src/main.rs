@@ -192,12 +192,14 @@ async fn main() -> Result<()> {
     app.logs.fullscreen = cfg.logs.fullscreen;
     app.fleet_cfg = cfg.fleet.clone();
     app.forwards_cfg = cfg.forwards.clone();
+    app.notify_cfg = cfg.notify.clone();
     for w in config::plugin_warnings(&app.plugins)
         .into_iter()
         .chain(config::bookmark_warnings(&app.bookmarks))
         .chain(config::workspace_warnings(&app.workspaces))
         .chain(config::guardrail_warnings(&app.guardrails))
         .chain(config::forward_warnings(&app.forwards_cfg))
+        .chain(config::notify_warnings(&app.notify_cfg))
     {
         eprintln!("warning: {w}");
         config_warnings.push(w);
@@ -429,16 +431,13 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
     Ok(())
 }
 
-/// Ring the terminal bell and emit an OSC 9 desktop notification for a
-/// `:notify` event. OSC 9 pops a system notification on terminals that
-/// support it (iTerm2, kitty, WezTerm, foot…) and is ignored by the rest;
-/// control characters are stripped so log content can't smuggle sequences.
-fn ring_notification(text: &str) {
-    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::style::Print(format!("\x07\x1b]9;sofka: {clean}\x1b\\"))
-    );
+/// Emit the configured bell + desktop-notification sequences for a `:notify`
+/// event (see [`config::NotifyConfig`] and `app::notify::notification_sequence`).
+fn ring_notification(text: &str, cfg: &config::NotifyConfig) {
+    let seq = app::notification_sequence(text, cfg);
+    if !seq.is_empty() {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::style::Print(seq));
+    }
 }
 
 /// Leave the alt-screen/raw-mode TUI, run an interactive command with inherited
@@ -594,7 +593,7 @@ async fn run(
                     app.handle_msg(m);
                 }
                 if let Some(text) = app.take_notification() {
-                    ring_notification(&text);
+                    ring_notification(&text, &app.notify_cfg);
                 }
                 dirty = true;
             }

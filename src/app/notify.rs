@@ -106,9 +106,41 @@ impl App {
         self.flash_err = false;
     }
 
-    /// The message the main loop should ring the bell / emit OSC 9 for, if a
-    /// notification arrived since the last frame.
+    /// The message the main loop should ring the bell / emit a desktop
+    /// notification for, if one arrived since the last frame.
     pub fn take_notification(&mut self) -> Option<String> {
         self.pending_notify.take()
     }
+}
+
+/// The terminal escape sequences that deliver one `:notify` event, per the
+/// `[notify]` config: an optional BEL, then the chosen desktop-notification
+/// protocol(s). Control characters are stripped so object content can't
+/// smuggle sequences; BEL-terminated OSC matches every terminal's documented
+/// examples.
+///
+/// - `osc9` — iTerm2-style, body only: iTerm2, Ghostty, kitty, WezTerm,
+///   foot, Windows Terminal.
+/// - `osc777` — rxvt-style `notify;title;body`: Ghostty (which recommends
+///   it), kitty, WezTerm, foot, urxvt.
+///
+/// An unknown `desktop` value behaves as the default `osc9` (it warned at
+/// config load).
+pub fn notification_sequence(text: &str, cfg: &crate::config::NotifyConfig) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    let mut seq = String::new();
+    if cfg.bell {
+        seq.push('\x07');
+    }
+    let desktop = match cfg.desktop.as_str() {
+        d @ ("osc9" | "osc777" | "both" | "off") => d,
+        _ => "osc9",
+    };
+    if matches!(desktop, "osc9" | "both") {
+        seq.push_str(&format!("\x1b]9;sofka: {clean}\x07"));
+    }
+    if matches!(desktop, "osc777" | "both") {
+        seq.push_str(&format!("\x1b]777;notify;sofka;{clean}\x07"));
+    }
+    seq
 }

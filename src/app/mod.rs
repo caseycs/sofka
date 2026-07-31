@@ -1033,6 +1033,8 @@ pub struct App {
     /// Saved `[[forwards]]` from config: shown in `:pf` even while stopped,
     /// startable with one keystroke, autostarted on connect when configured.
     pub forwards_cfg: Vec<crate::config::Forward>,
+    /// `[notify]` delivery options (bell, desktop-notification protocol).
+    pub notify_cfg: crate::config::NotifyConfig,
 
     pub skin_list: Vec<String>,
     pub skin_state: ListState,
@@ -1246,6 +1248,7 @@ impl App {
             transfer_target: None,
             port_forwards: Vec::new(),
             forwards_cfg: Vec::new(),
+            notify_cfg: crate::config::NotifyConfig::default(),
             pf_state: ListState::default(),
             skin_list: crate::theme::BUILTIN_NAMES
                 .iter()
@@ -1361,6 +1364,7 @@ mod timeline;
 mod workspaces;
 
 use helpers::*;
+pub use notify::notification_sequence;
 pub use pickers::DEFAULT_SORT_LABEL;
 
 #[cfg(test)]
