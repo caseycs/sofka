@@ -1083,6 +1083,9 @@ pub struct App {
     pub gitops_source: Option<DynamicObject>,
     /// Session-local per-object state-change history, fed by the table watch.
     pub timeline: crate::timeline::Timeline,
+    /// Table geometry from the last frame, for mouse hit-testing. A RefCell
+    /// because the renderer records it while the frame still borrows rows.
+    pub(super) table_hit: RefCell<Option<mouse::TableHit>>,
     /// Active `:notify` watches, keyed by `plural/ns/name`. Each is its own
     /// single-object background watcher, deliberately NOT in [`Self::tasks`]:
     /// a notify must survive `bump_generation` (view switches) and fire from
@@ -1267,6 +1270,7 @@ impl App {
             gitops_title: String::new(),
             gitops_source: None,
             timeline: crate::timeline::Timeline::default(),
+            table_hit: RefCell::new(None),
             notify_tasks: HashMap::new(),
             pending_notify: None,
             prev_revisions: PrevRevisions::default(),
@@ -1338,6 +1342,7 @@ mod input;
 mod journal;
 mod lifecycle;
 mod logs;
+mod mouse;
 mod navigation;
 mod notify;
 mod overlays;

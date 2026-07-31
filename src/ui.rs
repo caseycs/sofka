@@ -780,6 +780,34 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         None
     };
     render_state.select(render_selected);
+    // Record the geometry for mouse hit-testing (click-to-select, header-click
+    // sort). Mirrors the Table widget's own column layout: the area inside the
+    // borders, the always-reserved 2-cell highlight symbol, then a horizontal
+    // layout with the same widths, spacing, and default Start flex.
+    {
+        use ratatui::layout::{Flex, Margin};
+        let inner = area.inner(Margin::new(1, 1));
+        let sel_w = 2u16; // "▌ " with HighlightSpacing::Always
+        let cols_area = Rect {
+            x: inner.x.saturating_add(sel_w),
+            y: inner.y,
+            width: inner.width.saturating_sub(sel_w),
+            height: inner.height,
+        };
+        let rects = Layout::horizontal(widths.clone())
+            .flex(Flex::Start)
+            .spacing(2)
+            .split(cols_area);
+        app.record_table_hit(
+            inner.y,
+            inner.y.saturating_add(1),
+            inner.height.saturating_sub(1),
+            inner.x,
+            inner.x.saturating_add(inner.width),
+            rects.iter().map(|r| (r.x, r.x + r.width)).collect(),
+        );
+    }
+
     let table = Table::new(rows, widths)
         .header(header_row)
         .row_highlight_style(theme::selected_row())

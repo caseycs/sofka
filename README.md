@@ -297,6 +297,12 @@ numbers.
   sofka queries only the contexts in `[fleet]`, and gathers each one at the same
   time with its own timeout, so one slow cluster never blocks the rest. Press
   `⏎` to switch to a context. Press `r` to refresh.
+- **Mouse support** — the wheel scrolls every view (table, logs, documents,
+  pickers — one notch is three steps of that view's own up/down), clicking a
+  table row selects it, and clicking a column header sorts by it (click again
+  to flip the direction). Set `mouse = false` in the config to keep the
+  terminal's native mouse behavior (text selection) instead; sofka releases
+  the mouse while a suspended command (`kubectl exec`, `$EDITOR`) runs.
 - **Compact mode** (`ctrl-e`) — collapse the seven-line header and the footer
   into one info line (kind · count · namespace · context, with a flash and the
   live indicator). So a tiled or multiplexed pane is almost all table.
@@ -358,6 +364,8 @@ default_namespace = "kube-system"
 default_resource  = "deployments"
 readonly          = false  # true disables every mutating action (delete, edit,
                            # scale, shell, plugins, …); --readonly/--write win
+mouse             = true   # false keeps the terminal's native mouse behavior
+                           # (text selection) instead of scroll/click/sort
 
 # Namespaces pinned to the top of the `n` switcher (★); session recents (·)
 # follow them.

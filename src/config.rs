@@ -85,6 +85,10 @@ pub struct Config {
     pub logs: LogsConfig,
     /// Cross-context fleet dashboard (`:fleet`) — see [`FleetConfig`].
     pub fleet: FleetConfig,
+    /// Mouse support (wheel scroll, click-to-select, header-click sort).
+    /// `None` = on. Set `mouse = false` to keep the terminal's native mouse
+    /// behavior (text selection) instead.
+    pub mouse: Option<bool>,
 }
 
 /// The opt-in cross-context fleet dashboard (`:fleet`). Only the kubeconfig
