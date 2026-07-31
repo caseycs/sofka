@@ -152,8 +152,10 @@ numbers.
   node → its pods, pod → containers, namespace → re-scope, CRD → its custom
   resources. Press `esc` to go back.
 - **Command palette** (`:`) — fuzzy search over the full resource catalog, the
-  built-in commands (`ctx`, `pulse`, `xray`, `explain`, `timeline`, `gitops`,
-  `can-i`, `journal`, `diff`, `events`, `pf`), and your saved
+  built-in commands (`ctx`, `helm`, `pulse`, `xray`, `explain`, `timeline`,
+  `gitops`, `can-i`, `journal`, `debug`, `debug-clean`, `bundle`,
+  `bundle-save`, `snapshot`, `snapshots`, `diff`, `events`, `pf`, `vlogs`,
+  `rightsize`, `fleet`, `skin`, `reload`, `config`, `info`), and your saved
   bookmarks/workspaces together. It also does row **filtering** (`/`) with
   matched-character highlighting: fuzzy text, `!text` inverse match, `-l`/`-f`
   label and field selectors (the API server evaluates them on ⏎), and typed
@@ -179,6 +181,18 @@ numbers.
   apart.
 - **CronJob controls** (`t`) — trigger now (creates a Job from the jobTemplate,
   like `kubectl create job --from`), suspend, and resume.
+- **A native Helm inspector** (`:helm` / `:hm`) — sofka decodes Helm's release
+  storage Secrets directly (double base64 → gunzip → JSON, like Helm itself)
+  and shows one row per release at its latest revision, like `helm list`.
+  Press `⏎` on a release for its full revision history (`helm history`); on a
+  revision, `⏎` shows the user-supplied values, `y` the rendered chart
+  manifest, and `d` the NOTES.txt. `r` on a history row rolls back and
+  `ctrl-d` uninstalls — those two shell out to the real `helm` binary; all
+  the inspection is native, no `helm` needed.
+- **File transfer** (`t` on a pod, or `t` in the container picker for one
+  container) — download from or upload to a pod via `kubectl cp`, run
+  off-thread with a completion flash. Uploads are gated by the `transfer`
+  guardrail action and read-only mode.
 - **Background port-forwards** (`f`/`F` to start, `:pf` to manage), plus
   **saved forwards** (`[[forwards]]`) — named entries that appear in `:pf`
   even while stopped (`⏎` starts one), with optional `autostart = true` to
@@ -245,7 +259,8 @@ numbers.
 - **Declarative guardrails** (`[[guardrails]]`) — rules in the config file that
   match on context/namespace/resource/action globs. A rule can **deny** a
   destructive action outright
-  (`delete`/`force-delete`/`drain`/`restart`/`shell`/`debug`/`node-debug`),
+  (`delete`/`force-delete`/`drain`/`restart`/`shell`/`debug`/`node-debug`/
+  `transfer` — a file upload into a pod),
   force **type-to-confirm** (the resource name or `context/name`), or cap
   **bulk** operations. So rules like "never delete in prod", "always confirm a
   prod shell", and "no more than one at a time" are enforced, not remembered.
@@ -592,7 +607,8 @@ remember them. Each rule matches on `contexts`, `namespaces`, `resources`, and
 applies the strictest of these: `deny` (block the action), `confirmation` (type
 to confirm), and `max_bulk` (a maximum number of rows for one action). The
 gated `actions` are the destructive verbs that sofka does directly — `delete`,
-`force-delete`, `drain`, `restart`, `shell` (exec), `debug`, and `node-debug`.
+`force-delete`, `drain`, `restart`, `shell` (exec), `debug`, `node-debug`, and
+`transfer` (a file upload into a pod).
 The first rule that matches wins. sofka shows the `reason` when a rule fires.
 
 ```toml
@@ -693,6 +709,7 @@ tail, the buffer size, and an optional `since` lookback:
 tail = 300       # initial lines fetched per stream (kubectl --tail)
 buffer = 5000    # max lines kept while following (oldest dropped)
 since = "1h"     # optional: only logs newer than this — replaces tail
+fullscreen = false # open log views fullscreen (F toggles per session)
 ```
 
 In the view, `/` filters with a case-insensitive substring, a `/regex/`, or a
@@ -874,12 +891,14 @@ A switch away from it restores write mode.
 | `o`                                           | show the node hosting the selected pod                                                                                                |
 | `ctrl-r`                                      | refresh the watch                                                                                                                     |
 | `y` / `d` / `E`                               | view YAML / describe (`kubectl`) / live events                                                                                        |
+| `x`                                           | secrets: show `data` base64-decoded (as `stringData`)                                                                                 |
 | `X` / `T`                                     | explain why the selection is unhealthy / session-local state-change timeline                                                          |
 | `:gitops` / `:flux`                           | Flux owner, source, revisions & reconciliation chain for the selection (`⏎` to jump)                                                  |
 | `:can-i` / `:can-i <verb> <resource> [ns]`    | what you can do here / check a single action (`SelfSubjectAccessReview`)                                                              |
 | `:journal` / `:audit`                         | session-local log of the mutating actions you've taken                                                                                |
 | `:rightsize`                                  | historical right-sizing: P50/P95/P99 usage → suggested requests + patch preview (needs a metrics backend)                             |
 | `:ctx` / `:ctx <name>`                        | context switcher popup / switch directly (the name tab-completes)                                                                     |
+| `:helm`                                       | Helm releases (native storage-Secret decode): ⏎ history → values · `y` manifest · `d` notes · `r` rollback                            |
 | `:fleet`                                      | cross-context health dashboard (opt-in `[fleet]` contexts; `⏎` switches, `r` refreshes)                                               |
 | `:skin`                                       | switch the color skin live (`:skin gruvbox-dark` applies directly)                                                                    |
 | `:reload` / `:config` / `:info`               | reload config from disk · config sources + warnings · runtime diagnostics                                                             |
@@ -893,19 +912,24 @@ A switch away from it restores write mode.
 | `:bundle` / `:bundle-save`                    | assemble a redacted diagnostic bundle for the selection · write the previewed bundle to a file                                        |
 | `:snapshot [text\|json\|yaml]` / `:snapshots` | capture the current view to a file · browse, open, and delete saved snapshots                                                         |
 | `i`                                           | set container image                                                                                                                   |
-| `r`                                           | rollout restart (workloads) / refresh (elsewhere)                                                                                     |
+| `r`                                           | rollout restart (workloads) / force-sync (ExternalSecrets/PushSecrets) / refresh (elsewhere)                                          |
 | `f` / `shift-f`                               | port-forward (pods/services) - runs in the background                                                                                 |
-| `t`                                           | Flux: suspend/resume/reconcile menu · CronJobs: trigger/suspend/resume menu                                                           |
+| `t`                                           | Flux: suspend/resume/reconcile menu · CronJobs: trigger/suspend/resume · pods: file transfer (`kubectl cp`)                           |
 | `C` / `U` / `D`                               | nodes: cordon / uncordon / drain                                                                                                      |
 | `ctrl-d` / `ctrl-k`                           | delete / force-delete (marked rows, or current); in confirm: `f` toggles force, `c` cycles cascade (background → foreground → orphan) |
 | `:q`, `ctrl-c`                                | quit                                                                                                                                  |
 | `?`                                           | help                                                                                                                                  |
 | _(config)_                                    | plugin / bookmark / workspace key chords — `ctrl-`/`alt-`/`shift-`/`fN`; listed in `?` help                                           |
 
-**Logs view:** `/` filter (substring · `/regex/` · `!invert`) · `s` autoscroll
-· `w` wrap · `t` timestamps · `x` stop/resume stream · `z` clear buffer · `c`
-copy buffer · `ctrl-s` save to file · `esc` back. The newest line anchors to
-the bottom of the viewport.
+**Logs view:** `/` filter (substring · `/regex/` · `!invert`) · `s`/`f`
+autoscroll · `w` wrap · `t` timestamps · `x` stop/resume stream · `z` clear
+buffer · `c` copy buffer · `ctrl-s` save to file · `F` fullscreen (no chrome,
+clean text selection) · `0`–`5` time anchors (tail · 1m · 5m · 15m · 30m ·
+1h) · `T` provider lookback (VictoriaLogs views) · `esc` back. The newest
+line anchors to the bottom of the viewport.
+
+**Text inputs** (palette, filters, prompts): `ctrl-u` clears the line,
+`ctrl-w` / `alt-⌫` delete the previous word.
 
 **Document views** (YAML, describe, diff, events): `/` searches like vim. The
 whole document stays on screen, and sofka highlights every match. Press `n` or

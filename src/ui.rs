@@ -1767,7 +1767,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "ctrl-u · ctrl-w",
             "text inputs: clear line (cmd-⌫) · delete word (opt-⌫)",
         ),
-        bind("n · 0-9", "namespace switcher · 0 = all namespaces"),
+        bind("n · 0", "namespace switcher · 0 = all namespaces"),
         bind("ctrl-r", "refresh watch"),
         Line::from(""),
         Line::from(Span::styled("  Inspect", theme::title())),
