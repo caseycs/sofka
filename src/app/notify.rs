@@ -65,15 +65,22 @@ impl App {
             while let Some(event) = stream.next().await {
                 match event {
                     Ok(watcher::Event::Apply(o)) | Ok(watcher::Event::InitApply(o)) => {
-                        let news: Vec<String> = match &prev {
+                        // One watch event → ONE notification. A single change
+                        // often carries several transitions (phase + Ready +
+                        // restarts); separate notifications land microseconds
+                        // apart, and notification sinks rate-limit such bursts
+                        // (herdr drops all but the first), so joining is what
+                        // keeps them deliverable — and more readable.
+                        let items: Vec<String> = match &prev {
                             Some(p) => crate::timeline::transitions(p, &o, &plural)
                                 .into_iter()
-                                .map(|(_, text)| format!("{label}: {text}"))
+                                .map(|(_, text)| text)
                                 .collect(),
-                            None if synced => vec![format!("{label}: created")],
+                            None if synced => vec!["created".into()],
                             None => Vec::new(),
                         };
-                        for text in news {
+                        if !items.is_empty() {
+                            let text = format!("{label}: {}", items.join(" · "));
                             if tx.send(Msg::Notify(text)).await.is_err() {
                                 return;
                             }
@@ -106,10 +113,17 @@ impl App {
         self.flash_err = false;
     }
 
-    /// The message the main loop should ring the bell / emit a desktop
-    /// notification for, if one arrived since the last frame.
+    /// The message the main loop should deliver (bell, escape sequence,
+    /// notifier subprocess), if any arrived since the last frame. Multiple
+    /// pending notifications join into one message — one delivery per frame,
+    /// bounded, so bursts survive sink rate limiting.
     pub fn take_notification(&mut self) -> Option<String> {
-        self.pending_notify.take()
+        if self.pending_notify.is_empty() {
+            return None;
+        }
+        let text = self.pending_notify.join(" · ");
+        self.pending_notify.clear();
+        Some(crate::text::ellipsize(&text, 300))
     }
 
     /// Deliver one `:notify` event through the notifier subprocess, when one
@@ -117,7 +131,7 @@ impl App {
     /// that survives terminal multiplexers, which swallow pane escape
     /// sequences. Fire-and-forget with nulled stdio; a notifier that can't
     /// even start is worth one warning, not a broken TUI.
-    pub(super) fn run_notify_command(&mut self, text: &str) {
+    pub fn run_notify_command(&mut self, text: &str) {
         let Some(argv) = notification_command(&self.notify_cfg, in_herdr_pane(), text) else {
             return;
         };

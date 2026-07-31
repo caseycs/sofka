@@ -1099,9 +1099,11 @@ pub struct App {
     /// a notify must survive `bump_generation` (view switches) and fire from
     /// anywhere until toggled off.
     pub(super) notify_tasks: HashMap<String, tokio::task::JoinHandle<()>>,
-    /// A notification waiting for the main loop to ring the terminal bell and
-    /// emit an OSC 9 desktop notification for.
-    pub(super) pending_notify: Option<String>,
+    /// Notifications waiting for the main loop to deliver (bell, desktop
+    /// escape sequence, notifier subprocess). Drained once per frame and
+    /// joined, so a burst arriving in one batch is one delivery — sinks
+    /// rate-limit rapid-fire notifications.
+    pub(super) pending_notify: Vec<String>,
     /// Previous object revisions for the session diff (`:diff` fallback).
     pub(super) prev_revisions: PrevRevisions,
     /// The `(plural, row_key)` the timeline view is showing, and its cursor.
@@ -1282,7 +1284,7 @@ impl App {
             timeline: crate::timeline::Timeline::default(),
             table_hit: RefCell::new(None),
             notify_tasks: HashMap::new(),
-            pending_notify: None,
+            pending_notify: Vec::new(),
             prev_revisions: PrevRevisions::default(),
             timeline_target: None,
             timeline_state: ListState::default(),
