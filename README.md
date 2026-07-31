@@ -379,8 +379,8 @@ sort = "EXPIRES:desc"     # initial sort column, ":asc" (default) or ":desc"
 
 [[views."cert-manager.io/v1/certificates".columns]]
 name = "READY"
-path = "/status/conditions/0/status"
-type = "status"           # colors the row like other status columns
+path = "Ready"            # the condition *type* name, found wherever it is
+type = "condition"        # in the array — order isn't guaranteed by anything
 
 [[views."cert-manager.io/v1/certificates".columns]]
 name = "EXPIRES"
@@ -395,17 +395,25 @@ wide = true               # only shown in wide mode (`w`)
 
 `path` is a JSON Pointer (RFC 6901) into the object as the API serves it:
 `/metadata/…`, `/spec/…`, `/status/…`, and array indices like
-`/status/conditions/0/status`. The column `type` is `text` (default), `status`,
-`number`, `quantity` (`500m`, `1Gi`), or `time`. Typed columns sort by value,
-not by text. The optional `width` (for fixed columns) and `align`
-(`left`/`center`/`right`) tune the layout. By default, columns overlay the
-selected ones: a header that matches replaces it in place, and new columns go
-before AGE. sofka skips invalid entries and shows a warning in the app. They
-never stop the TUI.
+`/spec/ports/0/port`. The column `type` is `text` (default), `status`,
+`number`, `quantity` (`500m`, `1Gi`), `time`, or `condition`. Typed columns
+sort by value, not by text. For a `condition` column, `path` is the condition
+**type name** (`Ready`, `Available`, `Reconciling`…): sofka finds it in
+`status.conditions` by name — never by array index, whose order nothing
+guarantees — renders its `status` (`True`/`False`/`Unknown`), and colors the
+row like a `status` column. The optional `width` (for fixed columns) and
+`align` (`left`/`center`/`right`) tune the layout. By default, columns overlay
+the selected ones: a header that matches replaces it in place, and new columns
+go before AGE. sofka skips invalid entries and shows a warning in the app.
+They never stop the TUI.
 
 A custom resource that has no explicit view uses its CRD
 `additionalPrinterColumns` automatically (columns with `priority > 0` become
-wide-only). So most custom resources get useful columns with no configuration.
+wide-only). The canonical condition lookup
+(`.status.conditions[?(@.type=="Ready")].status` — how most CRDs express
+their READY printer column) becomes a `condition` column; other JSONPath
+filter or wildcard expressions aren't representable and those columns are
+skipped. So most custom resources get useful columns with no configuration.
 
 ### Thresholds
 
