@@ -699,6 +699,27 @@ async fn notify_msg_flashes_and_queues_bell() {
     assert_eq!(app.take_notification(), None, "consumed once");
 }
 
+#[tokio::test]
+async fn notification_bursts_coalesce_into_one_delivery() {
+    // Notification sinks rate-limit rapid-fire messages (herdr drops all but
+    // the first of a burst) — everything pending in one frame batch must
+    // leave as a single bounded delivery.
+    let (mut app, _rx) = test_app();
+    app.handle_msg(Msg::Notify("pod/a: Ready True → False".into()));
+    app.handle_msg(Msg::Notify("pod/a: deleted".into()));
+    assert_eq!(
+        app.take_notification().as_deref(),
+        Some("pod/a: Ready True → False · pod/a: deleted")
+    );
+    assert_eq!(app.take_notification(), None);
+
+    for i in 0..100 {
+        app.handle_msg(Msg::Notify(format!("pod/pod-{i}: restarts 0 → 1")));
+    }
+    let text = app.take_notification().unwrap();
+    assert!(text.chars().count() <= 300, "bounded: {}", text.len());
+}
+
 #[test]
 fn notification_sequences_follow_the_configured_protocol() {
     use crate::config::{NotifyConfig, notify_warnings};

@@ -593,6 +593,7 @@ async fn run(
                     app.handle_msg(m);
                 }
                 if let Some(text) = app.take_notification() {
+                    app.run_notify_command(&text);
                     ring_notification(&text, &app.notify_cfg);
                 }
                 dirty = true;

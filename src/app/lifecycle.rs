@@ -597,8 +597,9 @@ impl App {
             Msg::Notify(text) => {
                 self.flash = format!("🔔 {text}");
                 self.flash_err = false;
-                self.run_notify_command(&text);
-                self.pending_notify = Some(text);
+                // Delivery happens once per frame in the run loop (see
+                // `take_notification`), so a batch of these coalesces.
+                self.pending_notify.push(text);
             }
             Msg::LogLines { generation, lines } if generation == self.log_gen => {
                 self.push_log_lines(lines);
