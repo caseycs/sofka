@@ -488,6 +488,55 @@ async fn metrics_error_is_stored_and_cleared_by_next_success() {
 }
 
 #[tokio::test]
+async fn find_opens_picker_and_enter_navigates_to_the_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+
+    // Bare :find is a usage hint, not a search.
+    assert!(app.run_palette_command("find"));
+    assert!(app.flash.contains("usage"), "{}", app.flash);
+
+    assert!(app.run_palette_command("find web"));
+    assert_eq!(app.mode, Mode::Find);
+    assert_eq!(app.find_query, "web");
+
+    app.handle_msg(Msg::FindResults {
+        generation: app.generation,
+        query: "web".into(),
+        items: vec![
+            crate::store::FindItem {
+                plural: "pods".into(),
+                ns: "default".into(),
+                name: "web-1".into(),
+            },
+            crate::store::FindItem {
+                plural: "deployments".into(),
+                ns: "default".into(),
+                name: "web".into(),
+            },
+        ],
+        warn: None,
+    });
+    assert_eq!(app.find_state.selected(), Some(0));
+    assert!(app.flash.contains("2 hit(s)"), "{}", app.flash);
+
+    app.key_find(press(KeyCode::Enter));
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=web-1"));
+
+    // Incomplete sweeps say so instead of pretending the list is exhaustive.
+    app.handle_msg(Msg::FindResults {
+        generation: app.generation,
+        query: "web".into(),
+        items: Vec::new(),
+        warn: Some("2 kind(s) could not be listed".into()),
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("incomplete"), "{}", app.flash);
+}
+
+#[tokio::test]
 async fn panic_msg_flashes_regardless_of_generation() {
     let (mut app, _rx) = test_app();
     app.generation = 7; // a Panic has no generation tag and must never be dropped as stale

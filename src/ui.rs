@@ -151,6 +151,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Timeline => draw_timeline(frame, app, chunks[1]),
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
         Mode::Fleet => draw_fleet(frame, app, chunks[1]),
+        Mode::Find => draw_find(frame, app, chunks[1]),
         _ => draw_table(frame, app, chunks[1]),
     }
 
@@ -2130,6 +2131,36 @@ fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn draw_find(frame: &mut Frame, app: &mut App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .find_items
+        .iter()
+        .map(|it| {
+            let location = if it.ns.is_empty() {
+                it.name.clone()
+            } else {
+                format!("{}/{}", it.ns, it.name)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<22} ", it.plural), theme::dim()),
+                Span::styled(location, Style::default().fg(theme::text())),
+            ]))
+        })
+        .collect();
+    let title = format!(
+        " Find '{}' [{}]  (⏎ open · esc close) ",
+        app.find_query,
+        app.find_items.len()
+    );
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.find_state,
+    );
+}
+
 fn draw_skins(frame: &mut Frame, app: &mut App, area: Rect) {
     let items: Vec<ListItem> = app
         .skin_list
@@ -3001,6 +3032,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Mode::Fleet => Line::from(Span::styled(
             "  j/k: move   ⏎: switch to context   r: refresh   esc: back",
+            theme::dim(),
+        )),
+        Mode::Find => Line::from(Span::styled(
+            "  j/k: move   ⏎: open the object   esc: close",
             theme::dim(),
         )),
         _ => {

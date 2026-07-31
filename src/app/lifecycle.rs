@@ -648,6 +648,24 @@ impl App {
                     self.refresh_view_spec();
                 }
             }
+            Msg::FindResults {
+                generation,
+                query,
+                items,
+                warn,
+            } if generation == self.generation => {
+                if let Some(w) = warn {
+                    self.flash = format!("find is incomplete — {w}");
+                    self.flash_err = true;
+                } else {
+                    self.flash = format!("{} hit(s) for '{query}'", items.len());
+                    self.flash_err = false;
+                }
+                self.find_query = query;
+                self.find_items = items;
+                self.find_state
+                    .select((!self.find_items.is_empty()).then_some(0));
+            }
             Msg::PulseData { generation, data } if generation == self.generation => {
                 if let Some(w) = &data.warn {
                     self.flash = format!("pulse is incomplete — {w}");
