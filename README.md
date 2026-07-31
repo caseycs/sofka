@@ -229,11 +229,11 @@ numbers.
   watch sees (the same transitions the timeline records — rollout progress,
   readiness, phase, restarts, waiting reasons, conditions) flashes in the
   status line, rings the terminal bell, and emits a **desktop notification**.
-  The protocol is configurable (`[notify]`): `osc9` (default — iTerm2-style;
-  iTerm2, Ghostty, kitty, WezTerm, foot, Windows Terminal) or `osc777`
-  (rxvt-style title+body — Ghostty recommends this form; also kitty, WezTerm,
-  foot, urxvt), plus `both` and `off`. Terminals ignore protocols they don't
-  speak. Each notify is its own bounded single-object watch, so it keeps
+  The protocol is configurable (`[notify]`): `osc777` (default — rxvt-style
+  title+body, the form Ghostty recommends; also kitty, WezTerm, foot, urxvt)
+  or `osc9` (iTerm2-style body-only, for iTerm2 and Windows Terminal, which
+  speak only that), plus `both` and `off`. Terminals ignore protocols they
+  don't speak. Each notify is its own bounded single-object watch, so it keeps
   firing while you browse other views — "tell me when this rollout finishes"
   and keep working. Toggle it off with `:notify` on the same row; everything
   is session-local.
@@ -241,7 +241,7 @@ numbers.
   ```toml
   [notify]
   bell = true         # ring the terminal bell
-  desktop = "osc9"    # "osc9" | "osc777" | "both" | "off"
+  desktop = "osc777"  # "osc777" | "osc9" | "both" | "off"
   ```
 
 - **Diff** (`:diff`) — a unified diff of the live object and its

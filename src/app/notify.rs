@@ -5,7 +5,7 @@ impl App {
     /// active, every state change the watch sees for it (the same transitions
     /// the timeline records: rollout progress, readiness, phase, restarts,
     /// waiting reasons, conditions) flashes, rings the terminal bell, and
-    /// emits an OSC 9 desktop notification. Each notify is its own bounded
+    /// emits a desktop notification (`[notify]`). Each notify is its own bounded
     /// single-object watch, so it keeps firing no matter which view is open,
     /// until toggled off or the session ends. Nothing touches disk.
     pub(super) fn toggle_notify(&mut self) {
@@ -124,7 +124,7 @@ impl App {
 /// - `osc777` — rxvt-style `notify;title;body`: Ghostty (which recommends
 ///   it), kitty, WezTerm, foot, urxvt.
 ///
-/// An unknown `desktop` value behaves as the default `osc9` (it warned at
+/// An unknown `desktop` value behaves as the default `osc777` (it warned at
 /// config load).
 pub fn notification_sequence(text: &str, cfg: &crate::config::NotifyConfig) -> String {
     let clean: String = text.chars().filter(|c| !c.is_control()).collect();
@@ -134,7 +134,7 @@ pub fn notification_sequence(text: &str, cfg: &crate::config::NotifyConfig) -> S
     }
     let desktop = match cfg.desktop.as_str() {
         d @ ("osc9" | "osc777" | "both" | "off") => d,
-        _ => "osc9",
+        _ => "osc777",
     };
     if matches!(desktop, "osc9" | "both") {
         seq.push_str(&format!("\x1b]9;sofka: {clean}\x07"));

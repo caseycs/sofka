@@ -706,9 +706,17 @@ fn notification_sequences_follow_the_configured_protocol() {
     let dflt = NotifyConfig::default();
     let seq = notification_sequence("pod/web: Ready", &dflt);
     assert!(seq.starts_with('\x07'), "bell on by default");
-    assert!(seq.contains("\x1b]9;sofka: pod/web: Ready\x07"), "{seq:?}");
-    assert!(!seq.contains("]777;"), "one protocol by default: {seq:?}");
+    assert!(
+        seq.contains("\x1b]777;notify;sofka;pod/web: Ready\x07"),
+        "titled osc777 is the default: {seq:?}"
+    );
+    assert!(!seq.contains("]9;"), "one protocol by default: {seq:?}");
 
+    let osc9 = NotifyConfig {
+        bell: false,
+        desktop: "osc9".into(),
+    };
+    assert_eq!(notification_sequence("hi", &osc9), "\x1b]9;sofka: hi\x07");
     let osc777 = NotifyConfig {
         bell: false,
         desktop: "osc777".into(),
@@ -742,7 +750,7 @@ fn notification_sequences_follow_the_configured_protocol() {
         bell: false,
         desktop: "growl".into(),
     };
-    assert!(notification_sequence("hi", &bad).contains("]9;"));
+    assert!(notification_sequence("hi", &bad).contains("]777;"));
     assert_eq!(notify_warnings(&bad).len(), 1);
     assert!(notify_warnings(&dflt).is_empty());
 }
