@@ -699,6 +699,62 @@ async fn notify_msg_flashes_and_queues_bell() {
     assert_eq!(app.take_notification(), None, "consumed once");
 }
 
+#[test]
+fn notification_sequences_follow_the_configured_protocol() {
+    use crate::config::{NotifyConfig, notify_warnings};
+
+    let dflt = NotifyConfig::default();
+    let seq = notification_sequence("pod/web: Ready", &dflt);
+    assert!(seq.starts_with('\x07'), "bell on by default");
+    assert!(
+        seq.contains("\x1b]777;notify;sofka;pod/web: Ready\x07"),
+        "titled osc777 is the default: {seq:?}"
+    );
+    assert!(!seq.contains("]9;"), "one protocol by default: {seq:?}");
+
+    let osc9 = NotifyConfig {
+        bell: false,
+        desktop: "osc9".into(),
+    };
+    assert_eq!(notification_sequence("hi", &osc9), "\x1b]9;sofka: hi\x07");
+    let osc777 = NotifyConfig {
+        bell: false,
+        desktop: "osc777".into(),
+    };
+    assert_eq!(
+        notification_sequence("hi", &osc777),
+        "\x1b]777;notify;sofka;hi\x07"
+    );
+
+    let both = NotifyConfig {
+        bell: false,
+        desktop: "both".into(),
+    };
+    let seq = notification_sequence("hi", &both);
+    assert!(seq.contains("]9;") && seq.contains("]777;"), "{seq:?}");
+
+    let off = NotifyConfig {
+        bell: false,
+        desktop: "off".into(),
+    };
+    assert!(notification_sequence("hi", &off).is_empty());
+
+    // Control characters in object-derived text can't smuggle sequences.
+    assert_eq!(
+        notification_sequence("a\x1b]0;evil\x07b", &osc777),
+        "\x1b]777;notify;sofka;a]0;evilb\x07"
+    );
+
+    // Unknown protocol behaves as the default (it warned at config load).
+    let bad = NotifyConfig {
+        bell: false,
+        desktop: "growl".into(),
+    };
+    assert!(notification_sequence("hi", &bad).contains("]777;"));
+    assert_eq!(notify_warnings(&bad).len(), 1);
+    assert!(notify_warnings(&dflt).is_empty());
+}
+
 #[tokio::test]
 async fn find_opens_picker_and_enter_navigates_to_the_object() {
     let (mut app, _rx) = test_app();

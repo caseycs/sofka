@@ -574,6 +574,7 @@ impl App {
         // context are deliberately left alone (kubectl pinned their context
         // at spawn); autostart only adds what's missing here.
         self.forwards_cfg = resolved.config.forwards;
+        self.notify_cfg = resolved.config.notify;
         self.start_autostart_forwards();
     }
 }

@@ -228,12 +228,22 @@ numbers.
   object. Sophie watches it so you don't have to: every state change the
   watch sees (the same transitions the timeline records — rollout progress,
   readiness, phase, restarts, waiting reasons, conditions) flashes in the
-  status line, rings the terminal bell, and emits an OSC 9 desktop
-  notification (iTerm2, kitty, WezTerm, foot; terminals without OSC 9 ignore
-  it). Each notify is its own bounded single-object watch, so it keeps firing
-  while you browse other views — "tell me when this rollout finishes" and
-  keep working. Toggle it off with `:notify` on the same row; everything is
-  session-local.
+  status line, rings the terminal bell, and emits a **desktop notification**.
+  The protocol is configurable (`[notify]`): `osc777` (default — rxvt-style
+  title+body, the form Ghostty recommends; also kitty, WezTerm, foot, urxvt)
+  or `osc9` (iTerm2-style body-only, for iTerm2 and Windows Terminal, which
+  speak only that), plus `both` and `off`. Terminals ignore protocols they
+  don't speak. Each notify is its own bounded single-object watch, so it keeps
+  firing while you browse other views — "tell me when this rollout finishes"
+  and keep working. Toggle it off with `:notify` on the same row; everything
+  is session-local.
+
+  ```toml
+  [notify]
+  bell = true         # ring the terminal bell
+  desktop = "osc777"  # "osc777" | "osc9" | "both" | "off"
+  ```
+
 - **Diff** (`:diff`) — a unified diff of the live object and its
   `last-applied-configuration`. When that annotation is absent — as it is for
   every Flux- or Helm-managed object, which nothing ever `kubectl apply`s —
