@@ -186,6 +186,14 @@ pub enum Msg {
         generation: u64,
         row: Box<crate::fleet::FleetRow>,
     },
+    /// Results of a `:find <text>` sweep across kinds.
+    FindResults {
+        generation: u64,
+        query: String,
+        items: Vec<FindItem>,
+        /// Kinds that failed to list — the results may be incomplete.
+        warn: Option<String>,
+    },
     Error {
         generation: u64,
         error: String,
@@ -194,6 +202,17 @@ pub enum Msg {
     /// Deliberately generation-free: it must surface no matter which view is
     /// current.
     Panic(String),
+    /// A state change on a `:notify`-watched object. Generation-free like
+    /// [`Msg::Panic`]: the whole point is firing from any view.
+    Notify(String),
+}
+
+/// One hit from the global fuzzy find (`:find <text>`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindItem {
+    pub plural: String,
+    pub ns: String,
+    pub name: String,
 }
 
 /// Cluster-health snapshot for the pulse dashboard.

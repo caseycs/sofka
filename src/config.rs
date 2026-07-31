@@ -85,6 +85,85 @@ pub struct Config {
     pub logs: LogsConfig,
     /// Cross-context fleet dashboard (`:fleet`) — see [`FleetConfig`].
     pub fleet: FleetConfig,
+    /// Saved port-forwards — see [`Forward`]. Validated by
+    /// [`forward_warnings`].
+    pub forwards: Vec<Forward>,
+    /// Mouse support (wheel scroll, click-to-select, header-click sort).
+    /// `None` = on. Set `mouse = false` to keep the terminal's native mouse
+    /// behavior (text selection) instead.
+    pub mouse: Option<bool>,
+}
+
+/// A named, saved port-forward. Shows up in `:pf` even when stopped, so one
+/// keystroke starts it; `autostart = true` also starts it on connect (and on
+/// every context switch, when its `contexts` list matches).
+///
+/// ```toml
+/// [[forwards]]
+/// name = "argocd"
+/// target = "svc/argocd-server"   # kubectl syntax: pod/…, svc/…, deploy/…
+/// namespace = "argocd"
+/// ports = "8080:443"             # LOCAL:REMOTE
+/// autostart = true               # start when sofka connects (default false)
+/// contexts = ["home"]            # optional: only in these contexts (exact)
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Forward {
+    pub name: String,
+    /// Forward target in kubectl syntax (`pod/web`, `svc/api`, `deploy/api`).
+    pub target: String,
+    pub namespace: String,
+    /// `LOCAL:REMOTE` port pair (kubectl also accepts a bare port).
+    pub ports: String,
+    /// Start automatically when sofka connects / switches to a matching
+    /// context.
+    pub autostart: bool,
+    /// Kubeconfig context names this forward applies to (exact match).
+    /// Empty = every context.
+    pub contexts: Vec<String>,
+}
+
+impl Forward {
+    /// Whether this forward applies to `context`.
+    pub fn matches_context(&self, context: &str) -> bool {
+        self.contexts.is_empty() || self.contexts.iter().any(|c| c == context)
+    }
+}
+
+/// Validate `[[forwards]]`, returning one warning per problem (the entries
+/// stay usable where possible; unusable ones are flagged, not fatal).
+pub fn forward_warnings(forwards: &[Forward]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for f in forwards {
+        let label = if f.name.is_empty() {
+            "<unnamed>"
+        } else {
+            &f.name
+        };
+        if f.name.trim().is_empty() {
+            warnings.push("forwards: entry with empty name".to_string());
+        } else if !seen.insert(f.name.clone()) {
+            warnings.push(format!("forwards.{label}: duplicate name"));
+        }
+        if f.target.trim().is_empty() {
+            warnings.push(format!("forwards.{label}: empty target"));
+        }
+        if f.ports.trim().is_empty()
+            || !f
+                .ports
+                .split(':')
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+            || f.ports.split(':').count() > 2
+        {
+            warnings.push(format!(
+                "forwards.{label}: ports '{}' is not LOCAL:REMOTE (e.g. 8080:80)",
+                f.ports
+            ));
+        }
+    }
+    warnings
 }
 
 /// The opt-in cross-context fleet dashboard (`:fleet`). Only the kubeconfig

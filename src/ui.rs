@@ -151,6 +151,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Timeline => draw_timeline(frame, app, chunks[1]),
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
         Mode::Fleet => draw_fleet(frame, app, chunks[1]),
+        Mode::Find => draw_find(frame, app, chunks[1]),
         _ => draw_table(frame, app, chunks[1]),
     }
 
@@ -460,6 +461,9 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
     if app.flux_suspendable() {
         lines.push(hint_line(&[("t", "flux menu")]));
     }
+    if app.kind_plural == "helmreleases" {
+        lines.push(hint_line(&[("⏎", "helm history")]));
+    }
     if app.cronjob_kind() {
         lines.push(hint_line(&[("t", "trigger/suspend")]));
     }
@@ -532,6 +536,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let restarts_idx = headers.iter().position(|h| h == "RESTARTS");
     let cpu_idx = headers.iter().position(|h| h == "CPU");
     let mem_idx = headers.iter().position(|h| h == "MEM");
+    let pct_cpu_idx = headers.iter().position(|h| h == "%CPU");
+    let pct_mem_idx = headers.iter().position(|h| h == "%MEM");
 
     let count = app.row_count();
     let visible_rows = area.height.saturating_sub(3).max(1) as usize;
@@ -585,6 +591,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
             let mut metrics_raw = None;
+            let mut node_pcts: (Option<i64>, Option<i64>) = (None, None);
             if metrics_cols {
                 let name = obj.metadata.name.as_deref().unwrap_or_default();
                 let key = if pods_view {
@@ -600,6 +607,15 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 metrics_raw = Some((cpu, mem));
                 cells.push(TableCellText::Owned(columns::fmt_cpu(cpu)));
                 cells.push(TableCellText::Owned(columns::fmt_mem(mem)));
+                if app.node_capacity_columns() {
+                    let (alloc_cpu, alloc_mem) = columns::node_allocatable(obj);
+                    node_pcts = (
+                        columns::usage_pct(cpu, alloc_cpu),
+                        columns::usage_pct(mem, alloc_mem),
+                    );
+                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.0)));
+                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.1)));
+                }
             }
             // Combined colorer: the whole row takes a k9s-style status tint
             // (errors red, pending peach, completed/terminating dimmed, healthy
@@ -665,6 +681,12 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                             .map(theme::severity_fg)
                             .unwrap_or(row_color);
                         c.into_cell_aligned(align).style(Style::default().fg(color))
+                    } else if Some(i) == pct_cpu_idx {
+                        let color = util_color(node_pcts.0, thresholds.utilization);
+                        c.into_cell_aligned(align).style(Style::default().fg(color))
+                    } else if Some(i) == pct_mem_idx {
+                        let color = util_color(node_pcts.1, thresholds.utilization);
+                        c.into_cell_aligned(align).style(Style::default().fg(color))
                     } else {
                         c.into_cell_aligned(align)
                             .style(Style::default().fg(row_color))
@@ -695,6 +717,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 "NODE" | "CLAIM" | "VOLUME" | "HOSTS" => Constraint::Fill(1),
                 "AGE" => Constraint::Length(7),
                 "CPU" | "MEM" => Constraint::Length(8),
+                "%CPU" | "%MEM" => Constraint::Length(5),
                 // Wide enough for the long pod reasons (ContainerCreating,
                 // CrashLoopBackOff, ImagePullBackOff…) so status is never clipped.
                 "STATUS" => Constraint::Length(19),
@@ -757,6 +780,34 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         None
     };
     render_state.select(render_selected);
+    // Record the geometry for mouse hit-testing (click-to-select, header-click
+    // sort). Mirrors the Table widget's own column layout: the area inside the
+    // borders, the always-reserved 2-cell highlight symbol, then a horizontal
+    // layout with the same widths, spacing, and default Start flex.
+    {
+        use ratatui::layout::{Flex, Margin};
+        let inner = area.inner(Margin::new(1, 1));
+        let sel_w = 2u16; // "▌ " with HighlightSpacing::Always
+        let cols_area = Rect {
+            x: inner.x.saturating_add(sel_w),
+            y: inner.y,
+            width: inner.width.saturating_sub(sel_w),
+            height: inner.height,
+        };
+        let rects = Layout::horizontal(widths.clone())
+            .flex(Flex::Start)
+            .spacing(2)
+            .split(cols_area);
+        app.record_table_hit(
+            inner.y,
+            inner.y.saturating_add(1),
+            inner.height.saturating_sub(1),
+            inner.x,
+            inner.x.saturating_add(inner.width),
+            rects.iter().map(|r| (r.x, r.x + r.width)).collect(),
+        );
+    }
+
     let table = Table::new(rows, widths)
         .header(header_row)
         .row_highlight_style(theme::selected_row())
@@ -2085,18 +2136,40 @@ fn draw_transfer_menu(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Background port-forwards (`:pf`). A full-width view, not a popup — closing
 /// it (`esc`) does not stop the forwards; only `x`/`s` on a row does.
 fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
-    let items: Vec<ListItem> = app
+    // Running forwards first, then the saved-but-stopped [[forwards]]
+    // entries — one keystroke away instead of retyped.
+    let mut items: Vec<ListItem> = app
         .port_forwards
         .iter()
         .map(|pf| {
+            let name = pf
+                .config_name
+                .as_ref()
+                .map(|n| format!("{n}: "))
+                .unwrap_or_default();
             ListItem::new(Line::from(vec![
                 Span::styled("● ", Style::default().fg(theme::green())),
-                Span::styled(pf.label(), Style::default().fg(theme::text())),
+                Span::styled(
+                    format!("{name}{}", pf.label()),
+                    Style::default().fg(theme::text()),
+                ),
             ]))
         })
         .collect();
+    for (_, f) in app.stopped_configured_forwards() {
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("○ ", theme::dim()),
+            Span::styled(
+                format!(
+                    "{}: {} {} -n {} (stopped)",
+                    f.name, f.target, f.ports, f.namespace
+                ),
+                theme::dim(),
+            ),
+        ])));
+    }
     let title = format!(
-        " Port-forwards [{}]  (x/s stop · esc close — others keep running) ",
+        " Port-forwards [{}]  (x/s stop · ⏎ start · esc close) ",
         app.port_forwards.len()
     );
     render_framed_list(
@@ -2105,6 +2178,36 @@ fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
         items,
         Span::styled(title, theme::title()),
         &mut app.pf_state,
+    );
+}
+
+fn draw_find(frame: &mut Frame, app: &mut App, area: Rect) {
+    let items: Vec<ListItem> = app
+        .find_items
+        .iter()
+        .map(|it| {
+            let location = if it.ns.is_empty() {
+                it.name.clone()
+            } else {
+                format!("{}/{}", it.ns, it.name)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<22} ", it.plural), theme::dim()),
+                Span::styled(location, Style::default().fg(theme::text())),
+            ]))
+        })
+        .collect();
+    let title = format!(
+        " Find '{}' [{}]  (⏎ open · esc close) ",
+        app.find_query,
+        app.find_items.len()
+    );
+    render_framed_list(
+        frame,
+        area,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.find_state,
     );
 }
 
@@ -2979,6 +3082,10 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
         )),
         Mode::Fleet => Line::from(Span::styled(
             "  j/k: move   ⏎: switch to context   r: refresh   esc: back",
+            theme::dim(),
+        )),
+        Mode::Find => Line::from(Span::styled(
+            "  j/k: move   ⏎: open the object   esc: close",
             theme::dim(),
         )),
         _ => {

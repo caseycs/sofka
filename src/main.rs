@@ -191,11 +191,13 @@ async fn main() -> Result<()> {
     // reloads) don't fight the user's in-session choice.
     app.logs.fullscreen = cfg.logs.fullscreen;
     app.fleet_cfg = cfg.fleet.clone();
+    app.forwards_cfg = cfg.forwards.clone();
     for w in config::plugin_warnings(&app.plugins)
         .into_iter()
         .chain(config::bookmark_warnings(&app.bookmarks))
         .chain(config::workspace_warnings(&app.workspaces))
         .chain(config::guardrail_warnings(&app.guardrails))
+        .chain(config::forward_warnings(&app.forwards_cfg))
     {
         eprintln!("warning: {w}");
         config_warnings.push(w);
@@ -252,7 +254,10 @@ async fn main() -> Result<()> {
         // No cluster to watch — open the context picker over the empty table;
         // a successful pick connects and lands on the default resource.
         Some(err) => app.start_disconnected(err),
-        None => app.switch_kind(&resource),
+        None => {
+            app.switch_kind(&resource);
+            app.start_autostart_forwards();
+        }
     }
     // View config problems must be visible inside the TUI, not only on the
     // (about-to-be-hidden) stderr.
@@ -265,9 +270,16 @@ async fn main() -> Result<()> {
         return snapshot(&mut app, &mut rx).await;
     }
 
+    let mouse = cfg.mouse.unwrap_or(true);
     let mut terminal = ratatui::init();
+    if mouse {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+    }
     install_panic_hook(panic_tx);
-    let result = run(&mut terminal, &mut app, &mut rx).await;
+    let result = run(&mut terminal, &mut app, &mut rx, mouse).await;
+    // Disable before leaving the alternate screen so the shell never sees
+    // mouse-report sequences (harmless if capture was never enabled).
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     // `restore()` leaves the alternate screen but never re-shows the cursor
     // that `draw` hid, so without this the user's shell prompt has no cursor.
@@ -288,6 +300,10 @@ fn install_panic_hook(tx: mpsc::Sender<store::Msg>) {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if std::thread::current().name() == Some("main") {
+            // Mouse capture must go first: ratatui's restore leaves the
+            // alternate screen, and stray mouse reports would land in the
+            // shell after a crash.
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
             prev(info);
             let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
         } else {
@@ -413,17 +429,33 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
     Ok(())
 }
 
+/// Ring the terminal bell and emit an OSC 9 desktop notification for a
+/// `:notify` event. OSC 9 pops a system notification on terminals that
+/// support it (iTerm2, kitty, WezTerm, foot…) and is ignored by the rest;
+/// control characters are stripped so log content can't smuggle sequences.
+fn ring_notification(text: &str) {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::style::Print(format!("\x07\x1b]9;sofka: {clean}\x1b\\"))
+    );
+}
+
 /// Leave the alt-screen/raw-mode TUI, run an interactive command with inherited
 /// stdio (kubectl exec/edit/port-forward), then restore the TUI. Toggles the
 /// terminal modes directly rather than `ratatui::restore()`/`init()`: `init()`
 /// stacks another panic hook on every call, and the hook installed at startup
 /// must stay the outermost one.
-fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String]) {
+fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String], mouse: bool) {
+    use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
     use crossterm::terminal::{
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
     if argv.is_empty() {
         return;
+    }
+    if mouse {
+        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     }
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(
@@ -436,6 +468,9 @@ fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String]) {
         .status();
     let _ = enable_raw_mode();
     let _ = crossterm::execute!(std::io::stdout(), EnterAlternateScreen);
+    if mouse {
+        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    }
     let _ = terminal.clear();
 }
 
@@ -506,6 +541,7 @@ async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     rx: &mut mpsc::Receiver<store::Msg>,
+    mouse: bool,
 ) -> Result<()> {
     let mut reader = crossterm::event::EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -529,12 +565,21 @@ async fn run(
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         app.handle_key(key)?;
                         if let Some(app::Suspend::Shell(argv)) = app.pending.take() {
-                            suspend_and_run(terminal, &argv);
+                            suspend_and_run(terminal, &argv, mouse);
                             app.flash = format!("ran: {}", argv.join(" "));
                             app.flash_err = false;
                         }
                         terminal.draw(|f| ui::draw(f, app))?;
                         dirty = false;
+                    }
+                    Some(Ok(Event::Mouse(m))) => {
+                        app.handle_mouse(m)?;
+                        if let Some(app::Suspend::Shell(argv)) = app.pending.take() {
+                            suspend_and_run(terminal, &argv, mouse);
+                            app.flash = format!("ran: {}", argv.join(" "));
+                            app.flash_err = false;
+                        }
+                        dirty = true;
                     }
                     Some(Err(_)) | None => return Ok(()),
                     // Resize (and any other terminal event) still needs a
@@ -547,6 +592,9 @@ async fn run(
                 // Batch any other queued updates before the next redraw.
                 while let Ok(m) = rx.try_recv() {
                     app.handle_msg(m);
+                }
+                if let Some(text) = app.take_notification() {
+                    ring_notification(&text);
                 }
                 dirty = true;
             }

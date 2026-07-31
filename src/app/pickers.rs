@@ -570,5 +570,10 @@ impl App {
                 .unwrap_or_else(|| "pods".into());
             self.switch_kind(&kind);
         }
+        // Saved forwards for the new context. Running ones from the previous
+        // context are deliberately left alone (kubectl pinned their context
+        // at spawn); autostart only adds what's missing here.
+        self.forwards_cfg = resolved.config.forwards;
+        self.start_autostart_forwards();
     }
 }

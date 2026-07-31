@@ -192,11 +192,13 @@ impl App {
             .collect()
     }
 
-    /// Diff the live object against its `last-applied-configuration` (k9s-style).
+    /// Diff the live object against its `last-applied-configuration`
+    /// (k9s-style), or — when that annotation is absent, as it is for every
+    /// Flux/Helm-managed object — against the previous revision this session's
+    /// watch saw, so "what just changed?" has an answer on GitOps clusters.
     pub fn open_diff(&mut self) {
-        use similar::{ChangeTag, TextDiff};
         self.set_return_mode();
-        let Some(mut obj) = self.selected() else {
+        let Some(obj) = self.selected() else {
             return;
         };
         let name = obj.metadata.name.clone().unwrap_or_default();
@@ -207,39 +209,37 @@ impl App {
             .as_ref()
             .and_then(|a| a.get("kubectl.kubernetes.io/last-applied-configuration"))
             .cloned();
-        let Some(last_json) = last else {
-            self.flash_warn("no last-applied-configuration (not applied via kubectl apply)");
-            return;
+
+        let (baseline_yaml, baseline_label) = match last {
+            Some(last_json) => {
+                let yaml = serde_json::from_str::<Value>(&last_json)
+                    .ok()
+                    .and_then(|v| serde_yaml::to_string(&v).ok())
+                    .unwrap_or(last_json);
+                (yaml, "last-applied")
+            }
+            None => {
+                let key = row_key(&obj);
+                let Some(prev) = self.prev_revisions.get(&self.kind_plural, &key) else {
+                    self.flash_warn(
+                        "nothing to diff: no last-applied annotation, \
+                         and no change seen this session",
+                    );
+                    return;
+                };
+                (diffable_yaml(prev.clone()), "session: previous")
+            }
         };
-        let last_yaml = serde_json::from_str::<Value>(&last_json)
-            .ok()
-            .and_then(|v| serde_yaml::to_string(&v).ok())
-            .unwrap_or(last_json);
 
-        // Clean the live object for a readable comparison.
-        if let Some(ann) = obj.metadata.annotations.as_mut() {
-            ann.remove("kubectl.kubernetes.io/last-applied-configuration");
-        }
-        obj.metadata.managed_fields = None;
-        let live_yaml = serde_yaml::to_string(&obj).unwrap_or_default();
-
-        let diff = TextDiff::from_lines(&last_yaml, &live_yaml);
-        let mut lines = Vec::new();
-        for change in diff.iter_all_changes() {
-            let sign = match change.tag() {
-                ChangeTag::Delete => '-',
-                ChangeTag::Insert => '+',
-                ChangeTag::Equal => ' ',
-            };
-            lines.push(format!("{sign}{}", change.value().trim_end_matches('\n')));
-        }
+        let live_yaml = diffable_yaml(obj);
+        let lines = diff_lines(&baseline_yaml, &live_yaml);
         if lines.iter().all(|l| l.starts_with(' ')) {
-            self.flash = "no diff: live matches last-applied".into();
+            self.flash = format!("no diff: live matches {baseline_label}");
             self.flash_err = false;
             return; // nothing to show — stay on the current view
         }
         self.detail = Scrollable {
-            title: format!("{name} — diff (last-applied → live)"),
+            title: format!("{name} — diff ({baseline_label} → live)"),
             lines: lines.into(),
             ..Default::default()
         };
@@ -352,6 +352,34 @@ impl App {
             task.abort();
         }
     }
+}
+
+/// Render an object as YAML cleaned for a readable side-by-side: no
+/// managedFields, no last-applied annotation (it *is* one of the sides), and
+/// no resourceVersion (it differs on every change — pure noise in a diff).
+fn diffable_yaml(mut obj: DynamicObject) -> String {
+    if let Some(ann) = obj.metadata.annotations.as_mut() {
+        ann.remove("kubectl.kubernetes.io/last-applied-configuration");
+    }
+    obj.metadata.managed_fields = None;
+    obj.metadata.resource_version = None;
+    serde_yaml::to_string(&obj).unwrap_or_default()
+}
+
+/// Unified-diff lines (`-`/`+`/` ` prefixed) between two documents.
+fn diff_lines(before: &str, after: &str) -> Vec<String> {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(before, after);
+    diff.iter_all_changes()
+        .map(|change| {
+            let sign = match change.tag() {
+                ChangeTag::Delete => '-',
+                ChangeTag::Insert => '+',
+                ChangeTag::Equal => ' ',
+            };
+            format!("{sign}{}", change.value().trim_end_matches('\n'))
+        })
+        .collect()
 }
 
 /// Render one Secret `data` entry as stringData-style YAML lines: single-line

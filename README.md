@@ -129,7 +129,10 @@ numbers.
   resource uses its CRD `additionalPrinterColumns` automatically. Press `w` to
   show or hide the wide-only columns (kubectl `-o wide`).
 - **Live CPU and MEM columns** for pods and nodes from the metrics API, with
-  color for unusual values. The pod container picker also shows CPU and memory
+  color for unusual values. Nodes also get **%CPU and %MEM of allocatable**
+  (`status.allocatable` — the pool the scheduler hands out), colored by the
+  configurable `utilization` thresholds and sortable, so "which node is full"
+  is one glance and one `S`. The pod container picker also shows CPU and memory
   for each container, each container usage as a percent of its request and its
   limit (`-` marks an unset request or limit), and the pod QoS class. All of it
   works correctly when metrics-server is not present.
@@ -158,13 +161,24 @@ numbers.
   label and field selectors (the API server evaluates them on ⏎), and typed
   column comparisons (`status=CrashLoopBackOff`, `cpu>500m`, `memory>1Gi`,
   `restarts>=5`, `age<2h`). Terms with a space between them use AND.
+- **Global fuzzy find** (`:find <text>`) — search object names across the
+  common kinds (workloads, pods, services, config, ingresses, jobs, storage,
+  nodes, namespaces, Flux objects) in every namespace at once, concurrently.
+  Results rank by fuzzy score; `⏎` jumps straight to the object. When a kind
+  can't be listed (RBAC), the result says it's incomplete instead of
+  pretending otherwise.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
 - **Pulse dashboard** (`:pulse`) — cluster-health tiles. sofka refreshes them
   every 5 seconds.
 - **Xray tree** (`:xray`) — a hierarchical view from the current kind down
   through owner references to pods and containers.
 - **Flux CD controls** (`t`) — a suspend/resume/reconcile menu that uses native
-  Kubernetes API patches.
+  Kubernetes API patches. Press `⏎` on a **HelmRelease** to open the revision
+  history of the Helm release it manages (resolved the way helm-controller
+  composes `releaseName`/`storageNamespace`): from there `⏎` shows a
+  revision's values, `y` the rendered manifest, `d` the NOTES, and `r` rolls
+  back — the Flux object and the Helm storage inspector are one keystroke
+  apart.
 - **CronJob controls** (`t`) — trigger now (creates a Job from the jobTemplate,
   like `kubectl create job --from`), suspend, and resume.
 - **A native Helm inspector** (`:helm` / `:hm`) — sofka decodes Helm's release
@@ -179,7 +193,21 @@ numbers.
   container) — download from or upload to a pod via `kubectl cp`, run
   off-thread with a completion flash. Uploads are gated by the `transfer`
   guardrail action and read-only mode.
-- **Background port-forwards** (`f`/`F` to start, `:pf` to manage).
+- **Background port-forwards** (`f`/`F` to start, `:pf` to manage), plus
+  **saved forwards** (`[[forwards]]`) — named entries that appear in `:pf`
+  even while stopped (`⏎` starts one), with optional `autostart = true` to
+  open them on connect and on matching context switches:
+
+  ```toml
+  [[forwards]]
+  name = "argocd"
+  target = "svc/argocd-server"  # kubectl syntax: pod/…, svc/…, deploy/…
+  namespace = "argocd"
+  ports = "8080:443"            # LOCAL:REMOTE
+  autostart = true              # start when sofka connects (default false)
+  contexts = ["home"]           # optional: only these contexts
+  ```
+
 - **Plugins** — shell-out commands that you define in the config file and bind
   to keys, scoped for each resource. Keys are full **chords** (`ctrl-g`,
   `alt-x`, `shift-b`, `f5`). Commands run in the **terminal**, in a captured
@@ -196,8 +224,22 @@ numbers.
 - **Workspaces** (`[[workspaces]]`) — a named collection of views for one task.
   Open it, then press `Tab` or `Shift-Tab` to cycle its views. You stay in the
   workspace.
+- **Watch notifications** (`:notify`) — toggle a notification on the selected
+  object. Sophie watches it so you don't have to: every state change the
+  watch sees (the same transitions the timeline records — rollout progress,
+  readiness, phase, restarts, waiting reasons, conditions) flashes in the
+  status line, rings the terminal bell, and emits an OSC 9 desktop
+  notification (iTerm2, kitty, WezTerm, foot; terminals without OSC 9 ignore
+  it). Each notify is its own bounded single-object watch, so it keeps firing
+  while you browse other views — "tell me when this rollout finishes" and
+  keep working. Toggle it off with `:notify` on the same row; everything is
+  session-local.
 - **Diff** (`:diff`) — a unified diff of the live object and its
-  `last-applied-configuration`.
+  `last-applied-configuration`. When that annotation is absent — as it is for
+  every Flux- or Helm-managed object, which nothing ever `kubectl apply`s —
+  sofka diffs against the **previous revision the session's watch saw**
+  instead, so "what just changed?" has an answer on GitOps clusters. sofka
+  keeps the last revision of up to 256 changed objects in memory for this.
 - **Events** (`:events` / `E`) — live Kubernetes Events for the selected
   object. sofka filters by UID when the UID is available.
 - **GitOps view** (`:gitops` / `:flux`) — for the selected object, the Flux
@@ -284,6 +326,12 @@ numbers.
   sofka queries only the contexts in `[fleet]`, and gathers each one at the same
   time with its own timeout, so one slow cluster never blocks the rest. Press
   `⏎` to switch to a context. Press `r` to refresh.
+- **Mouse support** — the wheel scrolls every view (table, logs, documents,
+  pickers — one notch is three steps of that view's own up/down), clicking a
+  table row selects it, and clicking a column header sorts by it (click again
+  to flip the direction). Set `mouse = false` in the config to keep the
+  terminal's native mouse behavior (text selection) instead; sofka releases
+  the mouse while a suspended command (`kubectl exec`, `$EDITOR`) runs.
 - **Compact mode** (`ctrl-e`) — collapse the seven-line header and the footer
   into one info line (kind · count · namespace · context, with a flash and the
   live indicator). So a tiled or multiplexed pane is almost all table.
@@ -345,6 +393,8 @@ default_namespace = "kube-system"
 default_resource  = "deployments"
 readonly          = false  # true disables every mutating action (delete, edit,
                            # scale, shell, plugins, …); --readonly/--write win
+mouse             = true   # false keeps the terminal's native mouse behavior
+                           # (text selection) instead of scroll/click/sort
 
 # Namespaces pinned to the top of the `n` switcher (★); session recents (·)
 # follow them.
@@ -394,8 +444,8 @@ sort = "EXPIRES:desc"     # initial sort column, ":asc" (default) or ":desc"
 
 [[views."cert-manager.io/v1/certificates".columns]]
 name = "READY"
-path = "/status/conditions/0/status"
-type = "status"           # colors the row like other status columns
+path = "Ready"            # the condition *type* name, found wherever it is
+type = "condition"        # in the array — order isn't guaranteed by anything
 
 [[views."cert-manager.io/v1/certificates".columns]]
 name = "EXPIRES"
@@ -410,17 +460,25 @@ wide = true               # only shown in wide mode (`w`)
 
 `path` is a JSON Pointer (RFC 6901) into the object as the API serves it:
 `/metadata/…`, `/spec/…`, `/status/…`, and array indices like
-`/status/conditions/0/status`. The column `type` is `text` (default), `status`,
-`number`, `quantity` (`500m`, `1Gi`), or `time`. Typed columns sort by value,
-not by text. The optional `width` (for fixed columns) and `align`
-(`left`/`center`/`right`) tune the layout. By default, columns overlay the
-selected ones: a header that matches replaces it in place, and new columns go
-before AGE. sofka skips invalid entries and shows a warning in the app. They
-never stop the TUI.
+`/spec/ports/0/port`. The column `type` is `text` (default), `status`,
+`number`, `quantity` (`500m`, `1Gi`), `time`, or `condition`. Typed columns
+sort by value, not by text. For a `condition` column, `path` is the condition
+**type name** (`Ready`, `Available`, `Reconciling`…): sofka finds it in
+`status.conditions` by name — never by array index, whose order nothing
+guarantees — renders its `status` (`True`/`False`/`Unknown`), and colors the
+row like a `status` column. The optional `width` (for fixed columns) and
+`align` (`left`/`center`/`right`) tune the layout. By default, columns overlay
+the selected ones: a header that matches replaces it in place, and new columns
+go before AGE. sofka skips invalid entries and shows a warning in the app.
+They never stop the TUI.
 
 A custom resource that has no explicit view uses its CRD
 `additionalPrinterColumns` automatically (columns with `priority > 0` become
-wide-only). So most custom resources get useful columns with no configuration.
+wide-only). The canonical condition lookup
+(`.status.conditions[?(@.type=="Ready")].status` — how most CRDs express
+their READY printer column) becomes a `condition` column; other JSONPath
+filter or wildcard expressions aren't representable and those columns are
+skipped. So most custom resources get useful columns with no configuration.
 
 ### Thresholds
 

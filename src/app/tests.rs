@@ -365,6 +365,88 @@ async fn skin_palette_command_opens_picker() {
 }
 
 #[tokio::test]
+async fn diff_falls_back_to_session_previous_revision() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    let dep = |rv: &str, replicas: i64| {
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": rv},
+            "spec": {"replicas": replicas}
+        })
+    };
+    apply(&mut app, dep("1", 1));
+    apply(&mut app, dep("2", 3));
+    app.table_state.select(Some(0));
+    app.open_diff();
+    assert_eq!(app.mode, Mode::Diff);
+    assert!(app.detail.title.contains("session"), "{}", app.detail.title);
+    assert!(
+        app.detail
+            .lines
+            .iter()
+            .any(|l| l.starts_with('-') && l.contains("replicas: 1"))
+    );
+    assert!(
+        app.detail
+            .lines
+            .iter()
+            .any(|l| l.starts_with('+') && l.contains("replicas: 3"))
+    );
+    // resourceVersion churn must not appear as diff noise.
+    assert!(
+        !app.detail
+            .lines
+            .iter()
+            .any(|l| l.contains("resourceVersion"))
+    );
+}
+
+#[tokio::test]
+async fn diff_without_any_baseline_warns() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"replicas": 1}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.open_diff();
+    assert_ne!(app.mode, Mode::Diff);
+    assert!(app.flash.contains("nothing to diff"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn diff_prefers_last_applied_when_present() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    let last = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"default"},"spec":{"replicas":2}}"#;
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {
+                "name": "web", "namespace": "default", "resourceVersion": "1",
+                "annotations": {"kubectl.kubernetes.io/last-applied-configuration": last}
+            },
+            "spec": {"replicas": 3}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.open_diff();
+    assert_eq!(app.mode, Mode::Diff);
+    assert!(
+        app.detail.title.contains("last-applied"),
+        "{}",
+        app.detail.title
+    );
+}
+
+#[tokio::test]
 async fn pulse_and_xray_warns_surface_as_flash() {
     let (mut app, _rx) = test_app();
     let data = crate::store::Pulse {
@@ -403,6 +485,267 @@ async fn metrics_error_is_stored_and_cleared_by_next_success() {
         containers: HashMap::new(),
     });
     assert_eq!(app.metrics_error, None);
+}
+
+#[tokio::test]
+async fn saved_forwards_show_as_stopped_until_running() {
+    let (mut app, _rx) = test_app();
+    app.forwards_cfg = vec![
+        crate::config::Forward {
+            name: "argocd".into(),
+            target: "svc/argocd-server".into(),
+            namespace: "argocd".into(),
+            ports: "8080:443".into(),
+            autostart: false,
+            contexts: vec![],
+        },
+        crate::config::Forward {
+            name: "db".into(),
+            target: "svc/postgres".into(),
+            namespace: "data".into(),
+            ports: "5432:5432".into(),
+            autostart: false,
+            contexts: vec![],
+        },
+    ];
+    let stopped: Vec<&str> = app
+        .stopped_configured_forwards()
+        .iter()
+        .map(|(_, f)| f.name.as_str())
+        .collect();
+    assert_eq!(stopped, ["argocd", "db"]);
+
+    // A live child linked by name moves the entry out of the stopped tail.
+    app.port_forwards.push(PortForward {
+        config_name: Some("argocd".into()),
+        ns: "argocd".into(),
+        target: "svc/argocd-server".into(),
+        ports: "8080:443".into(),
+        child: spawn_test_child("sleep", "5"),
+    });
+    assert!(app.forward_running("argocd"));
+    let stopped: Vec<&str> = app
+        .stopped_configured_forwards()
+        .iter()
+        .map(|(_, f)| f.name.as_str())
+        .collect();
+    assert_eq!(stopped, ["db"]);
+
+    // The :pf list is running + stopped; x on the running entry stops it and
+    // the entry reappears in the stopped tail.
+    app.open_port_forwards();
+    assert_eq!(app.pf_state.selected(), Some(0));
+    app.key_port_forwards(press(KeyCode::Char('x')));
+    assert!(app.port_forwards.is_empty());
+    assert_eq!(app.stopped_configured_forwards().len(), 2);
+    assert_eq!(app.pf_state.selected(), Some(0), "clamped to combined list");
+}
+
+#[test]
+fn forward_context_matching_and_validation() {
+    let f = crate::config::Forward {
+        name: "x".into(),
+        target: "svc/x".into(),
+        namespace: "ns".into(),
+        ports: "8080:80".into(),
+        autostart: true,
+        contexts: vec!["home".into()],
+    };
+    assert!(f.matches_context("home"));
+    assert!(!f.matches_context("prod"));
+    let all = crate::config::Forward {
+        contexts: vec![],
+        ..f.clone()
+    };
+    assert!(all.matches_context("anything"));
+
+    let warnings = crate::config::forward_warnings(&[
+        crate::config::Forward {
+            name: "".into(),
+            ..f.clone()
+        },
+        crate::config::Forward {
+            name: "badports".into(),
+            ports: "eighty:80".into(),
+            ..f.clone()
+        },
+        f.clone(),
+        f.clone(), // duplicate name
+    ]);
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.contains("empty name")));
+    assert!(warnings.iter().any(|w| w.contains("not LOCAL:REMOTE")));
+    assert!(warnings.iter().any(|w| w.contains("duplicate name")));
+}
+
+#[tokio::test]
+async fn mouse_click_selects_row_header_click_sorts_wheel_moves() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let pod = |name: &str, restarts: i64| {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "default"},
+            "status": {"phase": "Running", "containerStatuses":
+                [{"ready": true, "restartCount": restarts, "state": {"running": {}}}]}
+        })
+    };
+    apply(&mut app, pod("a", 5));
+    apply(&mut app, pod("b", 1));
+    app.table_state.select(Some(0));
+
+    // A frame must render first — that's what records the hit geometry.
+    let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let hit = app.table_hit.borrow().clone().expect("geometry recorded");
+
+    let click = |column: u16, row: u16| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // Click the second data row → it becomes the selection.
+    app.handle_mouse(click(hit.x_min + 3, hit.rows_y + 1))
+        .unwrap();
+    assert_eq!(app.table_state.selected(), Some(1));
+
+    // Click the RESTARTS header → sort by it; again → flip direction.
+    let ridx = app
+        .display_headers()
+        .iter()
+        .position(|h| h == "RESTARTS")
+        .unwrap();
+    let (sx, _) = hit.cols[ridx];
+    app.handle_mouse(click(sx, hit.header_y)).unwrap();
+    assert_eq!(app.sort_column, Some(ridx));
+    assert!(!app.sort_desc);
+    app.handle_mouse(click(sx, hit.header_y)).unwrap();
+    assert!(app.sort_desc);
+
+    // Wheel scroll maps to the mode's own up/down keys (3 per notch).
+    app.table_state.select(Some(0));
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    })
+    .unwrap();
+    assert_eq!(app.table_state.selected(), Some(1), "clamped at the end");
+
+    // A click outside the table (e.g. the header panel) is ignored.
+    app.handle_mouse(click(0, 0)).unwrap();
+    assert_eq!(app.table_state.selected(), Some(1));
+}
+
+#[tokio::test]
+async fn notify_toggles_a_background_watch_per_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+
+    assert!(app.run_palette_command("notify"));
+    assert_eq!(app.notify_tasks.len(), 1);
+    assert!(app.notify_tasks.contains_key("pods/default/web"));
+    assert!(app.flash.contains("notify on"), "{}", app.flash);
+
+    // Same command on the same row toggles it off.
+    assert!(app.run_palette_command("notify"));
+    assert!(app.notify_tasks.is_empty());
+    assert!(app.flash.contains("notify off"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn notify_survives_view_switches() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    assert!(app.run_palette_command("notify"));
+    assert_eq!(app.notify_tasks.len(), 1);
+
+    // bump_generation (any view switch) aborts self.tasks — the notify watch
+    // must not be among them.
+    app.switch_kind("services");
+    assert_eq!(app.notify_tasks.len(), 1);
+    assert!(!app.notify_tasks["pods/default/web"].is_finished());
+}
+
+#[tokio::test]
+async fn notify_msg_flashes_and_queues_bell() {
+    let (mut app, _rx) = test_app();
+    app.handle_msg(Msg::Notify("pod/web: Ready True → False".into()));
+    assert!(!app.flash_err);
+    assert!(app.flash.contains("pod/web"), "{}", app.flash);
+    assert_eq!(
+        app.take_notification().as_deref(),
+        Some("pod/web: Ready True → False")
+    );
+    assert_eq!(app.take_notification(), None, "consumed once");
+}
+
+#[tokio::test]
+async fn find_opens_picker_and_enter_navigates_to_the_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+
+    // Bare :find is a usage hint, not a search.
+    assert!(app.run_palette_command("find"));
+    assert!(app.flash.contains("usage"), "{}", app.flash);
+
+    assert!(app.run_palette_command("find web"));
+    assert_eq!(app.mode, Mode::Find);
+    assert_eq!(app.find_query, "web");
+
+    app.handle_msg(Msg::FindResults {
+        generation: app.generation,
+        query: "web".into(),
+        items: vec![
+            crate::store::FindItem {
+                plural: "pods".into(),
+                ns: "default".into(),
+                name: "web-1".into(),
+            },
+            crate::store::FindItem {
+                plural: "deployments".into(),
+                ns: "default".into(),
+                name: "web".into(),
+            },
+        ],
+        warn: None,
+    });
+    assert_eq!(app.find_state.selected(), Some(0));
+    assert!(app.flash.contains("2 hit(s)"), "{}", app.flash);
+
+    app.key_find(press(KeyCode::Enter));
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=web-1"));
+
+    // Incomplete sweeps say so instead of pretending the list is exhaustive.
+    app.handle_msg(Msg::FindResults {
+        generation: app.generation,
+        query: "web".into(),
+        items: Vec::new(),
+        warn: Some("2 kind(s) could not be listed".into()),
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("incomplete"), "{}", app.flash);
 }
 
 #[tokio::test]
@@ -1176,12 +1519,14 @@ fn spawn_test_child(argv0: &str, arg: &str) -> tokio::process::Child {
 async fn stopping_a_forward_kills_only_that_one() {
     let (mut app, _rx) = test_app();
     app.port_forwards.push(PortForward {
+        config_name: None,
         ns: "default".into(),
         target: "pod/a".into(),
         ports: "8080:80".into(),
         child: spawn_test_child("sleep", "30"),
     });
     app.port_forwards.push(PortForward {
+        config_name: None,
         ns: "default".into(),
         target: "pod/b".into(),
         ports: "8081:81".into(),
@@ -1207,6 +1552,7 @@ async fn reap_drops_exited_forwards_and_flashes() {
     let mut child = spawn_test_child("true", "");
     child.wait().await.unwrap(); // let it exit before reaping
     app.port_forwards.push(PortForward {
+        config_name: None,
         ns: "default".into(),
         target: "pod/a".into(),
         ports: "8080:80".into(),
@@ -1648,6 +1994,65 @@ async fn metrics_update_invalidates_metric_sorted_rows() {
         .map(|o| o.metadata.name.clone().unwrap())
         .collect();
     assert_eq!(names, ["b", "a"]);
+}
+
+#[tokio::test]
+async fn node_capacity_percent_columns_render_and_sort() {
+    let (mut app, _rx) = test_app();
+    // Pods must not grow the node columns.
+    app.switch_kind("pods");
+    assert!(!app.display_headers().contains(&"%CPU".to_string()));
+
+    app.switch_kind("nodes");
+    let node = |name: &str, cpu: &str| {
+        json!({"apiVersion": "v1", "kind": "Node",
+               "metadata": {"name": name, "resourceVersion": "1"},
+               "status": {"allocatable": {"cpu": cpu, "memory": "8Gi"}}})
+    };
+    apply(&mut app, node("big", "4"));
+    apply(&mut app, node("small", "2"));
+
+    let headers = app.display_headers();
+    assert!(headers.contains(&"%CPU".to_string()), "{headers:?}");
+    assert!(headers.contains(&"%MEM".to_string()), "{headers:?}");
+
+    // Same absolute usage, different allocatable → percent sort differs from
+    // absolute sort: 1000m is 25% of big (4 cores) but 50% of small (2).
+    app.handle_msg(Msg::Metrics {
+        generation: app.generation,
+        data: HashMap::from([
+            ("big".to_string(), (1000, 0)),
+            ("small".to_string(), (1000, 0)),
+        ]),
+        containers: HashMap::new(),
+    });
+    let pct_idx = app
+        .display_headers()
+        .iter()
+        .position(|h| *h == "%CPU")
+        .unwrap();
+    app.sort_column = Some(pct_idx);
+    app.sort_desc = true;
+    app.invalidate_rows();
+    let names: Vec<String> = app
+        .rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["small", "big"]);
+}
+
+#[test]
+fn node_allocatable_reads_status_quantities() {
+    let node = obj(json!({"apiVersion": "v1", "kind": "Node",
+        "metadata": {"name": "n"},
+        "status": {"allocatable": {"cpu": "3900m", "memory": "8Gi"}}}));
+    assert_eq!(
+        crate::columns::node_allocatable(&node),
+        (Some(3900), Some(8 * 1024 * 1024 * 1024))
+    );
+    let bare = obj(json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "n"}}));
+    assert_eq!(crate::columns::node_allocatable(&bare), (None, None));
 }
 
 #[test]
@@ -2587,6 +2992,63 @@ async fn namespace_switch_is_recorded_in_history() {
 }
 
 // ----- Helm ---------------------------------------------------------------
+
+#[test]
+fn helmrelease_storage_resolves_like_helm_controller() {
+    use crate::helm::helmrelease_storage;
+    let hr = |spec: serde_json::Value| {
+        obj(json!({
+            "apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+            "metadata": {"name": "podinfo", "namespace": "flux-system"},
+            "spec": spec
+        }))
+    };
+    // Defaults: metadata name, object namespace.
+    assert_eq!(
+        helmrelease_storage(&hr(json!({}))),
+        ("podinfo".to_string(), "flux-system".to_string())
+    );
+    // Explicit releaseName + storageNamespace win.
+    assert_eq!(
+        helmrelease_storage(&hr(
+            json!({"releaseName": "custom", "storageNamespace": "apps"})
+        )),
+        ("custom".to_string(), "apps".to_string())
+    );
+    // targetNamespace without releaseName composes `<target>-<name>`.
+    assert_eq!(
+        helmrelease_storage(&hr(json!({"targetNamespace": "prod"}))),
+        ("prod-podinfo".to_string(), "flux-system".to_string())
+    );
+}
+
+#[tokio::test]
+async fn enter_on_helmrelease_opens_helm_history() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("helmreleases");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+            "metadata": {"name": "podinfo", "namespace": "flux-system"},
+            "spec": {"storageNamespace": "apps"}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.drill();
+    assert_eq!(app.kind_plural, "helmhistory");
+    assert_eq!(app.namespace, "apps");
+    assert_eq!(app.labels.as_deref(), Some("owner=helm,name=podinfo"));
+    assert_eq!(app.fields.as_deref(), Some("type=helm.sh/release.v1"));
+    // The backing kind must be the secrets watch, not the HelmRelease CRD.
+    assert_eq!(
+        app.kind.as_ref().map(|k| k.ar.plural.as_str()),
+        Some("secrets")
+    );
+    // Esc returns to the HelmRelease list.
+    assert!(app.pop_frame());
+    assert_eq!(app.kind_plural, "helmreleases");
+}
 
 #[tokio::test]
 async fn helm_list_shows_only_latest_revision_per_release() {

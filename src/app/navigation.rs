@@ -37,8 +37,41 @@ impl App {
             // Helm: release -> every revision, revision -> its values.
             "helm" => self.drill_into_helm_history(&obj),
             "helmhistory" => self.open_helm_values(&obj),
+            // A Flux HelmRelease bridges into the same native inspector:
+            // enter opens the history of the Helm release it manages.
+            "helmreleases" => self.drill_into_helmrelease(&obj),
             _ => self.open_detail(),
         }
+    }
+
+    /// Drill from a Flux `HelmRelease` row into the revision history of the
+    /// Helm release it manages — the same view `:helm` → enter reaches, so
+    /// values (`⏎`), manifest (`y`), notes (`d`), and rollback (`r`) all work
+    /// without leaving the Flux object. Resolves the storage coordinates the
+    /// way helm-controller composes them (releaseName/storageNamespace).
+    pub(super) fn drill_into_helmrelease(&mut self, obj: &DynamicObject) {
+        let Some(secrets) = self.cluster.resolve("secrets") else {
+            self.flash_warn("secrets kind unavailable");
+            return;
+        };
+        let (release, ns) = crate::helm::helmrelease_storage(obj);
+        if release.is_empty() {
+            self.flash_warn("HelmRelease has no resolvable release name");
+            return;
+        }
+        self.push_frame();
+        self.kind = Some(secrets);
+        self.kind_plural = "helmhistory".into();
+        self.namespace = ns;
+        self.labels = Some(format!("owner=helm,name={release}"));
+        self.fields = Some("type=helm.sh/release.v1".into());
+        self.scope_label = Some(format!("helm/{release}"));
+        self.filter.clear();
+        self.reset_sort();
+        self.table_state.select(Some(0));
+        self.flash = format!("↳ {release} history");
+        self.flash_err = false;
+        self.start_watch();
     }
 
     /// Drill from an aggregated Helm release row into every revision of that

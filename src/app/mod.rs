@@ -126,6 +126,8 @@ pub enum Mode {
     Snapshots,
     /// Cross-context fleet health dashboard (`:fleet`).
     Fleet,
+    /// Global fuzzy-find results picker (`:find <text>`).
+    Find,
 }
 
 /// A request for the run loop to suspend the TUI and run an interactive
@@ -143,6 +145,9 @@ pub struct PortForward {
     ns: String,
     target: String,
     ports: String,
+    /// The `[[forwards]]` entry this instance was started from, if any —
+    /// links a running child back to its saved config in `:pf`.
+    pub(super) config_name: Option<String>,
     child: tokio::process::Child,
 }
 
@@ -417,12 +422,14 @@ enum PaletteAction {
     Info,
     Fleet,
     Rightsize,
+    Find,
     Diff,
     Events,
     PortForwards,
     ProviderLogs,
     Skin,
     Helm,
+    Notify,
     Reload,
     ConfigInfo,
 }
@@ -487,6 +494,14 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Snapshots,
         names: &["snapshots", "dumps"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Notify,
+        names: &["notify", "bell"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Find,
+        names: &["find", "fd"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -725,6 +740,38 @@ impl SortKey {
     }
 }
 
+/// Maximum previous object revisions retained for the session diff.
+const PREV_REVISIONS_MAX: usize = 256;
+
+/// Previous revisions of objects the watch saw change, so `:diff` can show
+/// previous → live for GitOps-managed objects (whose
+/// `last-applied-configuration` is empty — nothing `kubectl apply`s them).
+/// Bounded FIFO keyed by (kind plural, store key); survives view switches so
+/// drilling away and back keeps the baseline.
+#[derive(Default)]
+pub(super) struct PrevRevisions {
+    map: HashMap<(String, String), DynamicObject>,
+    order: VecDeque<(String, String)>,
+}
+
+impl PrevRevisions {
+    pub(super) fn insert(&mut self, kind: &str, key: &str, obj: DynamicObject) {
+        let k = (kind.to_string(), key.to_string());
+        if self.map.insert(k.clone(), obj).is_none() {
+            self.order.push_back(k);
+            while self.order.len() > PREV_REVISIONS_MAX {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.map.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    pub(super) fn get(&self, kind: &str, key: &str) -> Option<&DynamicObject> {
+        self.map.get(&(kind.to_string(), key.to_string()))
+    }
+}
+
 /// The active filter string alongside its parsed form, so the grammar is
 /// reparsed only when the string actually changes — never per frame or row.
 struct FilterCache {
@@ -935,6 +982,10 @@ pub struct App {
     /// context's summary lands.
     pub fleet_rows: Vec<crate::fleet::FleetRow>,
     pub fleet_state: ListState,
+    /// Global fuzzy-find (`:find`) results and picker cursor.
+    pub find_items: Vec<crate::store::FindItem>,
+    pub find_state: ListState,
+    pub find_query: String,
     /// The last bundle assembled by `:bundle`, previewed in the detail view and
     /// written to disk by `:bundle-save`: `(filename, text)`.
     pub pending_bundle: Option<(String, String)>,
@@ -979,6 +1030,9 @@ pub struct App {
     /// Viewed/stopped via `:pf`; killed automatically on drop.
     pub port_forwards: Vec<PortForward>,
     pub pf_state: ListState,
+    /// Saved `[[forwards]]` from config: shown in `:pf` even while stopped,
+    /// startable with one keystroke, autostarted on connect when configured.
+    pub forwards_cfg: Vec<crate::config::Forward>,
 
     pub skin_list: Vec<String>,
     pub skin_state: ListState,
@@ -1035,6 +1089,19 @@ pub struct App {
     pub gitops_source: Option<DynamicObject>,
     /// Session-local per-object state-change history, fed by the table watch.
     pub timeline: crate::timeline::Timeline,
+    /// Table geometry from the last frame, for mouse hit-testing. A RefCell
+    /// because the renderer records it while the frame still borrows rows.
+    pub(super) table_hit: RefCell<Option<mouse::TableHit>>,
+    /// Active `:notify` watches, keyed by `plural/ns/name`. Each is its own
+    /// single-object background watcher, deliberately NOT in [`Self::tasks`]:
+    /// a notify must survive `bump_generation` (view switches) and fire from
+    /// anywhere until toggled off.
+    pub(super) notify_tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// A notification waiting for the main loop to ring the terminal bell and
+    /// emit an OSC 9 desktop notification for.
+    pub(super) pending_notify: Option<String>,
+    /// Previous object revisions for the session diff (`:diff` fallback).
+    pub(super) prev_revisions: PrevRevisions,
     /// The `(plural, row_key)` the timeline view is showing, and its cursor.
     pub timeline_target: Option<(String, String)>,
     pub timeline_state: ListState,
@@ -1158,6 +1225,9 @@ impl App {
             fleet_cfg: crate::config::FleetConfig::default(),
             fleet_rows: Vec::new(),
             fleet_state: ListState::default(),
+            find_items: Vec::new(),
+            find_state: ListState::default(),
+            find_query: String::new(),
             pending_bundle: None,
             journal: crate::journal::Journal::default(),
             watch_errors: 0,
@@ -1175,6 +1245,7 @@ impl App {
             transfer_menu_state: ListState::default(),
             transfer_target: None,
             port_forwards: Vec::new(),
+            forwards_cfg: Vec::new(),
             pf_state: ListState::default(),
             skin_list: crate::theme::BUILTIN_NAMES
                 .iter()
@@ -1206,6 +1277,10 @@ impl App {
             gitops_title: String::new(),
             gitops_source: None,
             timeline: crate::timeline::Timeline::default(),
+            table_hit: RefCell::new(None),
+            notify_tasks: HashMap::new(),
+            pending_notify: None,
+            prev_revisions: PrevRevisions::default(),
             timeline_target: None,
             timeline_state: ListState::default(),
             confirm_label: String::new(),
@@ -1265,6 +1340,7 @@ mod dashboards;
 mod details;
 mod diagnostics;
 mod explain;
+mod find;
 mod fleet;
 mod gitops;
 mod guardrails;
@@ -1273,7 +1349,9 @@ mod input;
 mod journal;
 mod lifecycle;
 mod logs;
+mod mouse;
 mod navigation;
+mod notify;
 mod overlays;
 mod pickers;
 mod rightsize;
