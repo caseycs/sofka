@@ -132,6 +132,27 @@ pub fn release_name(secret: &DynamicObject) -> Option<&str> {
         .map(String::as_str)
 }
 
+/// Where helm-controller stores a Flux `HelmRelease`'s underlying Helm
+/// release: `(release name, storage namespace)`. The release name is
+/// `spec.releaseName`, defaulting to helm-controller's own composition
+/// `[<targetNamespace>-]<name>`; storage is `spec.storageNamespace`,
+/// defaulting to the object's namespace.
+pub fn helmrelease_storage(obj: &DynamicObject) -> (String, String) {
+    let name = obj.metadata.name.clone().unwrap_or_default();
+    let field = |p: &str| obj.data.pointer(p).and_then(Value::as_str);
+    let release = match field("/spec/releaseName") {
+        Some(r) => r.to_string(),
+        None => match field("/spec/targetNamespace") {
+            Some(t) => format!("{t}-{name}"),
+            None => name,
+        },
+    };
+    let ns = field("/spec/storageNamespace")
+        .map(str::to_string)
+        .unwrap_or_else(|| obj.metadata.namespace.clone().unwrap_or_default());
+    (release, ns)
+}
+
 /// The revision number from the secret's `version` label — cheap, no decode
 /// needed. Used to pick the latest revision per release without decoding
 /// every revision's payload.
