@@ -2588,6 +2588,63 @@ async fn namespace_switch_is_recorded_in_history() {
 
 // ----- Helm ---------------------------------------------------------------
 
+#[test]
+fn helmrelease_storage_resolves_like_helm_controller() {
+    use crate::helm::helmrelease_storage;
+    let hr = |spec: serde_json::Value| {
+        obj(json!({
+            "apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+            "metadata": {"name": "podinfo", "namespace": "flux-system"},
+            "spec": spec
+        }))
+    };
+    // Defaults: metadata name, object namespace.
+    assert_eq!(
+        helmrelease_storage(&hr(json!({}))),
+        ("podinfo".to_string(), "flux-system".to_string())
+    );
+    // Explicit releaseName + storageNamespace win.
+    assert_eq!(
+        helmrelease_storage(&hr(
+            json!({"releaseName": "custom", "storageNamespace": "apps"})
+        )),
+        ("custom".to_string(), "apps".to_string())
+    );
+    // targetNamespace without releaseName composes `<target>-<name>`.
+    assert_eq!(
+        helmrelease_storage(&hr(json!({"targetNamespace": "prod"}))),
+        ("prod-podinfo".to_string(), "flux-system".to_string())
+    );
+}
+
+#[tokio::test]
+async fn enter_on_helmrelease_opens_helm_history() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("helmreleases");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "helm.toolkit.fluxcd.io/v2", "kind": "HelmRelease",
+            "metadata": {"name": "podinfo", "namespace": "flux-system"},
+            "spec": {"storageNamespace": "apps"}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.drill();
+    assert_eq!(app.kind_plural, "helmhistory");
+    assert_eq!(app.namespace, "apps");
+    assert_eq!(app.labels.as_deref(), Some("owner=helm,name=podinfo"));
+    assert_eq!(app.fields.as_deref(), Some("type=helm.sh/release.v1"));
+    // The backing kind must be the secrets watch, not the HelmRelease CRD.
+    assert_eq!(
+        app.kind.as_ref().map(|k| k.ar.plural.as_str()),
+        Some("secrets")
+    );
+    // Esc returns to the HelmRelease list.
+    assert!(app.pop_frame());
+    assert_eq!(app.kind_plural, "helmreleases");
+}
+
 #[tokio::test]
 async fn helm_list_shows_only_latest_revision_per_release() {
     let (mut app, _rx) = test_app();

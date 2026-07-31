@@ -460,6 +460,9 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
     if app.flux_suspendable() {
         lines.push(hint_line(&[("t", "flux menu")]));
     }
+    if app.kind_plural == "helmreleases" {
+        lines.push(hint_line(&[("⏎", "helm history")]));
+    }
     if app.cronjob_kind() {
         lines.push(hint_line(&[("t", "trigger/suspend")]));
     }

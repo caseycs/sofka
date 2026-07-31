@@ -162,7 +162,12 @@ numbers.
 - **Xray tree** (`:xray`) — a hierarchical view from the current kind down
   through owner references to pods and containers.
 - **Flux CD controls** (`t`) — a suspend/resume/reconcile menu that uses native
-  Kubernetes API patches.
+  Kubernetes API patches. Press `⏎` on a **HelmRelease** to open the revision
+  history of the Helm release it manages (resolved the way helm-controller
+  composes `releaseName`/`storageNamespace`): from there `⏎` shows a
+  revision's values, `y` the rendered manifest, `d` the NOTES, and `r` rolls
+  back — the Flux object and the Helm storage inspector are one keystroke
+  apart.
 - **CronJob controls** (`t`) — trigger now (creates a Job from the jobTemplate,
   like `kubectl create job --from`), suspend, and resume.
 - **Background port-forwards** (`f`/`F` to start, `:pf` to manage).
