@@ -555,6 +555,7 @@ impl App {
             PaletteAction::ProviderLogs => self.open_provider_logs(),
             PaletteAction::Skin => self.open_skins(),
             PaletteAction::Helm => self.open_helm_releases(),
+            PaletteAction::Notify => self.toggle_notify(),
             PaletteAction::Reload => self.reload_config(),
             PaletteAction::ConfigInfo => self.open_config_info(),
         }

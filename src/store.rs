@@ -194,6 +194,9 @@ pub enum Msg {
     /// Deliberately generation-free: it must surface no matter which view is
     /// current.
     Panic(String),
+    /// A state change on a `:notify`-watched object. Generation-free like
+    /// [`Msg::Panic`]: the whole point is firing from any view.
+    Notify(String),
 }
 
 /// Cluster-health snapshot for the pulse dashboard.

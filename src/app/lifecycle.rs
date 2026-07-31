@@ -586,6 +586,11 @@ impl App {
                 self.flash = format!("internal error: {error}");
                 self.flash_err = true;
             }
+            Msg::Notify(text) => {
+                self.flash = format!("🔔 {text}");
+                self.flash_err = false;
+                self.pending_notify = Some(text);
+            }
             Msg::LogLines { generation, lines } if generation == self.log_gen => {
                 self.push_log_lines(lines);
             }

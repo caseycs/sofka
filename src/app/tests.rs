@@ -406,6 +406,61 @@ async fn metrics_error_is_stored_and_cleared_by_next_success() {
 }
 
 #[tokio::test]
+async fn notify_toggles_a_background_watch_per_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+
+    assert!(app.run_palette_command("notify"));
+    assert_eq!(app.notify_tasks.len(), 1);
+    assert!(app.notify_tasks.contains_key("pods/default/web"));
+    assert!(app.flash.contains("notify on"), "{}", app.flash);
+
+    // Same command on the same row toggles it off.
+    assert!(app.run_palette_command("notify"));
+    assert!(app.notify_tasks.is_empty());
+    assert!(app.flash.contains("notify off"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn notify_survives_view_switches() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    assert!(app.run_palette_command("notify"));
+    assert_eq!(app.notify_tasks.len(), 1);
+
+    // bump_generation (any view switch) aborts self.tasks — the notify watch
+    // must not be among them.
+    app.switch_kind("services");
+    assert_eq!(app.notify_tasks.len(), 1);
+    assert!(!app.notify_tasks["pods/default/web"].is_finished());
+}
+
+#[tokio::test]
+async fn notify_msg_flashes_and_queues_bell() {
+    let (mut app, _rx) = test_app();
+    app.handle_msg(Msg::Notify("pod/web: Ready True → False".into()));
+    assert!(!app.flash_err);
+    assert!(app.flash.contains("pod/web"), "{}", app.flash);
+    assert_eq!(
+        app.take_notification().as_deref(),
+        Some("pod/web: Ready True → False")
+    );
+    assert_eq!(app.take_notification(), None, "consumed once");
+}
+
+#[tokio::test]
 async fn panic_msg_flashes_regardless_of_generation() {
     let (mut app, _rx) = test_app();
     app.generation = 7; // a Panic has no generation tag and must never be dropped as stale

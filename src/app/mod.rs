@@ -423,6 +423,7 @@ enum PaletteAction {
     ProviderLogs,
     Skin,
     Helm,
+    Notify,
     Reload,
     ConfigInfo,
 }
@@ -487,6 +488,10 @@ const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: PaletteAction::Snapshots,
         names: &["snapshots", "dumps"],
+    },
+    PaletteCommand {
+        action: PaletteAction::Notify,
+        names: &["notify", "bell"],
     },
     PaletteCommand {
         action: PaletteAction::Diff,
@@ -1035,6 +1040,14 @@ pub struct App {
     pub gitops_source: Option<DynamicObject>,
     /// Session-local per-object state-change history, fed by the table watch.
     pub timeline: crate::timeline::Timeline,
+    /// Active `:notify` watches, keyed by `plural/ns/name`. Each is its own
+    /// single-object background watcher, deliberately NOT in [`Self::tasks`]:
+    /// a notify must survive `bump_generation` (view switches) and fire from
+    /// anywhere until toggled off.
+    pub(super) notify_tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+    /// A notification waiting for the main loop to ring the terminal bell and
+    /// emit an OSC 9 desktop notification for.
+    pub(super) pending_notify: Option<String>,
     /// The `(plural, row_key)` the timeline view is showing, and its cursor.
     pub timeline_target: Option<(String, String)>,
     pub timeline_state: ListState,
@@ -1206,6 +1219,8 @@ impl App {
             gitops_title: String::new(),
             gitops_source: None,
             timeline: crate::timeline::Timeline::default(),
+            notify_tasks: HashMap::new(),
+            pending_notify: None,
             timeline_target: None,
             timeline_state: ListState::default(),
             confirm_label: String::new(),
@@ -1274,6 +1289,7 @@ mod journal;
 mod lifecycle;
 mod logs;
 mod navigation;
+mod notify;
 mod overlays;
 mod pickers;
 mod rightsize;

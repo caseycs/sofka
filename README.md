@@ -182,6 +182,16 @@ numbers.
 - **Workspaces** (`[[workspaces]]`) — a named collection of views for one task.
   Open it, then press `Tab` or `Shift-Tab` to cycle its views. You stay in the
   workspace.
+- **Watch notifications** (`:notify`) — toggle a notification on the selected
+  object. Sophie watches it so you don't have to: every state change the
+  watch sees (the same transitions the timeline records — rollout progress,
+  readiness, phase, restarts, waiting reasons, conditions) flashes in the
+  status line, rings the terminal bell, and emits an OSC 9 desktop
+  notification (iTerm2, kitty, WezTerm, foot; terminals without OSC 9 ignore
+  it). Each notify is its own bounded single-object watch, so it keeps firing
+  while you browse other views — "tell me when this rollout finishes" and
+  keep working. Toggle it off with `:notify` on the same row; everything is
+  session-local.
 - **Diff** (`:diff`) — a unified diff of the live object and its
   `last-applied-configuration`.
 - **Events** (`:events` / `E`) — live Kubernetes Events for the selected
