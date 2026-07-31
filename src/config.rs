@@ -696,8 +696,8 @@ pub struct Guardrail {
     pub namespaces: Vec<String>,
     /// Resource plurals/kinds this applies to (globs). Empty = any.
     pub resources: Vec<String>,
-    /// Actions this applies to: `delete`, `force-delete`, `drain`, `shell`,
-    /// `debug`, `node-debug`. Empty = any.
+    /// Actions this applies to: `delete`, `force-delete`, `drain`, `restart`,
+    /// `shell`, `debug`, `node-debug`, `transfer`. Empty = any.
     pub actions: Vec<String>,
     /// Block the action outright.
     pub deny: bool,
