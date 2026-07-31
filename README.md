@@ -183,7 +183,11 @@ numbers.
   Open it, then press `Tab` or `Shift-Tab` to cycle its views. You stay in the
   workspace.
 - **Diff** (`:diff`) — a unified diff of the live object and its
-  `last-applied-configuration`.
+  `last-applied-configuration`. When that annotation is absent — as it is for
+  every Flux- or Helm-managed object, which nothing ever `kubectl apply`s —
+  sofka diffs against the **previous revision the session's watch saw**
+  instead, so "what just changed?" has an answer on GitOps clusters. sofka
+  keeps the last revision of up to 256 changed objects in memory for this.
 - **Events** (`:events` / `E`) — live Kubernetes Events for the selected
   object. sofka filters by UID when the UID is available.
 - **GitOps view** (`:gitops` / `:flux`) — for the selected object, the Flux
