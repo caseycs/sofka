@@ -85,10 +85,11 @@ impl App {
             let ts = k8s_openapi::jiff::Timestamp::now();
 
             // ---- gather -----------------------------------------------------
+            let mut warn = None;
             let pods: Vec<DynamicObject> = if plural == "pods" {
                 vec![obj.clone()]
             } else if let (Some((ar, nsd)), Some(sel)) = (&pods_kind, &selector) {
-                list_selected(&client, ar, *nsd, &ns, sel).await
+                list_selected(&client, ar, *nsd, &ns, sel, &mut warn).await
             } else {
                 Vec::new()
             };
@@ -96,7 +97,7 @@ impl App {
             let (events, events_v1) = match &events_kind {
                 Some((ar, nsd)) => {
                     let v1 = ar.group == "events.k8s.io";
-                    let all = list_kind(&client, ar, *nsd, &ns).await;
+                    let all = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
                     (filter_events(&all, &obj, &pods, v1), v1)
                 }
                 None => (Vec::new(), false),
@@ -110,7 +111,8 @@ impl App {
                 events: &events,
                 events_v1,
             };
-            let findings = crate::explain::explain(&evidence);
+            let mut findings = crate::explain::explain(&evidence);
+            prepend_warn_finding(&mut findings, warn);
 
             let owner = match (&owner_ref, &owner_kind) {
                 (Some(oref), Some((ar, nsd))) => {

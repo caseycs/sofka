@@ -138,14 +138,18 @@ async fn gather_context(ctx: &str, readonly: bool) -> FleetRow {
         Err(_) => "?".into(),
     };
 
+    // A failed list must not summarize as "0 unhealthy" — record it and mark
+    // the row, keeping whatever partial counts did arrive.
+    let mut warn = None;
+
     if let Some(k) = cluster.resolve("nodes") {
-        let nodes = list_kind(&client, &k.ar, false, "").await;
+        let nodes = list_or_warn(&client, &k.ar, false, "", &mut warn).await;
         row.nodes_total = nodes.len();
         row.nodes_ready = nodes.iter().filter(|o| node_ready(o)).count();
     }
 
     if let Some(k) = cluster.resolve("pods") {
-        let pods = list_kind(&client, &k.ar, k.namespaced, "").await;
+        let pods = list_or_warn(&client, &k.ar, k.namespaced, "", &mut warn).await;
         row.pods_total = pods.len();
         row.pods_unhealthy = pods.iter().filter(|o| !pod_healthy(o)).count();
     }
@@ -154,14 +158,17 @@ async fn gather_context(ctx: &str, readonly: bool) -> FleetRow {
     let mut flux_failed = None;
     for kind in ["kustomizations", "helmreleases"] {
         if let Some(k) = cluster.resolve(kind) {
-            let items = list_kind(&client, &k.ar, k.namespaced, "").await;
+            let items = list_or_warn(&client, &k.ar, k.namespaced, "", &mut warn).await;
             let failed = items.iter().filter(|o| ready_is_false(o)).count();
             *flux_failed.get_or_insert(0) += failed;
         }
     }
     row.flux_failed = flux_failed;
 
-    row.status = FleetStatus::Ok;
+    row.status = match warn {
+        Some(w) => FleetStatus::Error(short_error(&w)),
+        None => FleetStatus::Ok,
+    };
     row
 }
 
@@ -199,10 +206,5 @@ fn ready_is_false(o: &DynamicObject) -> bool {
 
 /// First line of a connection error, trimmed for the one-line status cell.
 fn short_error(e: &str) -> String {
-    let first = e.lines().next().unwrap_or(e).trim();
-    if first.len() > 60 {
-        format!("{}…", &first[..59])
-    } else {
-        first.to_string()
-    }
+    crate::text::ellipsize(e.lines().next().unwrap_or(e).trim(), 60)
 }

@@ -10,11 +10,19 @@ impl App {
         // Strip carriage returns so progress output doesn't overwrite a row,
         // and expand tabs to spaces — many loggers separate timestamp/level/body
         // with tabs, which some terminals render awkwardly in a TUI cell.
-        self.logs.view.lines.extend(
-            lines
-                .into_iter()
-                .map(|line| line.replace('\r', "").replace('\t', " ")),
-        );
+        // Clean lines (the vast majority) pass through without reallocating.
+        self.logs.view.lines.extend(lines.into_iter().map(|line| {
+            if !line.contains('\r') && !line.contains('\t') {
+                return line;
+            }
+            line.chars()
+                .filter_map(|c| match c {
+                    '\r' => None,
+                    '\t' => Some(' '),
+                    c => Some(c),
+                })
+                .collect()
+        }));
 
         // While following, keep a tight tail buffer. While paused, avoid
         // trimming so indices don't shift under the frozen view (only a huge

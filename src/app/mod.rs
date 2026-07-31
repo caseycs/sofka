@@ -697,6 +697,7 @@ impl LogsView {
 
 /// A comparable value for one cell, so columns sort numerically where it makes
 /// sense (RESTARTS, CPU, AGE…) and lexically otherwise (NAME, STATUS…).
+#[derive(Clone)]
 enum SortKey {
     Num(f64),
     Text(String),
@@ -739,6 +740,9 @@ struct RowsCache {
     dirty: bool,
     keys: Vec<String>,
     cells: HashMap<String, CellCacheEntry>,
+    /// Computed primary sort keys, valid per (sort header, resourceVersion) —
+    /// a rebuild touches every object, but only changed rows re-extract.
+    sort_keys: HashMap<String, SortKeyEntry>,
 }
 
 struct CellCacheEntry {
@@ -746,6 +750,12 @@ struct CellCacheEntry {
     resource_version: Option<String>,
     cells: Vec<String>,
     status_idx: Option<usize>,
+}
+
+struct SortKeyEntry {
+    header: String,
+    resource_version: Option<String>,
+    key: SortKey,
 }
 
 pub(crate) struct TableCellCache<'a> {
@@ -936,6 +946,9 @@ pub struct App {
     pub last_error: Option<String>,
     /// Whether the Metrics API has ever returned data this session.
     pub metrics_seen: bool,
+    /// The metrics poll's most recent failure (`None` while it works), for
+    /// `:info` — a broken metrics-server must not read as "usage is zero".
+    pub metrics_error: Option<String>,
     /// A workspace waiting for an in-flight context switch before it opens.
     pub pending_workspace: Option<crate::config::Workspace>,
     /// The workspace currently being cycled with `Tab`/`Shift-Tab`, if any.
@@ -1150,6 +1163,7 @@ impl App {
             watch_errors: 0,
             last_error: None,
             metrics_seen: false,
+            metrics_error: None,
             rbac_allowed: None,
             last_rbac_ns: None,
             container_list: Vec::new(),
@@ -1213,6 +1227,7 @@ impl App {
                 dirty: true,
                 keys: Vec::new(),
                 cells: HashMap::new(),
+                sort_keys: HashMap::new(),
             }),
             log_provider: None,
             metrics_provider: None,

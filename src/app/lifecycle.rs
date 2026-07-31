@@ -495,33 +495,38 @@ impl App {
                 } else {
                     Api::all_with(client.clone(), &ar)
                 };
-                if let Ok(list) = api.list(&ListParams::default()).await {
-                    let mut data = HashMap::new();
-                    let mut containers = HashMap::new();
-                    for item in list {
-                        let name = item.metadata.name.clone().unwrap_or_default();
-                        let key = match &item.metadata.namespace {
-                            Some(n) => format!("{n}/{name}"),
-                            None => name,
-                        };
-                        if !is_node {
-                            for (container, usage) in container_usage_of(&item) {
-                                containers.insert(format!("{key}/{container}"), usage);
+                let msg = match api.list(&ListParams::default()).await {
+                    Ok(list) => {
+                        let mut data = HashMap::new();
+                        let mut containers = HashMap::new();
+                        for item in list {
+                            let name = item.metadata.name.clone().unwrap_or_default();
+                            let key = match &item.metadata.namespace {
+                                Some(n) => format!("{n}/{name}"),
+                                None => name,
+                            };
+                            if !is_node {
+                                for (container, usage) in container_usage_of(&item) {
+                                    containers.insert(format!("{key}/{container}"), usage);
+                                }
                             }
+                            data.insert(key, usage_of(&item, is_node));
                         }
-                        data.insert(key, usage_of(&item, is_node));
-                    }
-                    if tx
-                        .send(Msg::Metrics {
+                        Msg::Metrics {
                             generation: genr,
                             data,
                             containers,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
+                        }
                     }
+                    // A present-but-broken metrics API previously died here in
+                    // silence, leaving the CPU/MEM columns frozen forever.
+                    Err(e) => Msg::MetricsError {
+                        generation: genr,
+                        error: e.to_string(),
+                    },
+                };
+                if tx.send(msg).await.is_err() {
+                    break;
                 }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -576,6 +581,11 @@ impl App {
                 self.flash = format!("error: {error}");
                 self.flash_err = true;
             }
+            Msg::Panic(error) => {
+                self.last_error = Some(error.clone());
+                self.flash = format!("internal error: {error}");
+                self.flash_err = true;
+            }
             Msg::LogLines { generation, lines } if generation == self.log_gen => {
                 self.push_log_lines(lines);
             }
@@ -609,11 +619,15 @@ impl App {
                 if !data.is_empty() || !containers.is_empty() {
                     self.metrics_seen = true;
                 }
+                self.metrics_error = None;
                 self.metrics = data;
                 self.container_metrics = containers;
                 if sort_uses_metrics {
                     self.invalidate_rows();
                 }
+            }
+            Msg::MetricsError { generation, error } if generation == self.generation => {
+                self.metrics_error = Some(error);
             }
             Msg::PrinterColumns {
                 generation,
@@ -627,6 +641,10 @@ impl App {
                 }
             }
             Msg::PulseData { generation, data } if generation == self.generation => {
+                if let Some(w) = &data.warn {
+                    self.flash = format!("pulse is incomplete — {w}");
+                    self.flash_err = true;
+                }
                 self.pulse = data;
             }
             Msg::Rbac {
@@ -636,7 +654,15 @@ impl App {
             } if generation == self.generation && ns == self.namespace => {
                 self.rbac_allowed = Some(allowed);
             }
-            Msg::XrayData { generation, items } if generation == self.generation => {
+            Msg::XrayData {
+                generation,
+                items,
+                warn,
+            } if generation == self.generation => {
+                if let Some(w) = warn {
+                    self.flash = format!("xray is incomplete — {w}");
+                    self.flash_err = true;
+                }
                 let keep = self.xray_state.selected().unwrap_or(0);
                 self.xray_items = items;
                 self.xray_state

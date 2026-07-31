@@ -23,17 +23,20 @@ pub fn scalar_from_query(body: &str) -> Option<f64> {
 }
 
 /// P50/P95/P99 of one resource over the window (CPU in millicores, memory in
-/// bytes). Missing samples read as 0.
+/// bytes). `None` = no sample — the query found no data or failed. Never a
+/// zero: a recommendation must not be computed from an error.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Quantiles {
-    pub p50: f64,
-    pub p95: f64,
-    pub p99: f64,
+    pub p50: Option<f64>,
+    pub p95: Option<f64>,
+    pub p99: Option<f64>,
 }
 
 /// A right-sizing verdict for one resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
+    /// No usage data for the window — can't judge anything.
+    NoData,
     /// No current request set — can't compare.
     Unset,
     /// Request is well above observed peak — wasting reservation.
@@ -47,6 +50,7 @@ pub enum Verdict {
 impl Verdict {
     pub fn label(self) -> &'static str {
         match self {
+            Verdict::NoData => "no data",
             Verdict::Unset => "no request set",
             Verdict::Over => "over-provisioned",
             Verdict::Ok => "sized about right",
@@ -63,7 +67,10 @@ pub fn suggest(p95: f64, headroom_pct: u32) -> f64 {
 /// Classify a current request against the observed P95. `Over` when the request
 /// exceeds P95 by more than half again (lots of slack); `Under` when it's below
 /// P95 (peak already breaches the request); `Ok` in between.
-pub fn verdict(current_request: Option<f64>, p95: f64) -> Verdict {
+pub fn verdict(current_request: Option<f64>, p95: Option<f64>) -> Verdict {
+    let Some(p95) = p95 else {
+        return Verdict::NoData;
+    };
     match current_request {
         None => Verdict::Unset,
         Some(req) if req <= 0.0 => Verdict::Unset,
@@ -84,12 +91,13 @@ pub struct ContainerRec {
     /// Current requests (millicores / bytes), when set.
     pub cpu_request: Option<f64>,
     pub mem_request: Option<f64>,
-    /// OOM kills and CPU-throttled periods observed over the window.
-    pub oom: f64,
-    pub throttle: f64,
-    /// Suggested requests (millicores / bytes).
-    pub suggested_cpu: f64,
-    pub suggested_mem: f64,
+    /// OOM kills and CPU-throttled periods observed over the window (`None` =
+    /// the count is unknown, not zero).
+    pub oom: Option<f64>,
+    pub throttle: Option<f64>,
+    /// Suggested requests (millicores / bytes); `None` without usage data.
+    pub suggested_cpu: Option<f64>,
+    pub suggested_mem: Option<f64>,
 }
 
 impl ContainerRec {
@@ -99,7 +107,7 @@ impl ContainerRec {
     pub fn mem_verdict(&self) -> Verdict {
         // An OOM kill in the window forces an under-provisioned verdict even if
         // the sampled working set never appeared to breach the request.
-        if self.oom > 0.0 {
+        if self.oom.unwrap_or(0.0) > 0.0 {
             return Verdict::Under;
         }
         verdict(self.mem_request, self.mem.p95)
@@ -124,14 +132,14 @@ pub fn mem_quantity(bytes: f64) -> String {
 pub fn patch_preview(recs: &[ContainerRec]) -> Option<String> {
     let containers: Vec<Value> = recs
         .iter()
-        .filter(|r| r.suggested_cpu > 0.0 || r.suggested_mem > 0.0)
+        .filter(|r| r.suggested_cpu.is_some() || r.suggested_mem.is_some())
         .map(|r| {
             let mut requests = serde_json::Map::new();
-            if r.suggested_cpu > 0.0 {
-                requests.insert("cpu".into(), json!(cpu_quantity(r.suggested_cpu)));
+            if let Some(cpu) = r.suggested_cpu {
+                requests.insert("cpu".into(), json!(cpu_quantity(cpu)));
             }
-            if r.suggested_mem > 0.0 {
-                requests.insert("memory".into(), json!(mem_quantity(r.suggested_mem)));
+            if let Some(mem) = r.suggested_mem {
+                requests.insert("memory".into(), json!(mem_quantity(mem)));
             }
             json!({ "name": r.container, "resources": { "requests": requests } })
         })
@@ -173,11 +181,13 @@ mod tests {
 
     #[test]
     fn verdict_classifies_against_p95() {
-        assert_eq!(verdict(None, 100.0), Verdict::Unset);
-        assert_eq!(verdict(Some(0.0), 100.0), Verdict::Unset);
-        assert_eq!(verdict(Some(50.0), 100.0), Verdict::Under); // peak > request
-        assert_eq!(verdict(Some(120.0), 100.0), Verdict::Ok); // a little slack
-        assert_eq!(verdict(Some(500.0), 100.0), Verdict::Over); // >1.5× P95
+        assert_eq!(verdict(None, Some(100.0)), Verdict::Unset);
+        assert_eq!(verdict(Some(0.0), Some(100.0)), Verdict::Unset);
+        assert_eq!(verdict(Some(50.0), Some(100.0)), Verdict::Under); // peak > request
+        assert_eq!(verdict(Some(120.0), Some(100.0)), Verdict::Ok); // a little slack
+        assert_eq!(verdict(Some(500.0), Some(100.0)), Verdict::Over); // >1.5× P95
+        // No usage data must never be judged as if usage were zero.
+        assert_eq!(verdict(Some(500.0), None), Verdict::NoData);
     }
 
     #[test]
@@ -186,16 +196,16 @@ mod tests {
             container: "app".into(),
             cpu: Quantiles::default(),
             mem: Quantiles {
-                p50: 10.0,
-                p95: 20.0,
-                p99: 25.0,
+                p50: Some(10.0),
+                p95: Some(20.0),
+                p99: Some(25.0),
             },
             cpu_request: Some(100.0),
             mem_request: Some(1_000_000.0), // request far above sampled p95…
-            oom: 3.0,                       // …but it was OOM-killed
-            throttle: 0.0,
-            suggested_cpu: 0.0,
-            suggested_mem: 30.0,
+            oom: Some(3.0),                 // …but it was OOM-killed
+            throttle: Some(0.0),
+            suggested_cpu: None,
+            suggested_mem: Some(30.0),
         };
         assert_eq!(rec.mem_verdict(), Verdict::Under);
     }
@@ -217,10 +227,10 @@ mod tests {
                 mem: Quantiles::default(),
                 cpu_request: None,
                 mem_request: None,
-                oom: 0.0,
-                throttle: 0.0,
-                suggested_cpu: 120.0,
-                suggested_mem: 134_217_728.0,
+                oom: Some(0.0),
+                throttle: Some(0.0),
+                suggested_cpu: Some(120.0),
+                suggested_mem: Some(134_217_728.0),
             },
             ContainerRec {
                 container: "sidecar".into(),
@@ -228,10 +238,10 @@ mod tests {
                 mem: Quantiles::default(),
                 cpu_request: None,
                 mem_request: None,
-                oom: 0.0,
-                throttle: 0.0,
-                suggested_cpu: 0.0, // no data → excluded from the patch
-                suggested_mem: 0.0,
+                oom: Some(0.0),
+                throttle: Some(0.0),
+                suggested_cpu: None, // no data → excluded from the patch
+                suggested_mem: None,
             },
         ];
         let patch = patch_preview(&recs).unwrap();

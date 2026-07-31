@@ -20,6 +20,7 @@ mod providers;
 mod rightsize;
 mod snapshot;
 mod store;
+mod text;
 mod theme;
 mod thresholds;
 mod timeline;
@@ -166,10 +167,17 @@ async fn main() -> Result<()> {
     theme::set_background(cfg.skin.background);
 
     let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAP);
+    let panic_tx = tx.clone();
     let mut app = App::new(cluster, tx);
     // Kubeconfig contexts are stable for the session; cache them once so the
     // palette can complete `:ctx <name>` without re-reading the file per keystroke.
-    app.all_contexts = Cluster::list_contexts();
+    match Cluster::list_contexts() {
+        Ok(contexts) => app.all_contexts = contexts,
+        Err(e) => {
+            eprintln!("warning: {e}");
+            config_warnings.push(e);
+        }
+    }
     app.user_aliases = cfg.aliases.clone();
     app.namespace_favorites = cfg.favorite_namespaces.clone();
     app.plugins = cfg.plugins.clone();
@@ -258,9 +266,34 @@ async fn main() -> Result<()> {
     }
 
     let mut terminal = ratatui::init();
+    install_panic_hook(panic_tx);
     let result = run(&mut terminal, &mut app, &mut rx).await;
     ratatui::restore();
+    // `restore()` leaves the alternate screen but never re-shows the cursor
+    // that `draw` hid, so without this the user's shell prompt has no cursor.
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
     result
+}
+
+/// Route background-task panics into the TUI instead of through ratatui's
+/// restore. Tokio catches a panic in a spawned task and the process survives —
+/// but ratatui's hook has already torn the terminal down by then, leaving a
+/// live TUI drawing into the primary screen with raw mode off and no usable
+/// input. Report those as an in-app error flash and keep the terminal alone.
+/// A main-thread panic is fatal, so there the ratatui hook (restore + default
+/// report) is right; we only add the cursor it forgets.
+///
+/// Must be installed after `ratatui::init()` so the previous hook is ratatui's.
+fn install_panic_hook(tx: mpsc::Sender<store::Msg>) {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some("main") {
+            prev(info);
+            let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+        } else {
+            let _ = tx.try_send(store::Msg::Panic(info.to_string()));
+        }
+    }));
 }
 
 /// Populate the store from the watch for a short window, then render one frame
@@ -381,17 +414,28 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
 }
 
 /// Leave the alt-screen/raw-mode TUI, run an interactive command with inherited
-/// stdio (kubectl exec/edit/port-forward), then restore the TUI.
+/// stdio (kubectl exec/edit/port-forward), then restore the TUI. Toggles the
+/// terminal modes directly rather than `ratatui::restore()`/`init()`: `init()`
+/// stacks another panic hook on every call, and the hook installed at startup
+/// must stay the outermost one.
 fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String]) {
+    use crossterm::terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    };
     if argv.is_empty() {
         return;
     }
-    ratatui::restore();
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+    let _ = disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
     let _ = std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .status();
-    *terminal = ratatui::init();
+    let _ = enable_raw_mode();
+    let _ = crossterm::execute!(std::io::stdout(), EnterAlternateScreen);
     let _ = terminal.clear();
 }
 
@@ -465,9 +509,16 @@ async fn run(
 ) -> Result<()> {
     let mut reader = crossterm::event::EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Watch messages mark the frame dirty and the redraw waits for this
+    // interval, so a rollout storm costs at most ~60 renders a second instead
+    // of one per message. Key events still redraw immediately for input
+    // latency.
+    let mut frame = tokio::time::interval(Duration::from_millis(16));
+    frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut dirty = false;
 
+    terminal.draw(|f| ui::draw(f, app))?;
     loop {
-        terminal.draw(|f| ui::draw(f, app))?;
         if app.should_quit {
             return Ok(());
         }
@@ -482,9 +533,13 @@ async fn run(
                             app.flash = format!("ran: {}", argv.join(" "));
                             app.flash_err = false;
                         }
+                        terminal.draw(|f| ui::draw(f, app))?;
+                        dirty = false;
                     }
                     Some(Err(_)) | None => return Ok(()),
-                    _ => {}
+                    // Resize (and any other terminal event) still needs a
+                    // redraw, just not an urgent one.
+                    _ => dirty = true,
                 }
             }
             Some(msg) = rx.recv() => {
@@ -493,8 +548,16 @@ async fn run(
                 while let Ok(m) = rx.try_recv() {
                     app.handle_msg(m);
                 }
+                dirty = true;
             }
-            _ = tick.tick() => app.reap_port_forwards(), // age columns + drop dead forwards
+            _ = frame.tick(), if dirty => {
+                terminal.draw(|f| ui::draw(f, app))?;
+                dirty = false;
+            }
+            _ = tick.tick() => {
+                app.reap_port_forwards(); // age columns + drop dead forwards
+                dirty = true;
+            }
         }
     }
 }

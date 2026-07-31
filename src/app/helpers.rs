@@ -51,9 +51,12 @@ pub(super) fn node_unschedulable_patch(unschedulable: bool) -> Value {
 pub(super) fn cronjob_manual_job(cj: &DynamicObject, suffix: &str) -> Option<Value> {
     let name = cj.metadata.name.clone()?;
     let spec = cj.data.pointer("/spec/jobTemplate/spec")?.clone();
+    // Re-key non-object annotations (invalid, but cluster data is untrusted
+    // and `Value`'s IndexMut panics on a type mismatch).
     let mut annotations = cj
         .data
         .pointer("/spec/jobTemplate/metadata/annotations")
+        .filter(|a| a.is_object())
         .cloned()
         .unwrap_or_else(|| json!({}));
     annotations["cronjob.kubernetes.io/instantiate"] = json!("manual");
@@ -714,7 +717,7 @@ pub(super) async fn list_kind(
     ar: &ApiResource,
     namespaced: bool,
     ns: &str,
-) -> Vec<DynamicObject> {
+) -> Result<Vec<DynamicObject>, String> {
     let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
         Api::namespaced_with(client.clone(), ns, ar)
     } else {
@@ -723,7 +726,46 @@ pub(super) async fn list_kind(
     api.list(&ListParams::default())
         .await
         .map(|l| l.items)
-        .unwrap_or_default()
+        .map_err(|e| format!("listing {}: {e}", ar.plural))
+}
+
+/// [`list_kind`], degrading a failure to an empty list while recording why in
+/// `warn` (first error wins). For read paths that aggregate several kinds:
+/// a denied or failed list must surface as "couldn't look", never render as a
+/// confident zero.
+pub(super) async fn list_or_warn(
+    client: &Client,
+    ar: &ApiResource,
+    namespaced: bool,
+    ns: &str,
+    warn: &mut Option<String>,
+) -> Vec<DynamicObject> {
+    match list_kind(client, ar, namespaced, ns).await {
+        Ok(items) => items,
+        Err(e) => {
+            warn.get_or_insert(e);
+            Vec::new()
+        }
+    }
+}
+
+/// Prepend an "evidence incomplete" warning to a findings list when one of
+/// the gather reads failed — the analysis below it saw only partial data.
+pub(super) fn prepend_warn_finding(
+    findings: &mut Vec<crate::explain::Finding>,
+    warn: Option<String>,
+) {
+    if let Some(w) = warn {
+        findings.insert(
+            0,
+            crate::explain::Finding {
+                indent: 0,
+                level: crate::explain::Level::Warn,
+                text: format!("evidence incomplete — {w}"),
+                target: None,
+            },
+        );
+    }
 }
 
 pub(super) fn phase(o: &DynamicObject) -> String {

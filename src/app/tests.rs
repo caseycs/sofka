@@ -365,6 +365,57 @@ async fn skin_palette_command_opens_picker() {
 }
 
 #[tokio::test]
+async fn pulse_and_xray_warns_surface_as_flash() {
+    let (mut app, _rx) = test_app();
+    let data = crate::store::Pulse {
+        warn: Some("listing pods: 403".into()),
+        ..Default::default()
+    };
+    app.handle_msg(Msg::PulseData {
+        generation: app.generation,
+        data,
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("incomplete"), "{}", app.flash);
+
+    app.flash_err = false;
+    app.handle_msg(Msg::XrayData {
+        generation: app.generation,
+        items: Vec::new(),
+        warn: Some("listing replicasets: 403".into()),
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("incomplete"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn metrics_error_is_stored_and_cleared_by_next_success() {
+    let (mut app, _rx) = test_app();
+    app.handle_msg(Msg::MetricsError {
+        generation: app.generation,
+        error: "metrics-server 500".into(),
+    });
+    assert_eq!(app.metrics_error.as_deref(), Some("metrics-server 500"));
+
+    app.handle_msg(Msg::Metrics {
+        generation: app.generation,
+        data: HashMap::new(),
+        containers: HashMap::new(),
+    });
+    assert_eq!(app.metrics_error, None);
+}
+
+#[tokio::test]
+async fn panic_msg_flashes_regardless_of_generation() {
+    let (mut app, _rx) = test_app();
+    app.generation = 7; // a Panic has no generation tag and must never be dropped as stale
+    app.handle_msg(Msg::Panic("boom".into()));
+    assert!(app.flash_err);
+    assert!(app.flash.contains("boom"), "{}", app.flash);
+    assert_eq!(app.last_error.as_deref(), Some("boom"));
+}
+
+#[tokio::test]
 async fn logs_pause_freezes_and_survives_new_lines() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;
@@ -1445,6 +1496,49 @@ async fn sort_by_numeric_column_and_invert() {
     app.switch_kind("services");
     assert_eq!(app.sort_column, None);
     assert!(!app.sort_desc);
+}
+
+#[tokio::test]
+async fn sorted_order_updates_when_an_object_changes() {
+    // Sort keys are cached per resourceVersion; an update must invalidate the
+    // changed row's cached key (via invalidate_row) and re-sort with the new
+    // value, while unchanged rows reuse theirs.
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let pod = |name: &str, rv: &str, restarts: i64| {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "default", "resourceVersion": rv},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [
+                    {"ready": true, "restartCount": restarts, "state": {"running": {}}}
+                ]
+            }
+        })
+    };
+    apply(&mut app, pod("a", "1", 5));
+    apply(&mut app, pod("b", "1", 1));
+    apply(&mut app, pod("c", "1", 9));
+    assert_eq!(app.display_headers()[3], "RESTARTS");
+    app.sort_column = Some(3);
+    app.invalidate_rows();
+    let names = |app: &App| -> Vec<String> {
+        app.rows()
+            .iter()
+            .map(|o| o.metadata.name.clone().unwrap())
+            .collect()
+    };
+    assert_eq!(names(&app), ["b", "a", "c"]); // 1, 5, 9
+
+    apply(&mut app, pod("b", "2", 20));
+    assert_eq!(names(&app), ["a", "c", "b"]); // 5, 9, 20
+
+    // Changing the sort column must not reuse keys computed for the old one.
+    assert_eq!(app.display_headers()[0], "NAME");
+    app.sort_column = Some(0);
+    app.invalidate_rows();
+    assert_eq!(names(&app), ["a", "b", "c"]);
 }
 
 #[tokio::test]
@@ -4013,21 +4107,21 @@ async fn rightsize_report_renders_verdicts_and_patch() {
     let recs = vec![ContainerRec {
         container: "app".into(),
         cpu: Quantiles {
-            p50: 40.0,
-            p95: 100.0,
-            p99: 130.0,
+            p50: Some(40.0),
+            p95: Some(100.0),
+            p99: Some(130.0),
         },
         mem: Quantiles {
-            p50: 100_000_000.0,
-            p95: 130_000_000.0,
-            p99: 140_000_000.0,
+            p50: Some(100_000_000.0),
+            p95: Some(130_000_000.0),
+            p99: Some(140_000_000.0),
         },
         cpu_request: Some(500.0),        // way over P95 → over-provisioned
         mem_request: Some(64_000_000.0), // under P95 → under-provisioned
-        oom: 0.0,
-        throttle: 0.0,
-        suggested_cpu: crate::rightsize::suggest(100.0, 15),
-        suggested_mem: crate::rightsize::suggest(130_000_000.0, 15),
+        oom: Some(0.0),
+        throttle: Some(0.0),
+        suggested_cpu: Some(crate::rightsize::suggest(100.0, 15)),
+        suggested_mem: Some(crate::rightsize::suggest(130_000_000.0, 15)),
     }];
     assert_eq!(recs[0].cpu_verdict(), crate::rightsize::Verdict::Over);
     assert_eq!(recs[0].mem_verdict(), crate::rightsize::Verdict::Under);

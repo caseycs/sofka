@@ -72,10 +72,11 @@ impl App {
         self.flash_err = false;
 
         tokio::spawn(async move {
+            let mut warn = None;
             let pods: Vec<DynamicObject> = if plural == "pods" {
                 vec![obj.clone()]
             } else if let (Some((ar, nsd)), Some(sel)) = (&pods_kind, &selector) {
-                list_selected(&client, ar, *nsd, &ns, sel).await
+                list_selected(&client, ar, *nsd, &ns, sel, &mut warn).await
             } else {
                 Vec::new()
             };
@@ -83,7 +84,7 @@ impl App {
             let (events, events_v1) = match &events_kind {
                 Some((ar, nsd)) => {
                     let v1 = ar.group == "events.k8s.io";
-                    let all = list_kind(&client, ar, *nsd, &ns).await;
+                    let all = list_or_warn(&client, ar, *nsd, &ns, &mut warn).await;
                     (filter_events(&all, &obj, &pods, v1), v1)
                 }
                 None => (Vec::new(), false),
@@ -97,7 +98,8 @@ impl App {
                 events: &events,
                 events_v1,
             };
-            let findings = crate::explain::explain(&evidence);
+            let mut findings = crate::explain::explain(&evidence);
+            prepend_warn_finding(&mut findings, warn);
             let _ = tx
                 .send(Msg::Explain {
                     generation: genr,
@@ -196,23 +198,29 @@ impl App {
     }
 }
 
-/// List one kind, narrowed to a label selector (a workload's pods).
+/// List one kind, narrowed to a label selector (a workload's pods). A failure
+/// degrades to an empty list recorded in `warn` — a 403 must not read as "no
+/// pods" to the analysis downstream.
 pub(super) async fn list_selected(
     client: &Client,
     ar: &ApiResource,
     namespaced: bool,
     ns: &str,
     selector: &str,
+    warn: &mut Option<String>,
 ) -> Vec<DynamicObject> {
     let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
         Api::namespaced_with(client.clone(), ns, ar)
     } else {
         Api::all_with(client.clone(), ar)
     };
-    api.list(&ListParams::default().labels(selector))
-        .await
-        .map(|l| l.items)
-        .unwrap_or_default()
+    match api.list(&ListParams::default().labels(selector)).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            warn.get_or_insert(format!("listing {}: {e}", ar.plural));
+            Vec::new()
+        }
+    }
 }
 
 /// Keep only events that regard the object or one of its pods, matching by UID

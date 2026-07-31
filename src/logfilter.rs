@@ -78,6 +78,16 @@ impl LogMatcher {
         }
         let base = match &self.kind {
             Kind::All => true,
+            // The whole visible buffer is re-tested per frame, so the common
+            // (ASCII) case must not allocate. ASCII bytes can't appear inside
+            // a multi-byte UTF-8 sequence, so the byte-window compare is exact
+            // on any line; only a non-ASCII *pattern* needs Unicode folding.
+            Kind::Substr(s) if s.is_ascii() => {
+                let pat = s.as_bytes();
+                line.as_bytes()
+                    .windows(pat.len())
+                    .any(|w| w.eq_ignore_ascii_case(pat))
+            }
             Kind::Substr(s) => line.to_lowercase().contains(s),
             Kind::Regex(re) => re.is_match(line),
             Kind::BadRegex => false,
