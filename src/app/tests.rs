@@ -715,11 +715,13 @@ fn notification_sequences_follow_the_configured_protocol() {
     let osc9 = NotifyConfig {
         bell: false,
         desktop: "osc9".into(),
+        ..NotifyConfig::default()
     };
     assert_eq!(notification_sequence("hi", &osc9), "\x1b]9;sofka: hi\x07");
     let osc777 = NotifyConfig {
         bell: false,
         desktop: "osc777".into(),
+        ..NotifyConfig::default()
     };
     assert_eq!(
         notification_sequence("hi", &osc777),
@@ -729,6 +731,7 @@ fn notification_sequences_follow_the_configured_protocol() {
     let both = NotifyConfig {
         bell: false,
         desktop: "both".into(),
+        ..NotifyConfig::default()
     };
     let seq = notification_sequence("hi", &both);
     assert!(seq.contains("]9;") && seq.contains("]777;"), "{seq:?}");
@@ -736,6 +739,7 @@ fn notification_sequences_follow_the_configured_protocol() {
     let off = NotifyConfig {
         bell: false,
         desktop: "off".into(),
+        ..NotifyConfig::default()
     };
     assert!(notification_sequence("hi", &off).is_empty());
 
@@ -749,10 +753,67 @@ fn notification_sequences_follow_the_configured_protocol() {
     let bad = NotifyConfig {
         bell: false,
         desktop: "growl".into(),
+        ..NotifyConfig::default()
     };
     assert!(notification_sequence("hi", &bad).contains("]777;"));
     assert_eq!(notify_warnings(&bad).len(), 1);
     assert!(notify_warnings(&dflt).is_empty());
+}
+
+#[test]
+fn notify_command_resolution_prefers_explicit_then_herdr() {
+    use super::notify::notification_command;
+    use crate::config::{NotifyConfig, notify_warnings};
+
+    // No command, not in herdr → nothing to run.
+    let dflt = NotifyConfig::default();
+    assert_eq!(notification_command(&dflt, false, "hi"), None);
+
+    // In a herdr pane, notifications auto-route through herdr's toast CLI.
+    assert_eq!(
+        notification_command(&dflt, true, "pod/web: Ready"),
+        Some(vec![
+            "herdr".into(),
+            "notification".into(),
+            "show".into(),
+            "sofka".into(),
+            "--body".into(),
+            "pod/web: Ready".into(),
+        ])
+    );
+
+    // An explicit command wins over herdr; $MESSAGE substitutes as a whole
+    // argument (never spliced into a shell string).
+    let explicit = NotifyConfig {
+        command: vec!["notify-send".into(), "sofka".into(), "$MESSAGE".into()],
+        ..NotifyConfig::default()
+    };
+    assert_eq!(
+        notification_command(&explicit, true, "a; rm -rf /"),
+        Some(vec![
+            "notify-send".into(),
+            "sofka".into(),
+            "a; rm -rf /".into(),
+        ])
+    );
+
+    // Without a $MESSAGE placeholder, the message appends as the last arg.
+    let bare = NotifyConfig {
+        command: vec!["terminal-notifier".into(), "-title".into(), "sofka".into()],
+        ..NotifyConfig::default()
+    };
+    let argv = notification_command(&bare, false, "hi").unwrap();
+    assert_eq!(argv.last().map(String::as_str), Some("hi"));
+
+    // An empty executable is invalid: warned at load, ignored at delivery
+    // (herdr auto-detection still applies).
+    let empty = NotifyConfig {
+        command: vec!["".into()],
+        ..NotifyConfig::default()
+    };
+    assert_eq!(notify_warnings(&empty).len(), 1);
+    assert!(notification_command(&empty, false, "hi").is_none());
+    assert!(notification_command(&empty, true, "hi").is_some_and(|v| v[0] == "herdr"));
 }
 
 #[tokio::test]

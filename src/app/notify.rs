@@ -111,6 +111,74 @@ impl App {
     pub fn take_notification(&mut self) -> Option<String> {
         self.pending_notify.take()
     }
+
+    /// Deliver one `:notify` event through the notifier subprocess, when one
+    /// applies (`[notify] command`, or the herdr auto-detection) — the route
+    /// that survives terminal multiplexers, which swallow pane escape
+    /// sequences. Fire-and-forget with nulled stdio; a notifier that can't
+    /// even start is worth one warning, not a broken TUI.
+    pub(super) fn run_notify_command(&mut self, text: &str) {
+        let Some(argv) = notification_command(&self.notify_cfg, in_herdr_pane(), text) else {
+            return;
+        };
+        let mut cmd = tokio::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Err(e) = cmd.spawn() {
+            self.flash_warn(&format!("notify command '{}' failed: {e}", argv[0]));
+        }
+    }
+}
+
+/// Whether this process runs inside a herdr pane (herdr exports its socket
+/// path into every pane's environment). Always false under test, so a suite
+/// run inside a herdr pane doesn't pop real toasts.
+fn in_herdr_pane() -> bool {
+    !cfg!(test) && std::env::var_os("HERDR_SOCKET_PATH").is_some()
+}
+
+/// The notifier argv for one notification, if any applies. An explicit
+/// `[notify] command` wins: `$MESSAGE` substitutes as whole arguments (never
+/// spliced into a shell string), and with no placeholder the message is
+/// appended. With no command configured, a herdr pane auto-routes through
+/// `herdr notification show`, which delivers via herdr's own `ui.toast`
+/// setting — pane escape sequences would be swallowed there anyway.
+pub fn notification_command(
+    cfg: &crate::config::NotifyConfig,
+    in_herdr: bool,
+    text: &str,
+) -> Option<Vec<String>> {
+    let explicit = cfg
+        .command
+        .first()
+        .is_some_and(|exe| !exe.trim().is_empty());
+    if explicit {
+        let mut argv: Vec<String> = cfg.command.clone();
+        let mut substituted = false;
+        for arg in argv.iter_mut().skip(1) {
+            if arg.contains("$MESSAGE") {
+                *arg = arg.replace("$MESSAGE", text);
+                substituted = true;
+            }
+        }
+        if !substituted {
+            argv.push(text.to_string());
+        }
+        return Some(argv);
+    }
+    if in_herdr {
+        return Some(vec![
+            "herdr".into(),
+            "notification".into(),
+            "show".into(),
+            "sofka".into(),
+            "--body".into(),
+            text.to_string(),
+        ]);
+    }
+    None
 }
 
 /// The terminal escape sequences that deliver one `:notify` event, per the

@@ -233,7 +233,13 @@ numbers.
   title+body, the form Ghostty recommends; also kitty, WezTerm, foot, urxvt)
   or `osc9` (iTerm2-style body-only, for iTerm2 and Windows Terminal, which
   speak only that), plus `both` and `off`. Terminals ignore protocols they
-  don't speak. Each notify is its own bounded single-object watch, so it keeps
+  don't speak. Inside a **terminal multiplexer** — which swallows escape
+  sequences from its panes — set `command` to run a local notifier
+  subprocess instead (`$MESSAGE` substitutes as a whole argument, never via
+  a shell). In a **herdr** pane no config is needed at all: sofka detects
+  the pane environment and delivers through `herdr notification show`, so
+  the toast follows herdr's own `ui.toast` delivery (in-app, outer
+  terminal, or system). Each notify is its own bounded single-object watch, so it keeps
   firing while you browse other views — "tell me when this rollout finishes"
   and keep working. Toggle it off with `:notify` on the same row; everything
   is session-local.
@@ -242,6 +248,8 @@ numbers.
   [notify]
   bell = true         # ring the terminal bell
   desktop = "osc777"  # "osc777" | "osc9" | "both" | "off"
+  # command = ["notify-send", "sofka", "$MESSAGE"]     # Linux, inside tmux
+  # command = ["terminal-notifier", "-title", "sofka"] # macOS ($MESSAGE appended)
   ```
 
 - **Diff** (`:diff`) — a unified diff of the live object and its

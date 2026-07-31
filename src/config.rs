@@ -102,6 +102,7 @@ pub struct Config {
 /// [notify]
 /// bell = true         # ring the terminal bell
 /// desktop = "osc777"  # "osc777" | "osc9" | "both" | "off"
+/// # command = ["notify-send", "sofka", "$MESSAGE"]   # optional subprocess
 /// ```
 ///
 /// `osc777` (the default) is the rxvt-style title+body form Ghostty
@@ -111,6 +112,15 @@ pub struct Config {
 /// Terminals ignore protocols they don't speak, but one that speaks both
 /// would show two notifications under `both` — hence a choice, not a
 /// broadcast.
+///
+/// `command` runs a local notifier subprocess instead of relying on escape
+/// sequences — the route that works inside terminal multiplexers, which
+/// swallow OSC sequences from their panes. `$MESSAGE` substitutes as a whole
+/// argument (never spliced into a shell string); without a `$MESSAGE`
+/// placeholder the message is appended as the final argument. Inside
+/// **herdr** no configuration is needed: sofka detects the pane environment
+/// and delivers through `herdr notification show`, which honours herdr's own
+/// `ui.toast` delivery (in-app, outer terminal, or system).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct NotifyConfig {
@@ -118,6 +128,9 @@ pub struct NotifyConfig {
     pub bell: bool,
     /// Desktop-notification escape protocol: `osc777`, `osc9`, `both`, `off`.
     pub desktop: String,
+    /// Notifier subprocess (argv). Empty = none configured (herdr panes
+    /// auto-detect). `$MESSAGE` substitutes the notification text.
+    pub command: Vec<String>,
 }
 
 impl Default for NotifyConfig {
@@ -125,19 +138,26 @@ impl Default for NotifyConfig {
         Self {
             bell: true,
             desktop: "osc777".into(),
+            command: Vec::new(),
         }
     }
 }
 
 /// Validate `[notify]`: an unknown `desktop` value warns and behaves as the
-/// default (`osc777`).
+/// default (`osc777`); a `command` with an empty executable warns and is
+/// ignored.
 pub fn notify_warnings(cfg: &NotifyConfig) -> Vec<String> {
+    let mut warnings = Vec::new();
     match cfg.desktop.as_str() {
-        "osc9" | "osc777" | "both" | "off" => Vec::new(),
-        other => vec![format!(
+        "osc9" | "osc777" | "both" | "off" => {}
+        other => warnings.push(format!(
             "notify: desktop '{other}' is not osc777/osc9/both/off; using osc777"
-        )],
+        )),
     }
+    if cfg.command.first().is_some_and(|exe| exe.trim().is_empty()) {
+        warnings.push("notify: command has an empty executable; ignored".into());
+    }
+    warnings
 }
 
 /// A named, saved port-forward. Shows up in `:pf` even when stopped, so one

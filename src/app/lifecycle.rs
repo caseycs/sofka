@@ -597,6 +597,7 @@ impl App {
             Msg::Notify(text) => {
                 self.flash = format!("🔔 {text}");
                 self.flash_err = false;
+                self.run_notify_command(&text);
                 self.pending_notify = Some(text);
             }
             Msg::LogLines { generation, lines } if generation == self.log_gen => {
