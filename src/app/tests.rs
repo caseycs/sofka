@@ -579,6 +579,127 @@ fn forward_context_matching_and_validation() {
 }
 
 #[tokio::test]
+async fn mouse_click_selects_row_header_click_sorts_wheel_moves() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let pod = |name: &str, restarts: i64| {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "default"},
+            "status": {"phase": "Running", "containerStatuses":
+                [{"ready": true, "restartCount": restarts, "state": {"running": {}}}]}
+        })
+    };
+    apply(&mut app, pod("a", 5));
+    apply(&mut app, pod("b", 1));
+    app.table_state.select(Some(0));
+
+    // A frame must render first — that's what records the hit geometry.
+    let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let hit = app.table_hit.borrow().clone().expect("geometry recorded");
+
+    let click = |column: u16, row: u16| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // Click the second data row → it becomes the selection.
+    app.handle_mouse(click(hit.x_min + 3, hit.rows_y + 1))
+        .unwrap();
+    assert_eq!(app.table_state.selected(), Some(1));
+
+    // Click the RESTARTS header → sort by it; again → flip direction.
+    let ridx = app
+        .display_headers()
+        .iter()
+        .position(|h| h == "RESTARTS")
+        .unwrap();
+    let (sx, _) = hit.cols[ridx];
+    app.handle_mouse(click(sx, hit.header_y)).unwrap();
+    assert_eq!(app.sort_column, Some(ridx));
+    assert!(!app.sort_desc);
+    app.handle_mouse(click(sx, hit.header_y)).unwrap();
+    assert!(app.sort_desc);
+
+    // Wheel scroll maps to the mode's own up/down keys (3 per notch).
+    app.table_state.select(Some(0));
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    })
+    .unwrap();
+    assert_eq!(app.table_state.selected(), Some(1), "clamped at the end");
+
+    // A click outside the table (e.g. the header panel) is ignored.
+    app.handle_mouse(click(0, 0)).unwrap();
+    assert_eq!(app.table_state.selected(), Some(1));
+}
+
+#[tokio::test]
+async fn notify_toggles_a_background_watch_per_object() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+
+    assert!(app.run_palette_command("notify"));
+    assert_eq!(app.notify_tasks.len(), 1);
+    assert!(app.notify_tasks.contains_key("pods/default/web"));
+    assert!(app.flash.contains("notify on"), "{}", app.flash);
+
+    // Same command on the same row toggles it off.
+    assert!(app.run_palette_command("notify"));
+    assert!(app.notify_tasks.is_empty());
+    assert!(app.flash.contains("notify off"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn notify_survives_view_switches() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"}}),
+    );
+    app.table_state.select(Some(0));
+    assert!(app.run_palette_command("notify"));
+    assert_eq!(app.notify_tasks.len(), 1);
+
+    // bump_generation (any view switch) aborts self.tasks — the notify watch
+    // must not be among them.
+    app.switch_kind("services");
+    assert_eq!(app.notify_tasks.len(), 1);
+    assert!(!app.notify_tasks["pods/default/web"].is_finished());
+}
+
+#[tokio::test]
+async fn notify_msg_flashes_and_queues_bell() {
+    let (mut app, _rx) = test_app();
+    app.handle_msg(Msg::Notify("pod/web: Ready True → False".into()));
+    assert!(!app.flash_err);
+    assert!(app.flash.contains("pod/web"), "{}", app.flash);
+    assert_eq!(
+        app.take_notification().as_deref(),
+        Some("pod/web: Ready True → False")
+    );
+    assert_eq!(app.take_notification(), None, "consumed once");
+}
+
+#[tokio::test]
 async fn find_opens_picker_and_enter_navigates_to_the_object() {
     let (mut app, _rx) = test_app();
     app.switch_kind("services");

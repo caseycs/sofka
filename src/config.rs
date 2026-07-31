@@ -88,6 +88,10 @@ pub struct Config {
     /// Saved port-forwards — see [`Forward`]. Validated by
     /// [`forward_warnings`].
     pub forwards: Vec<Forward>,
+    /// Mouse support (wheel scroll, click-to-select, header-click sort).
+    /// `None` = on. Set `mouse = false` to keep the terminal's native mouse
+    /// behavior (text selection) instead.
+    pub mouse: Option<bool>,
 }
 
 /// A named, saved port-forward. Shows up in `:pf` even when stopped, so one

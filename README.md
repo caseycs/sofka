@@ -210,6 +210,16 @@ numbers.
 - **Workspaces** (`[[workspaces]]`) — a named collection of views for one task.
   Open it, then press `Tab` or `Shift-Tab` to cycle its views. You stay in the
   workspace.
+- **Watch notifications** (`:notify`) — toggle a notification on the selected
+  object. Sophie watches it so you don't have to: every state change the
+  watch sees (the same transitions the timeline records — rollout progress,
+  readiness, phase, restarts, waiting reasons, conditions) flashes in the
+  status line, rings the terminal bell, and emits an OSC 9 desktop
+  notification (iTerm2, kitty, WezTerm, foot; terminals without OSC 9 ignore
+  it). Each notify is its own bounded single-object watch, so it keeps firing
+  while you browse other views — "tell me when this rollout finishes" and
+  keep working. Toggle it off with `:notify` on the same row; everything is
+  session-local.
 - **Diff** (`:diff`) — a unified diff of the live object and its
   `last-applied-configuration`. When that annotation is absent — as it is for
   every Flux- or Helm-managed object, which nothing ever `kubectl apply`s —
@@ -301,6 +311,12 @@ numbers.
   sofka queries only the contexts in `[fleet]`, and gathers each one at the same
   time with its own timeout, so one slow cluster never blocks the rest. Press
   `⏎` to switch to a context. Press `r` to refresh.
+- **Mouse support** — the wheel scrolls every view (table, logs, documents,
+  pickers — one notch is three steps of that view's own up/down), clicking a
+  table row selects it, and clicking a column header sorts by it (click again
+  to flip the direction). Set `mouse = false` in the config to keep the
+  terminal's native mouse behavior (text selection) instead; sofka releases
+  the mouse while a suspended command (`kubectl exec`, `$EDITOR`) runs.
 - **Compact mode** (`ctrl-e`) — collapse the seven-line header and the footer
   into one info line (kind · count · namespace · context, with a flash and the
   live indicator). So a tiled or multiplexed pane is almost all table.
@@ -362,6 +378,8 @@ default_namespace = "kube-system"
 default_resource  = "deployments"
 readonly          = false  # true disables every mutating action (delete, edit,
                            # scale, shell, plugins, …); --readonly/--write win
+mouse             = true   # false keeps the terminal's native mouse behavior
+                           # (text selection) instead of scroll/click/sort
 
 # Namespaces pinned to the top of the `n` switcher (★); session recents (·)
 # follow them.
