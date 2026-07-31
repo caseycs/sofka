@@ -165,7 +165,21 @@ numbers.
   Kubernetes API patches.
 - **CronJob controls** (`t`) — trigger now (creates a Job from the jobTemplate,
   like `kubectl create job --from`), suspend, and resume.
-- **Background port-forwards** (`f`/`F` to start, `:pf` to manage).
+- **Background port-forwards** (`f`/`F` to start, `:pf` to manage), plus
+  **saved forwards** (`[[forwards]]`) — named entries that appear in `:pf`
+  even while stopped (`⏎` starts one), with optional `autostart = true` to
+  open them on connect and on matching context switches:
+
+  ```toml
+  [[forwards]]
+  name = "argocd"
+  target = "svc/argocd-server"  # kubectl syntax: pod/…, svc/…, deploy/…
+  namespace = "argocd"
+  ports = "8080:443"            # LOCAL:REMOTE
+  autostart = true              # start when sofka connects (default false)
+  contexts = ["home"]           # optional: only these contexts
+  ```
+
 - **Plugins** — shell-out commands that you define in the config file and bind
   to keys, scoped for each resource. Keys are full **chords** (`ctrl-g`,
   `alt-x`, `shift-b`, `f5`). Commands run in the **terminal**, in a captured

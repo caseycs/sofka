@@ -143,6 +143,9 @@ pub struct PortForward {
     ns: String,
     target: String,
     ports: String,
+    /// The `[[forwards]]` entry this instance was started from, if any —
+    /// links a running child back to its saved config in `:pf`.
+    pub(super) config_name: Option<String>,
     child: tokio::process::Child,
 }
 
@@ -979,6 +982,9 @@ pub struct App {
     /// Viewed/stopped via `:pf`; killed automatically on drop.
     pub port_forwards: Vec<PortForward>,
     pub pf_state: ListState,
+    /// Saved `[[forwards]]` from config: shown in `:pf` even while stopped,
+    /// startable with one keystroke, autostarted on connect when configured.
+    pub forwards_cfg: Vec<crate::config::Forward>,
 
     pub skin_list: Vec<String>,
     pub skin_state: ListState,
@@ -1175,6 +1181,7 @@ impl App {
             transfer_menu_state: ListState::default(),
             transfer_target: None,
             port_forwards: Vec::new(),
+            forwards_cfg: Vec::new(),
             pf_state: ListState::default(),
             skin_list: crate::theme::BUILTIN_NAMES
                 .iter()
