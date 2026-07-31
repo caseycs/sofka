@@ -191,11 +191,13 @@ async fn main() -> Result<()> {
     // reloads) don't fight the user's in-session choice.
     app.logs.fullscreen = cfg.logs.fullscreen;
     app.fleet_cfg = cfg.fleet.clone();
+    app.forwards_cfg = cfg.forwards.clone();
     for w in config::plugin_warnings(&app.plugins)
         .into_iter()
         .chain(config::bookmark_warnings(&app.bookmarks))
         .chain(config::workspace_warnings(&app.workspaces))
         .chain(config::guardrail_warnings(&app.guardrails))
+        .chain(config::forward_warnings(&app.forwards_cfg))
     {
         eprintln!("warning: {w}");
         config_warnings.push(w);
@@ -252,7 +254,10 @@ async fn main() -> Result<()> {
         // No cluster to watch — open the context picker over the empty table;
         // a successful pick connects and lands on the default resource.
         Some(err) => app.start_disconnected(err),
-        None => app.switch_kind(&resource),
+        None => {
+            app.switch_kind(&resource);
+            app.start_autostart_forwards();
+        }
     }
     // View config problems must be visible inside the TUI, not only on the
     // (about-to-be-hidden) stderr.

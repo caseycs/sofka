@@ -1066,15 +1066,22 @@ impl App {
     /// Start `kubectl port-forward` in the background (not a foreground
     /// `Suspend::Shell` — a forward should keep running while you keep
     /// browsing). stdio is nulled since the TUI still owns the terminal.
-    pub(super) fn start_port_forward(&mut self, ns: String, target: String, ports: String) {
+    /// `config_name` links the child back to its `[[forwards]]` entry.
+    pub(super) fn start_port_forward_named(
+        &mut self,
+        ns: String,
+        target: String,
+        ports: String,
+        config_name: Option<String>,
+    ) {
         let mut argv = self.kubectl_base();
-        argv.extend([
-            "port-forward".into(),
-            "-n".into(),
-            ns.clone(),
-            target.clone(),
-            ports.clone(),
-        ]);
+        argv.push("port-forward".into());
+        if !ns.is_empty() {
+            argv.push("-n".into());
+            argv.push(ns.clone());
+        }
+        argv.push(target.clone());
+        argv.push(ports.clone());
         let mut cmd = tokio::process::Command::new(&argv[0]);
         cmd.args(&argv[1..])
             .stdin(std::process::Stdio::null())
@@ -1086,6 +1093,7 @@ impl App {
                     ns,
                     target,
                     ports,
+                    config_name,
                     child,
                 };
                 self.flash = format!("port-forwarding {} (:pf to view/stop)", pf.label());
@@ -1094,6 +1102,59 @@ impl App {
             }
             Err(e) => self.flash_warn(&format!("port-forward failed to start: {e}")),
         }
+    }
+
+    pub(super) fn start_port_forward(&mut self, ns: String, target: String, ports: String) {
+        self.start_port_forward_named(ns, target, ports, None);
+    }
+
+    /// Whether the `[[forwards]]` entry named `name` has a live child.
+    pub(super) fn forward_running(&self, name: &str) -> bool {
+        self.port_forwards
+            .iter()
+            .any(|pf| pf.config_name.as_deref() == Some(name))
+    }
+
+    /// Start one saved forward by its config index.
+    pub(super) fn start_configured_forward(&mut self, idx: usize) {
+        let Some(f) = self.forwards_cfg.get(idx).cloned() else {
+            return;
+        };
+        if self.forward_running(&f.name) {
+            self.flash_warn(&format!("forward '{}' is already running", f.name));
+            return;
+        }
+        self.start_port_forward_named(f.namespace, f.target, f.ports, Some(f.name));
+    }
+
+    /// Start every `autostart = true` saved forward that applies to the
+    /// current context and isn't already running. Called on connect and
+    /// after a context switch.
+    pub fn start_autostart_forwards(&mut self) {
+        if !self.cluster.connected {
+            return;
+        }
+        let context = self.cluster.context.clone();
+        for i in 0..self.forwards_cfg.len() {
+            let f = &self.forwards_cfg[i];
+            if f.autostart
+                && f.matches_context(&context)
+                && !f.name.is_empty()
+                && !self.forward_running(&f.name)
+            {
+                self.start_configured_forward(i);
+            }
+        }
+    }
+
+    /// Saved forwards with no live child, as `(config index, entry)` — the
+    /// "stopped" tail of the `:pf` list.
+    pub fn stopped_configured_forwards(&self) -> Vec<(usize, &crate::config::Forward)> {
+        self.forwards_cfg
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.name.is_empty() && !self.forward_running(&f.name))
+            .collect()
     }
 
     /// Drop any forward whose `kubectl` process has already exited (pod
@@ -1113,21 +1174,36 @@ impl App {
     }
 
     pub(super) fn open_port_forwards(&mut self) {
-        self.pf_state.select(if self.port_forwards.is_empty() {
-            None
-        } else {
-            Some(0)
-        });
+        let len = self.port_forwards.len() + self.stopped_configured_forwards().len();
+        self.pf_state.select(if len == 0 { None } else { Some(0) });
         self.mode = Mode::PortForwards;
     }
 
+    /// The `:pf` list is the running forwards followed by the saved-but-
+    /// stopped `[[forwards]]` entries; `x`/`s` stops a running one, `⏎`/`s`
+    /// starts a stopped one.
     pub(super) fn key_port_forwards(&mut self, key: KeyEvent) {
-        let len = self.port_forwards.len();
+        let running = self.port_forwards.len();
+        let len = running + self.stopped_configured_forwards().len();
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::Table,
             KeyCode::Char('j') | KeyCode::Down => list_step(&mut self.pf_state, len, true),
             KeyCode::Char('k') | KeyCode::Up => list_step(&mut self.pf_state, len, false),
-            KeyCode::Char('x') | KeyCode::Char('s') => self.stop_selected_port_forward(),
+            KeyCode::Char('x') | KeyCode::Char('s') | KeyCode::Enter => {
+                let Some(i) = self.pf_state.selected() else {
+                    return;
+                };
+                if i < running {
+                    // Enter on a running forward is a no-op, not a stop — a
+                    // reflexive ⏎ shouldn't kill a tunnel.
+                    if key.code != KeyCode::Enter {
+                        self.stop_selected_port_forward();
+                    }
+                } else if let Some(&(idx, _)) = self.stopped_configured_forwards().get(i - running)
+                {
+                    self.start_configured_forward(idx);
+                }
+            }
             _ => {}
         }
     }
@@ -1229,10 +1305,13 @@ impl App {
         self.bundle_cfg = resolved.config.bundle;
         self.logs_cfg = resolved.config.logs;
         self.fleet_cfg = resolved.config.fleet;
+        // Running forwards keep running; :reload only refreshes what's saved.
+        self.forwards_cfg = resolved.config.forwards;
         warnings.extend(crate::config::plugin_warnings(&self.plugins));
         warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         warnings.extend(crate::config::workspace_warnings(&self.workspaces));
         warnings.extend(crate::config::guardrail_warnings(&self.guardrails));
+        warnings.extend(crate::config::forward_warnings(&self.forwards_cfg));
         // Thresholds only change cell coloring (never the column layout), so —
         // unlike custom views — they're safe to re-apply live without yanking
         // the current view.
@@ -1348,11 +1427,11 @@ impl App {
         let pf = self.port_forwards.remove(i); // dropped -> Drop kills the child
         self.flash = format!("stopped port-forward {}", pf.label());
         self.flash_err = false;
-        self.pf_state.select(if self.port_forwards.is_empty() {
-            None
-        } else {
-            Some(i.min(self.port_forwards.len() - 1))
-        });
+        // A stopped configured forward reappears in the stopped tail, so
+        // clamp against the combined list.
+        let len = self.port_forwards.len() + self.stopped_configured_forwards().len();
+        self.pf_state
+            .select(if len == 0 { None } else { Some(i.min(len - 1)) });
     }
 
     pub(super) fn do_scale(&mut self, ns: String, name: String, replicas: i32) {

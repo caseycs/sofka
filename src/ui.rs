@@ -2136,18 +2136,40 @@ fn draw_transfer_menu(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Background port-forwards (`:pf`). A full-width view, not a popup — closing
 /// it (`esc`) does not stop the forwards; only `x`/`s` on a row does.
 fn draw_port_forwards(frame: &mut Frame, app: &mut App, area: Rect) {
-    let items: Vec<ListItem> = app
+    // Running forwards first, then the saved-but-stopped [[forwards]]
+    // entries — one keystroke away instead of retyped.
+    let mut items: Vec<ListItem> = app
         .port_forwards
         .iter()
         .map(|pf| {
+            let name = pf
+                .config_name
+                .as_ref()
+                .map(|n| format!("{n}: "))
+                .unwrap_or_default();
             ListItem::new(Line::from(vec![
                 Span::styled("● ", Style::default().fg(theme::green())),
-                Span::styled(pf.label(), Style::default().fg(theme::text())),
+                Span::styled(
+                    format!("{name}{}", pf.label()),
+                    Style::default().fg(theme::text()),
+                ),
             ]))
         })
         .collect();
+    for (_, f) in app.stopped_configured_forwards() {
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("○ ", theme::dim()),
+            Span::styled(
+                format!(
+                    "{}: {} {} -n {} (stopped)",
+                    f.name, f.target, f.ports, f.namespace
+                ),
+                theme::dim(),
+            ),
+        ])));
+    }
     let title = format!(
-        " Port-forwards [{}]  (x/s stop · esc close — others keep running) ",
+        " Port-forwards [{}]  (x/s stop · ⏎ start · esc close) ",
         app.port_forwards.len()
     );
     render_framed_list(

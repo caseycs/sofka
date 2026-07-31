@@ -488,6 +488,97 @@ async fn metrics_error_is_stored_and_cleared_by_next_success() {
 }
 
 #[tokio::test]
+async fn saved_forwards_show_as_stopped_until_running() {
+    let (mut app, _rx) = test_app();
+    app.forwards_cfg = vec![
+        crate::config::Forward {
+            name: "argocd".into(),
+            target: "svc/argocd-server".into(),
+            namespace: "argocd".into(),
+            ports: "8080:443".into(),
+            autostart: false,
+            contexts: vec![],
+        },
+        crate::config::Forward {
+            name: "db".into(),
+            target: "svc/postgres".into(),
+            namespace: "data".into(),
+            ports: "5432:5432".into(),
+            autostart: false,
+            contexts: vec![],
+        },
+    ];
+    let stopped: Vec<&str> = app
+        .stopped_configured_forwards()
+        .iter()
+        .map(|(_, f)| f.name.as_str())
+        .collect();
+    assert_eq!(stopped, ["argocd", "db"]);
+
+    // A live child linked by name moves the entry out of the stopped tail.
+    app.port_forwards.push(PortForward {
+        config_name: Some("argocd".into()),
+        ns: "argocd".into(),
+        target: "svc/argocd-server".into(),
+        ports: "8080:443".into(),
+        child: spawn_test_child("sleep", "5"),
+    });
+    assert!(app.forward_running("argocd"));
+    let stopped: Vec<&str> = app
+        .stopped_configured_forwards()
+        .iter()
+        .map(|(_, f)| f.name.as_str())
+        .collect();
+    assert_eq!(stopped, ["db"]);
+
+    // The :pf list is running + stopped; x on the running entry stops it and
+    // the entry reappears in the stopped tail.
+    app.open_port_forwards();
+    assert_eq!(app.pf_state.selected(), Some(0));
+    app.key_port_forwards(press(KeyCode::Char('x')));
+    assert!(app.port_forwards.is_empty());
+    assert_eq!(app.stopped_configured_forwards().len(), 2);
+    assert_eq!(app.pf_state.selected(), Some(0), "clamped to combined list");
+}
+
+#[test]
+fn forward_context_matching_and_validation() {
+    let f = crate::config::Forward {
+        name: "x".into(),
+        target: "svc/x".into(),
+        namespace: "ns".into(),
+        ports: "8080:80".into(),
+        autostart: true,
+        contexts: vec!["home".into()],
+    };
+    assert!(f.matches_context("home"));
+    assert!(!f.matches_context("prod"));
+    let all = crate::config::Forward {
+        contexts: vec![],
+        ..f.clone()
+    };
+    assert!(all.matches_context("anything"));
+
+    let warnings = crate::config::forward_warnings(&[
+        crate::config::Forward {
+            name: "".into(),
+            ..f.clone()
+        },
+        crate::config::Forward {
+            name: "badports".into(),
+            ports: "eighty:80".into(),
+            ..f.clone()
+        },
+        f.clone(),
+        f.clone(), // duplicate name
+    ]);
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    assert!(warnings.iter().any(|w| w.contains("empty name")));
+    assert!(warnings.iter().any(|w| w.contains("not LOCAL:REMOTE")));
+    assert!(warnings.iter().any(|w| w.contains("duplicate name")));
+}
+
+#[tokio::test]
 async fn mouse_click_selects_row_header_click_sorts_wheel_moves() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
@@ -1428,12 +1519,14 @@ fn spawn_test_child(argv0: &str, arg: &str) -> tokio::process::Child {
 async fn stopping_a_forward_kills_only_that_one() {
     let (mut app, _rx) = test_app();
     app.port_forwards.push(PortForward {
+        config_name: None,
         ns: "default".into(),
         target: "pod/a".into(),
         ports: "8080:80".into(),
         child: spawn_test_child("sleep", "30"),
     });
     app.port_forwards.push(PortForward {
+        config_name: None,
         ns: "default".into(),
         target: "pod/b".into(),
         ports: "8081:81".into(),
@@ -1459,6 +1552,7 @@ async fn reap_drops_exited_forwards_and_flashes() {
     let mut child = spawn_test_child("true", "");
     child.wait().await.unwrap(); // let it exit before reaping
     app.port_forwards.push(PortForward {
+        config_name: None,
         ns: "default".into(),
         target: "pod/a".into(),
         ports: "8080:80".into(),
