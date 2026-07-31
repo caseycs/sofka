@@ -129,7 +129,10 @@ numbers.
   resource uses its CRD `additionalPrinterColumns` automatically. Press `w` to
   show or hide the wide-only columns (kubectl `-o wide`).
 - **Live CPU and MEM columns** for pods and nodes from the metrics API, with
-  color for unusual values. The pod container picker also shows CPU and memory
+  color for unusual values. Nodes also get **%CPU and %MEM of allocatable**
+  (`status.allocatable` — the pool the scheduler hands out), colored by the
+  configurable `utilization` thresholds and sortable, so "which node is full"
+  is one glance and one `S`. The pod container picker also shows CPU and memory
   for each container, each container usage as a percent of its request and its
   limit (`-` marks an unset request or limit), and the pod QoS class. All of it
   works correctly when metrics-server is not present.

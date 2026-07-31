@@ -532,6 +532,8 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let restarts_idx = headers.iter().position(|h| h == "RESTARTS");
     let cpu_idx = headers.iter().position(|h| h == "CPU");
     let mem_idx = headers.iter().position(|h| h == "MEM");
+    let pct_cpu_idx = headers.iter().position(|h| h == "%CPU");
+    let pct_mem_idx = headers.iter().position(|h| h == "%MEM");
 
     let count = app.row_count();
     let visible_rows = area.height.saturating_sub(3).max(1) as usize;
@@ -585,6 +587,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             }
             let mut metrics_raw = None;
+            let mut node_pcts: (Option<i64>, Option<i64>) = (None, None);
             if metrics_cols {
                 let name = obj.metadata.name.as_deref().unwrap_or_default();
                 let key = if pods_view {
@@ -600,6 +603,15 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 metrics_raw = Some((cpu, mem));
                 cells.push(TableCellText::Owned(columns::fmt_cpu(cpu)));
                 cells.push(TableCellText::Owned(columns::fmt_mem(mem)));
+                if app.node_capacity_columns() {
+                    let (alloc_cpu, alloc_mem) = columns::node_allocatable(obj);
+                    node_pcts = (
+                        columns::usage_pct(cpu, alloc_cpu),
+                        columns::usage_pct(mem, alloc_mem),
+                    );
+                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.0)));
+                    cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.1)));
+                }
             }
             // Combined colorer: the whole row takes a k9s-style status tint
             // (errors red, pending peach, completed/terminating dimmed, healthy
@@ -665,6 +677,12 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                             .map(theme::severity_fg)
                             .unwrap_or(row_color);
                         c.into_cell_aligned(align).style(Style::default().fg(color))
+                    } else if Some(i) == pct_cpu_idx {
+                        let color = util_color(node_pcts.0, thresholds.utilization);
+                        c.into_cell_aligned(align).style(Style::default().fg(color))
+                    } else if Some(i) == pct_mem_idx {
+                        let color = util_color(node_pcts.1, thresholds.utilization);
+                        c.into_cell_aligned(align).style(Style::default().fg(color))
                     } else {
                         c.into_cell_aligned(align)
                             .style(Style::default().fg(row_color))
@@ -695,6 +713,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 "NODE" | "CLAIM" | "VOLUME" | "HOSTS" => Constraint::Fill(1),
                 "AGE" => Constraint::Length(7),
                 "CPU" | "MEM" => Constraint::Length(8),
+                "%CPU" | "%MEM" => Constraint::Length(5),
                 // Wide enough for the long pod reasons (ContainerCreating,
                 // CrashLoopBackOff, ImagePullBackOff…) so status is never clipped.
                 "STATUS" => Constraint::Length(19),

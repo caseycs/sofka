@@ -1732,6 +1732,65 @@ async fn metrics_update_invalidates_metric_sorted_rows() {
     assert_eq!(names, ["b", "a"]);
 }
 
+#[tokio::test]
+async fn node_capacity_percent_columns_render_and_sort() {
+    let (mut app, _rx) = test_app();
+    // Pods must not grow the node columns.
+    app.switch_kind("pods");
+    assert!(!app.display_headers().contains(&"%CPU".to_string()));
+
+    app.switch_kind("nodes");
+    let node = |name: &str, cpu: &str| {
+        json!({"apiVersion": "v1", "kind": "Node",
+               "metadata": {"name": name, "resourceVersion": "1"},
+               "status": {"allocatable": {"cpu": cpu, "memory": "8Gi"}}})
+    };
+    apply(&mut app, node("big", "4"));
+    apply(&mut app, node("small", "2"));
+
+    let headers = app.display_headers();
+    assert!(headers.contains(&"%CPU".to_string()), "{headers:?}");
+    assert!(headers.contains(&"%MEM".to_string()), "{headers:?}");
+
+    // Same absolute usage, different allocatable → percent sort differs from
+    // absolute sort: 1000m is 25% of big (4 cores) but 50% of small (2).
+    app.handle_msg(Msg::Metrics {
+        generation: app.generation,
+        data: HashMap::from([
+            ("big".to_string(), (1000, 0)),
+            ("small".to_string(), (1000, 0)),
+        ]),
+        containers: HashMap::new(),
+    });
+    let pct_idx = app
+        .display_headers()
+        .iter()
+        .position(|h| *h == "%CPU")
+        .unwrap();
+    app.sort_column = Some(pct_idx);
+    app.sort_desc = true;
+    app.invalidate_rows();
+    let names: Vec<String> = app
+        .rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["small", "big"]);
+}
+
+#[test]
+fn node_allocatable_reads_status_quantities() {
+    let node = obj(json!({"apiVersion": "v1", "kind": "Node",
+        "metadata": {"name": "n"},
+        "status": {"allocatable": {"cpu": "3900m", "memory": "8Gi"}}}));
+    assert_eq!(
+        crate::columns::node_allocatable(&node),
+        (Some(3900), Some(8 * 1024 * 1024 * 1024))
+    );
+    let bare = obj(json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "n"}}));
+    assert_eq!(crate::columns::node_allocatable(&bare), (None, None));
+}
+
 #[test]
 fn pod_metrics_are_split_by_container() {
     let metrics = obj(json!({
