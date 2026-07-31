@@ -559,9 +559,17 @@ impl App {
                 obj,
             } if generation == self.generation => {
                 // Record state changes against the previous version before it's
-                // overwritten (session-local timeline).
-                self.timeline
-                    .observe(&self.kind_plural, &key, self.store.latest(&key), &obj);
+                // overwritten (session-local timeline), and keep that version
+                // for the session diff (`:diff` on objects with no
+                // last-applied annotation).
+                let prev = self.store.latest(&key);
+                self.timeline.observe(&self.kind_plural, &key, prev, &obj);
+                if let Some(prev) = prev
+                    && prev.metadata.resource_version != obj.metadata.resource_version
+                {
+                    self.prev_revisions
+                        .insert(&self.kind_plural, &key, prev.clone());
+                }
                 self.store.apply(key.clone(), *obj);
                 self.invalidate_row(&key);
             }

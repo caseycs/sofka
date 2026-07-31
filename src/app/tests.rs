@@ -365,6 +365,88 @@ async fn skin_palette_command_opens_picker() {
 }
 
 #[tokio::test]
+async fn diff_falls_back_to_session_previous_revision() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    let dep = |rv: &str, replicas: i64| {
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": rv},
+            "spec": {"replicas": replicas}
+        })
+    };
+    apply(&mut app, dep("1", 1));
+    apply(&mut app, dep("2", 3));
+    app.table_state.select(Some(0));
+    app.open_diff();
+    assert_eq!(app.mode, Mode::Diff);
+    assert!(app.detail.title.contains("session"), "{}", app.detail.title);
+    assert!(
+        app.detail
+            .lines
+            .iter()
+            .any(|l| l.starts_with('-') && l.contains("replicas: 1"))
+    );
+    assert!(
+        app.detail
+            .lines
+            .iter()
+            .any(|l| l.starts_with('+') && l.contains("replicas: 3"))
+    );
+    // resourceVersion churn must not appear as diff noise.
+    assert!(
+        !app.detail
+            .lines
+            .iter()
+            .any(|l| l.contains("resourceVersion"))
+    );
+}
+
+#[tokio::test]
+async fn diff_without_any_baseline_warns() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"replicas": 1}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.open_diff();
+    assert_ne!(app.mode, Mode::Diff);
+    assert!(app.flash.contains("nothing to diff"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn diff_prefers_last_applied_when_present() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    let last = r#"{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"default"},"spec":{"replicas":2}}"#;
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {
+                "name": "web", "namespace": "default", "resourceVersion": "1",
+                "annotations": {"kubectl.kubernetes.io/last-applied-configuration": last}
+            },
+            "spec": {"replicas": 3}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.open_diff();
+    assert_eq!(app.mode, Mode::Diff);
+    assert!(
+        app.detail.title.contains("last-applied"),
+        "{}",
+        app.detail.title
+    );
+}
+
+#[tokio::test]
 async fn pulse_and_xray_warns_surface_as_flash() {
     let (mut app, _rx) = test_app();
     let data = crate::store::Pulse {
