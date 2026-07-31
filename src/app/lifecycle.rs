@@ -615,7 +615,7 @@ impl App {
                         let headers = self.display_headers();
                         headers.get(i).cloned()
                     })
-                    .is_some_and(|h| matches!(h.as_str(), "CPU" | "MEM"));
+                    .is_some_and(|h| matches!(h.as_str(), "CPU" | "MEM" | "%CPU" | "%MEM"));
                 if !data.is_empty() || !containers.is_empty() {
                     self.metrics_seen = true;
                 }
