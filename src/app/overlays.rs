@@ -225,10 +225,13 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => {
-                // The lookback prompt is the one prompt opened from the logs
-                // view; every other prompt starts at (and returns to) the table.
+                // Most prompts start at (and return to) the table; the
+                // lookback and rename-context prompts return to the view
+                // they were opened from.
                 self.mode = if self.prompt_over_logs() {
                     Mode::Logs
+                } else if self.prompt_over_contexts() {
+                    Mode::Contexts
                 } else {
                     Mode::Table
                 };
@@ -238,6 +241,8 @@ impl App {
                 let input = self.prompt_input.trim().to_string();
                 self.mode = if self.prompt_over_logs() {
                     Mode::Logs
+                } else if self.prompt_over_contexts() {
+                    Mode::Contexts
                 } else {
                     Mode::Table
                 };
@@ -335,6 +340,11 @@ impl App {
                             self.flash_warn("guardrail: input did not match — cancelled");
                         }
                     }
+                    // Empty input = cancel, keep the old name.
+                    Some(PromptKind::RenameContext { old }) if !input.is_empty() => {
+                        self.rename_context(old, input);
+                    }
+                    Some(PromptKind::RenameContext { .. }) => {}
                     None => {}
                 }
             }

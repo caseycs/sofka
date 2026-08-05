@@ -140,6 +140,14 @@ pub enum Msg {
         name: String,
         result: Result<Box<crate::k8s::Cluster>, String>,
     },
+    /// Result of an off-thread `kubectl config rename-context` (`r` in the
+    /// context switcher).
+    ContextRenamed {
+        generation: u64,
+        old: String,
+        new: String,
+        result: Result<(), String>,
+    },
     /// Resource plurals the user may `list`, computed for namespace `ns`
     /// (empty = cluster default). Dropped if the active namespace has since
     /// changed. "*" = all.

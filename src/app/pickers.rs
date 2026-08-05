@@ -351,6 +351,7 @@ impl App {
 
     pub(super) fn open_contexts(&mut self) {
         self.ctx_filter.clear();
+        self.ctx_filtering = false;
         self.ctx_list.clear();
         self.ctx_state.select(None);
         self.mode = Mode::Contexts;
@@ -400,24 +401,54 @@ impl App {
         scored.into_iter().map(|(_, c)| c.clone()).collect()
     }
 
+    /// Unlike the other pickers, the switcher is not type-to-filter: `/`
+    /// starts the filter (like the table filter), which frees plain letters
+    /// for actions (`r` rename, `j`/`k` movement).
     pub(super) fn key_contexts(&mut self, key: KeyEvent) {
-        if edit_chord(&key, &mut self.ctx_filter) {
-            self.ctx_state.select(Some(0));
+        let len = self.filtered_contexts().len();
+        if self.ctx_filtering {
+            if edit_chord(&key, &mut self.ctx_filter) {
+                self.ctx_state.select(Some(0));
+                return;
+            }
+            match key.code {
+                // Esc cancels the filter, enter keeps it applied (the table
+                // filter's semantics); both return to browsing.
+                KeyCode::Esc => {
+                    self.ctx_filter.clear();
+                    self.ctx_filtering = false;
+                    self.select_current_context();
+                }
+                KeyCode::Enter => self.ctx_filtering = false,
+                KeyCode::Down => list_step(&mut self.ctx_state, len, true),
+                KeyCode::Up => list_step(&mut self.ctx_state, len, false),
+                KeyCode::Backspace => {
+                    self.ctx_filter.pop();
+                    self.ctx_state.select(Some(0));
+                }
+                KeyCode::Char(c) => {
+                    self.ctx_filter.push(c);
+                    self.ctx_state.select(Some(0));
+                }
+                _ => {}
+            }
             return;
         }
-        let len = self.filtered_contexts().len();
         match key.code {
             KeyCode::Esc => {
-                // First esc clears the filter, second closes the switcher.
+                // First esc clears an applied filter, second closes the
+                // switcher.
                 if self.ctx_filter.is_empty() {
                     self.mode = Mode::Table;
                 } else {
                     self.ctx_filter.clear();
-                    self.ctx_state.select(Some(0));
+                    self.select_current_context();
                 }
             }
-            KeyCode::Down => list_step(&mut self.ctx_state, len, true),
-            KeyCode::Up => list_step(&mut self.ctx_state, len, false),
+            KeyCode::Char('/') => self.ctx_filtering = true,
+            KeyCode::Char('r') | KeyCode::Char('R') => self.open_rename_context(),
+            KeyCode::Down | KeyCode::Char('j') => list_step(&mut self.ctx_state, len, true),
+            KeyCode::Up | KeyCode::Char('k') => list_step(&mut self.ctx_state, len, false),
             KeyCode::Enter => {
                 if let Some(name) = self
                     .ctx_state
@@ -428,16 +459,71 @@ impl App {
                     self.switch_context(name);
                 }
             }
-            KeyCode::Backspace => {
-                self.ctx_filter.pop();
-                self.ctx_state.select(Some(0));
-            }
-            KeyCode::Char(c) => {
-                self.ctx_filter.push(c);
-                self.ctx_state.select(Some(0));
-            }
             _ => {}
         }
+    }
+
+    /// Put the switcher cursor on the active context (fallback: the top).
+    fn select_current_context(&mut self) {
+        let idx = self
+            .filtered_contexts()
+            .iter()
+            .position(|c| *c == self.cluster.context)
+            .unwrap_or(0);
+        self.ctx_state.select(Some(idx));
+    }
+
+    /// Prompt for a new name for the selected context (`r` in the switcher),
+    /// prefilled with the current name.
+    fn open_rename_context(&mut self) {
+        if self.deny_readonly() {
+            return;
+        }
+        let Some(old) = self
+            .ctx_state
+            .selected()
+            .and_then(|i| self.filtered_contexts().get(i).cloned())
+        else {
+            return;
+        };
+        self.prompt_label = format!("Rename context {old} to:");
+        self.prompt_input = old.clone();
+        self.prompt_kind = Some(PromptKind::RenameContext { old });
+        self.mode = Mode::Prompt;
+    }
+
+    /// Rename a kubeconfig context off-thread via `kubectl config
+    /// rename-context` (which also updates `current-context` when it pointed
+    /// at the old name); the outcome arrives as `Msg::ContextRenamed`.
+    pub(super) fn rename_context(&mut self, old: String, new: String) {
+        if new == old {
+            return;
+        }
+        if self.ctx_list.contains(&new) {
+            self.flash_warn(&format!("context '{new}' already exists"));
+            return;
+        }
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            let out = tokio::process::Command::new("kubectl")
+                .args(["config", "rename-context", &old, &new])
+                .output()
+                .await;
+            let result = match out {
+                Ok(o) if o.status.success() => Ok(()),
+                Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                Err(e) => Err(format!("kubectl failed to start: {e}")),
+            };
+            let _ = tx
+                .send(Msg::ContextRenamed {
+                    generation: genr,
+                    old,
+                    new,
+                    result,
+                })
+                .await;
+        });
     }
 
     /// Rebuild the cluster connection against a different kubeconfig context.

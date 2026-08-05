@@ -162,6 +162,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Containers => draw_containers(frame, app, chunks[1]),
         Mode::SetImage => draw_set_image(frame, app, chunks[1]),
         Mode::Confirm => draw_confirm(frame, app, chunks[1]),
+        // The rename prompt opens from the context switcher — keep the
+        // picker visible underneath it.
+        Mode::Prompt if app.prompt_over_contexts() => {
+            draw_contexts(frame, app, chunks[1]);
+            draw_prompt_popup(frame, app, chunks[1]);
+        }
         Mode::Prompt => draw_prompt_popup(frame, app, chunks[1]),
         Mode::Command => draw_palette(frame, app, chunks[1]),
         Mode::FluxMenu => draw_flux_menu(frame, app, chunks[1]),
@@ -2005,11 +2011,14 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
             ))
         })
         .collect();
-    // Show the type-to-filter buffer in the title so it reads like an input.
-    let title = if app.ctx_filter.is_empty() {
-        " Contexts (type to filter · ⏎ switch) ".to_string()
-    } else {
+    // While typing, show the filter buffer in the title so it reads like an
+    // input; an applied filter stays visible without the cursor.
+    let title = if app.ctx_filtering {
         format!(" Contexts · /{}_ ", app.ctx_filter)
+    } else if !app.ctx_filter.is_empty() {
+        format!(" Contexts · /{} ", app.ctx_filter)
+    } else {
+        " Contexts (/ filter · r rename · ⏎ switch) ".to_string()
     };
     render_popup_list(
         frame,
