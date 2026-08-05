@@ -31,6 +31,21 @@ impl Kind {
             format!("{}.{}", self.ar.plural, self.ar.group)
         }
     }
+
+    /// Whether this kind comes from a custom API group (a CRD or third-party
+    /// aggregated API) rather than one Kubernetes ships with. Custom kinds own
+    /// their name in the command palette even when a built-in command shares
+    /// it (`:snapshots` with a snapshots.* CRD installed); vanilla kinds don't
+    /// get that priority, so `:events` keeps opening the built-in view.
+    pub fn is_custom(&self) -> bool {
+        let group = self.ar.group.as_str();
+        !group.is_empty()
+            && !group.ends_with(".k8s.io")
+            && !matches!(
+                group,
+                "apps" | "batch" | "policy" | "autoscaling" | "extensions"
+            )
+    }
 }
 
 /// Connection + discovery context for a cluster.
@@ -217,10 +232,13 @@ impl Cluster {
                 let plural = ar.plural.to_lowercase();
                 let kind_lc = ar.kind.to_lowercase();
                 catalog.push(plural.clone());
-                // Group-qualified keys are unambiguous; insert directly.
+                // Group-qualified keys are unambiguous; insert directly. They
+                // join the catalog too, so completion can surface a kind whose
+                // bare plural is shadowed (or find it by its group name).
                 if !ar.group.is_empty() {
-                    self.registry
-                        .insert(format!("{}.{}", plural, ar.group), kind.clone());
+                    let qualified = format!("{}.{}", plural, ar.group);
+                    self.registry.insert(qualified.clone(), kind.clone());
+                    catalog.push(qualified);
                 }
                 entries.push((kind, plural, kind_lc));
             }
@@ -518,6 +536,39 @@ impl Cluster {
             "certificates".to_string(),
             mk("cert-manager.io", "Certificate", "certificates", true),
         );
+        // A CRD whose plural collides with the `:snapshots` built-in command,
+        // for palette-priority tests (CRD names outrank built-ins).
+        registry.insert(
+            "snapshots".to_string(),
+            mk("kopiur.home-operations.com", "Snapshot", "snapshots", true),
+        );
+        // Mirror discover(): catalogued kinds with a group also resolve by
+        // (and are listed under) their group-qualified name.
+        let mut catalog: Vec<String> = [
+            "certificates",
+            "deployments",
+            "helmreleases",
+            "horizontalpodautoscalers",
+            "kustomizations",
+            "namespaces",
+            "nodes",
+            "pods",
+            "services",
+            "snapshots",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        for plural in catalog.clone() {
+            let kind = registry[&plural].clone();
+            if kind.ar.group.is_empty() {
+                continue;
+            }
+            let qualified = format!("{plural}.{}", kind.ar.group);
+            registry.insert(qualified.clone(), kind);
+            catalog.push(qualified);
+        }
+        catalog.sort();
         Self {
             client,
             context: "test".into(),
@@ -527,17 +578,7 @@ impl Cluster {
             cli_context: Some("test".into()),
             connected: true,
             registry,
-            catalog: vec![
-                "certificates".to_string(),
-                "deployments".to_string(),
-                "helmreleases".to_string(),
-                "horizontalpodautoscalers".to_string(),
-                "kustomizations".to_string(),
-                "namespaces".to_string(),
-                "nodes".to_string(),
-                "pods".to_string(),
-                "services".to_string(),
-            ],
+            catalog,
         }
     }
 }

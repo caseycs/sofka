@@ -1615,6 +1615,100 @@ async fn pf_palette_command_opens_the_view() {
 }
 
 #[tokio::test]
+async fn crd_plural_outranks_builtin_command() {
+    let (mut app, _rx) = test_app();
+    // The fake cluster serves snapshots.kopiur.home-operations.com, which
+    // collides with the `:snapshots` built-in — the CRD must win.
+    app.mode = Mode::Command;
+    for c in "snapshots".chars() {
+        app.key_command(press(KeyCode::Char(c)));
+    }
+    app.key_command(press(KeyCode::Enter));
+    assert_eq!(app.mode, Mode::Table);
+    assert!(
+        app.flash.contains("snapshots.kopiur.home-operations.com"),
+        "{}",
+        app.flash
+    );
+
+    // `:kind namespace` still works for the shadowed plural.
+    app.mode = Mode::Command;
+    for c in "snapshots media".chars() {
+        app.key_command(press(KeyCode::Char(c)));
+    }
+    app.key_command(press(KeyCode::Enter));
+    assert_eq!(app.namespace, "media");
+}
+
+#[tokio::test]
+async fn qualified_names_surface_without_doubling_the_list() {
+    let (mut app, _rx) = test_app();
+
+    // A group fragment finds the CRD by its qualified name even though the
+    // bare plural doesn't match.
+    app.command = "kopiur".into();
+    app.update_suggestions();
+    assert_eq!(
+        app.cmd_suggestions[0].label,
+        "snapshots.kopiur.home-operations.com"
+    );
+
+    // When the bare plural matches and means the same kind, the qualified
+    // twin stays hidden.
+    app.command = "deploy".into();
+    app.update_suggestions();
+    let labels: Vec<_> = app.cmd_suggestions.iter().map(|s| &s.label).collect();
+    assert!(labels.contains(&&"deployments".to_string()), "{labels:?}");
+    assert!(
+        !labels.contains(&&"deployments.apps".to_string()),
+        "{labels:?}"
+    );
+
+    // Browsing with `:` lists each kind once, under its bare plural.
+    app.command.clear();
+    app.update_suggestions();
+    assert!(
+        app.cmd_suggestions.iter().all(|s| !s.label.contains('.')),
+        "{:?}",
+        app.cmd_suggestions
+            .iter()
+            .map(|s| &s.label)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn typed_qualified_name_opens_the_kind() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Command;
+    for c in "snapshots.kopiur.home-operations.com".chars() {
+        app.key_command(press(KeyCode::Char(c)));
+    }
+    app.key_command(press(KeyCode::Enter));
+    assert_eq!(app.mode, Mode::Table);
+    assert!(
+        app.flash.contains("snapshots.kopiur.home-operations.com"),
+        "{}",
+        app.flash
+    );
+}
+
+#[tokio::test]
+async fn shadowed_builtin_stays_reachable_via_alias() {
+    let (mut app, _rx) = test_app();
+    // `snapshots` now resolves to the CRD; the snapshot browser keeps its
+    // `dumps` alias. Depending on the machine's state dir it either opens
+    // the browser or warns that none are saved — both are the built-in.
+    assert!(app.run_palette_command("dumps"));
+    assert!(
+        app.mode == Mode::Snapshots || app.flash.contains("no snapshots yet"),
+        "mode={:?} flash={}",
+        app.mode,
+        app.flash
+    );
+}
+
+#[tokio::test]
 async fn events_palette_command_dispatches() {
     let (mut app, _rx) = test_app();
     assert!(app.run_palette_command("events"));

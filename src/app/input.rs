@@ -494,10 +494,17 @@ impl App {
                             self.open_workspace_named(&s.label);
                         }
                     }
-                    // An exact typed built-in wins (stable muscle memory), then
-                    // the highlighted suggestion, then the raw text as a resource.
+                    // A name owned by a CRD resolves to the CRD even when a
+                    // built-in command shares it — the cluster's vocabulary
+                    // outranks ours, and the suggestion list already ranks the
+                    // resource first. After that an exact typed built-in wins
+                    // (stable muscle memory), then the highlighted suggestion,
+                    // then the raw text as a resource.
                     _ => {
-                        if self.run_palette_command(&typed) {
+                        let crd_owned = self.cluster.resolve(&head).is_some_and(|k| k.is_custom());
+                        if crd_owned {
+                            self.switch_kind_ns(&head, ns_arg);
+                        } else if self.run_palette_command(&typed) {
                             // handled
                         } else if let Some(s) = picked {
                             match s.kind {
@@ -729,17 +736,42 @@ impl App {
         // An exact alias/kind/plural hit (e.g. `hr` → helmreleases) outranks
         // every fuzzy match, so a shorthand lands on its target instead of an
         // alphabetically-earlier lookalike (hr → horizontalpodautoscalers).
+        // Compared by resolved identity so any of a kind's names hits.
         let alias_target = if q.is_empty() {
             None
         } else {
-            self.cluster.resolve(q).map(|k| k.ar.plural.to_lowercase())
+            self.cluster.resolve(q).map(|k| k.title().to_lowercase())
         };
 
-        // Resource catalog (RBAC-filtered).
-        for c in self.cluster.catalog.iter().filter(|c| self.rbac_visible(c)) {
+        // Resource catalog (RBAC-filtered; the allow-list carries bare
+        // plurals, so group-qualified entries are checked by their plural).
+        // A qualified entry (`snapshots.kopiur…`) is listed only when it adds
+        // something: it's dropped while the bare plural also matches the query
+        // and resolves to the same kind, and kept when the plural is shadowed
+        // (`pods.metrics.k8s.io`) or only the group part matches (`kopiur`).
+        for c in &self.cluster.catalog {
+            let (plural, group) = match c.split_once('.') {
+                Some((p, g)) => (p, Some(g)),
+                None => (c.as_str(), None),
+            };
+            if !self.rbac_visible(plural) {
+                continue;
+            }
+            if let Some(group) = group {
+                let bare_matches = q.is_empty() || self.matcher.fuzzy_match(plural, q).is_some();
+                let same_kind = self
+                    .cluster
+                    .resolve(plural)
+                    .is_some_and(|k| k.ar.group.eq_ignore_ascii_case(group));
+                if bare_matches && same_kind {
+                    continue;
+                }
+            }
             let score = if q.is_empty() {
                 Some(0)
-            } else if alias_target.as_deref() == Some(c.as_str()) {
+            } else if alias_target.is_some()
+                && self.cluster.resolve(c).map(|k| k.title().to_lowercase()) == alias_target
+            {
                 Some(i64::MAX)
             } else {
                 self.matcher.fuzzy_match(c, q)
