@@ -916,6 +916,37 @@ impl App {
                     self.ctx_state.select(Some(idx));
                 }
             }
+            Msg::ContextRenamed {
+                generation,
+                old,
+                new,
+                result,
+            } if generation == self.generation => match result {
+                Ok(()) => {
+                    // Patch the cached lists in place — kubectl already
+                    // rewrote the kubeconfig, so a re-read would say the same.
+                    for list in [&mut self.ctx_list, &mut self.all_contexts] {
+                        if let Some(c) = list.iter_mut().find(|c| **c == old) {
+                            *c = new.clone();
+                        }
+                        list.sort();
+                    }
+                    if self.mode == Mode::Contexts {
+                        let idx = self.filtered_contexts().iter().position(|c| *c == new);
+                        self.ctx_state.select(Some(idx.unwrap_or(0)));
+                    }
+                    // The live connection is unaffected; only the name moves.
+                    if self.cluster.context == old {
+                        self.cluster.context = new.clone();
+                        if let Some(recents) = self.recent_namespaces.remove(&old) {
+                            self.recent_namespaces.insert(new.clone(), recents);
+                        }
+                    }
+                    self.flash = format!("renamed context {old} → {new}");
+                    self.flash_err = false;
+                }
+                Err(e) => self.flash_warn(&format!("rename failed: {e}")),
+            },
             Msg::ContextSwitched {
                 generation,
                 name,

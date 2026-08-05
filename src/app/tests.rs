@@ -2916,6 +2916,160 @@ async fn context_list_result_selects_current_context() {
 }
 
 #[tokio::test]
+async fn context_picker_filters_only_after_slash() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Contexts;
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec!["dev".into(), "prod".into(), "test".into()],
+    });
+
+    // Plain letters are action keys, not filter input.
+    app.key_contexts(press(KeyCode::Char('p')));
+    assert!(app.ctx_filter.is_empty());
+    assert!(!app.ctx_filtering);
+
+    // `/` starts the filter; typing narrows the list live.
+    app.key_contexts(press(KeyCode::Char('/')));
+    assert!(app.ctx_filtering);
+    app.key_contexts(press(KeyCode::Char('p')));
+    assert_eq!(app.ctx_filter, "p");
+    assert_eq!(app.filtered_contexts(), vec!["prod".to_string()]);
+
+    // Enter keeps the filter applied and returns to browsing.
+    app.key_contexts(press(KeyCode::Enter));
+    assert!(!app.ctx_filtering);
+    assert_eq!(app.ctx_filter, "p");
+    assert_eq!(app.mode, Mode::Contexts);
+
+    // First esc clears the applied filter (cursor back on the current
+    // context), second closes the switcher.
+    app.key_contexts(press(KeyCode::Esc));
+    assert!(app.ctx_filter.is_empty());
+    assert_eq!(app.mode, Mode::Contexts);
+    assert_eq!(app.ctx_state.selected(), Some(2), "cursor on 'test'");
+    app.key_contexts(press(KeyCode::Esc));
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn context_picker_esc_while_typing_cancels_filter() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Contexts;
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec!["dev".into(), "test".into()],
+    });
+    app.key_contexts(press(KeyCode::Char('/')));
+    app.key_contexts(press(KeyCode::Char('d')));
+    app.key_contexts(press(KeyCode::Esc));
+    assert!(!app.ctx_filtering);
+    assert!(app.ctx_filter.is_empty());
+    assert_eq!(
+        app.mode,
+        Mode::Contexts,
+        "esc cancels the filter, not the picker"
+    );
+}
+
+#[tokio::test]
+async fn context_rename_prompt_opens_prefilled_and_returns_to_picker() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Contexts;
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec!["prod".into(), "test".into()],
+    });
+
+    app.key_contexts(press(KeyCode::Char('r')));
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(app.prompt_over_contexts());
+    assert_eq!(app.prompt_input, "test", "prefilled with the selected name");
+    assert!(app.prompt_label.contains("Rename context test"));
+
+    // Esc abandons the rename and lands back in the picker.
+    app.key_prompt(press(KeyCode::Esc));
+    assert_eq!(app.mode, Mode::Contexts);
+    assert!(!app.prompt_over_contexts());
+}
+
+#[tokio::test]
+async fn context_rename_to_existing_name_warns() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Contexts;
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec!["prod".into(), "test".into()],
+    });
+
+    app.key_contexts(press(KeyCode::Char('r')));
+    app.prompt_input = "prod".into();
+    app.key_prompt(press(KeyCode::Enter));
+    assert_eq!(app.mode, Mode::Contexts);
+    assert!(app.flash_err);
+    assert!(app.flash.contains("already exists"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn context_renamed_updates_lists_and_current_context() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Contexts;
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec!["prod".into(), "test".into()],
+    });
+    app.all_contexts = vec!["prod".into(), "test".into()];
+    app.note_recent_namespace("shop");
+
+    app.handle_msg(Msg::ContextRenamed {
+        generation: app.generation,
+        old: "test".into(),
+        new: "staging".into(),
+        result: Ok(()),
+    });
+    assert_eq!(
+        app.ctx_list,
+        vec!["prod".to_string(), "staging".to_string()]
+    );
+    assert_eq!(
+        app.all_contexts,
+        vec!["prod".to_string(), "staging".to_string()]
+    );
+    assert_eq!(
+        app.cluster.context, "staging",
+        "live connection follows the rename"
+    );
+    assert_eq!(
+        app.recent_namespaces.get("staging").map(|dq| dq.len()),
+        Some(1),
+        "per-context recents follow the rename"
+    );
+    assert_eq!(
+        app.ctx_state.selected(),
+        Some(1),
+        "cursor lands on the new name"
+    );
+    assert!(
+        app.flash.contains("renamed context test → staging"),
+        "{}",
+        app.flash
+    );
+
+    // A failed rename only flashes.
+    app.handle_msg(Msg::ContextRenamed {
+        generation: app.generation,
+        old: "prod".into(),
+        new: "live".into(),
+        result: Err("no context exists with the name".into()),
+    });
+    assert!(app.flash_err);
+    assert_eq!(
+        app.ctx_list,
+        vec!["prod".to_string(), "staging".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn rbac_for_old_generation_is_dropped() {
     let (mut app, _rx) = test_app();
     let stale = app.generation;

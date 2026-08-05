@@ -344,6 +344,11 @@ enum PromptKind {
         expected: String,
         action: Box<ConfirmAction>,
     },
+    /// New name for a kubeconfig context (`r` in the context switcher) —
+    /// opened from (and returning to) [`Mode::Contexts`].
+    RenameContext {
+        old: String,
+    },
 }
 
 #[derive(Default)]
@@ -941,8 +946,12 @@ pub struct App {
 
     pub ctx_list: Vec<String>,
     pub ctx_state: ListState,
-    /// Type-to-filter buffer for the context switcher.
+    /// Filter buffer for the context switcher (typed after `/`, like the
+    /// table filter — plain letters are action keys, e.g. `r` rename).
     pub ctx_filter: String,
+    /// Whether the context switcher is in filter-typing mode (`/` pressed;
+    /// esc/enter leave it).
+    pub ctx_filtering: bool,
     pub sort_picker_state: ListState,
     /// Type-to-filter buffer for the sort-column picker.
     pub sort_picker_filter: String,
@@ -1211,6 +1220,7 @@ impl App {
             ctx_list: Vec::new(),
             ctx_state: ListState::default(),
             ctx_filter: String::new(),
+            ctx_filtering: false,
             sort_picker_state: ListState::default(),
             sort_picker_filter: String::new(),
             all_contexts: Vec::new(),
@@ -1328,6 +1338,12 @@ impl App {
     /// renderer keeps the logs (not the table) underneath it.
     pub fn prompt_over_logs(&self) -> bool {
         matches!(self.prompt_kind, Some(PromptKind::ProviderLookback))
+    }
+
+    /// Whether the active prompt was opened from the context switcher, so the
+    /// renderer keeps the picker underneath it and esc/enter return there.
+    pub fn prompt_over_contexts(&self) -> bool {
+        matches!(self.prompt_kind, Some(PromptKind::RenameContext { .. }))
     }
 
     /// Whether the logs view is showing the external log provider (enables
