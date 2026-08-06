@@ -324,6 +324,7 @@ pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) 
 /// columns when the kind is unknown — then filtered by wide mode. Built once
 /// per view change, never per row.
 pub struct ViewSpec {
+    plural: String,
     columns: Vec<SpecColumn>,
     status_idx: Option<usize>,
 }
@@ -409,6 +410,7 @@ pub fn build_spec(
     cols.retain(|c| wide || !c.wide);
     let status_idx = cols.iter().position(|c| c.is_status);
     ViewSpec {
+        plural: plural.to_string(),
         columns: cols,
         status_idx,
     }
@@ -507,7 +509,7 @@ impl ViewSpec {
                     age: &age,
                 };
                 let v = extract(&ctx);
-                if is_numeric_header(header) {
+                if is_numeric_header(&self.plural, header) {
                     crate::views::SortValue::Num(parse_leading_num(&v))
                 } else {
                     crate::views::SortValue::Text(v.to_lowercase())
@@ -535,11 +537,17 @@ impl ViewSpec {
 }
 
 /// Columns whose curated cell is a count/number and should sort numerically.
-fn is_numeric_header(header: &str) -> bool {
+fn is_numeric_header(plural: &str, header: &str) -> bool {
+    // READY is a count ("1/2") for workloads, but flux kinds render it as
+    // True/False/Unknown, which must sort as text.
+    if header == "READY" {
+        let cols = columns_for(plural);
+        return cols.as_ptr() != FLUX_OBJECT_COLUMNS.as_ptr()
+            && cols.as_ptr() != FLUX_SOURCE_COLUMNS.as_ptr();
+    }
     matches!(
         header,
-        "READY"
-            | "RESTARTS"
+        "RESTARTS"
             | "DATA"
             | "ACTIVE"
             | "DESIRED"
@@ -2171,5 +2179,39 @@ mod tests {
             SortValue::Text(t) => panic!("expected numeric sort, got '{t}'"),
         }
         assert!(spec.sort_value(&o, "MISSING").is_none());
+    }
+
+    #[test]
+    fn flux_ready_sorts_as_text_pod_ready_stays_numeric() {
+        use crate::views::SortValue;
+        let flux = |status: &str| {
+            obj(json!({
+                "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+                "kind": "Kustomization",
+                "metadata": {"name": "apps", "namespace": "flux-system"},
+                "status": {"conditions": [{"type": "Ready", "status": status}]}
+            }))
+        };
+        let spec = build_spec("kustomizations", None, None, false);
+        let ready = |status: &str| match spec.sort_value(&flux(status), "READY").unwrap() {
+            SortValue::Text(t) => t,
+            SortValue::Num(n) => panic!("flux READY must sort as text, got {n}"),
+        };
+        assert!(ready("False") < ready("True"));
+        assert!(ready("True") < ready("Unknown"));
+
+        let pod = obj(json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "p"},
+            "status": {"containerStatuses": [
+                {"ready": true, "restartCount": 0, "state": {"running": {}}},
+                {"ready": false, "restartCount": 0, "state": {"running": {}}}
+            ]}
+        }));
+        let spec = build_spec("pods", None, None, false);
+        match spec.sort_value(&pod, "READY").unwrap() {
+            SortValue::Num(n) => assert_eq!(n, 1.0),
+            SortValue::Text(t) => panic!("pod READY must sort numerically, got '{t}'"),
+        }
     }
 }
