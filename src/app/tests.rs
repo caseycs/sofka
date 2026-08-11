@@ -645,6 +645,33 @@ async fn mouse_click_selects_row_header_click_sorts_wheel_moves() {
 }
 
 #[tokio::test]
+async fn document_views_release_mouse_capture_for_text_selection() {
+    let (mut app, _rx) = test_app();
+    assert!(app.wants_mouse_capture(), "table keeps capture");
+
+    // Every full-screen text view releases capture so click-drag selects text
+    // natively (#133), including the filter overlays that keep it on screen.
+    for mode in [
+        Mode::Detail,
+        Mode::Diff,
+        Mode::Events,
+        Mode::Logs,
+        Mode::Help,
+        Mode::DocFilter,
+        Mode::LogFilter,
+    ] {
+        app.mode = mode;
+        assert!(!app.wants_mouse_capture(), "{mode:?} releases capture");
+    }
+
+    // Interactive pickers and dashboards still want clicks/wheel captured.
+    for mode in [Mode::Table, Mode::Namespaces, Mode::Pulse, Mode::Confirm] {
+        app.mode = mode;
+        assert!(app.wants_mouse_capture(), "{mode:?} keeps capture");
+    }
+}
+
+#[tokio::test]
 async fn notify_toggles_a_background_watch_per_object() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

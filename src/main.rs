@@ -444,8 +444,10 @@ fn ring_notification(text: &str, cfg: &config::NotifyConfig) {
 /// stdio (kubectl exec/edit/port-forward), then restore the TUI. Toggles the
 /// terminal modes directly rather than `ratatui::restore()`/`init()`: `init()`
 /// stacks another panic hook on every call, and the hook installed at startup
-/// must stay the outermost one.
-fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String], mouse: bool) {
+/// must stay the outermost one. `captured` is whether mouse capture is on
+/// right now (not just the config flag), so the pre-suspend state is restored
+/// exactly.
+fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String], captured: bool) {
     use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
     use crossterm::terminal::{
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -453,7 +455,7 @@ fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String], mou
     if argv.is_empty() {
         return;
     }
-    if mouse {
+    if captured {
         let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
     }
     let _ = disable_raw_mode();
@@ -467,7 +469,7 @@ fn suspend_and_run(terminal: &mut ratatui::DefaultTerminal, argv: &[String], mou
         .status();
     let _ = enable_raw_mode();
     let _ = crossterm::execute!(std::io::stdout(), EnterAlternateScreen);
-    if mouse {
+    if captured {
         let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
     }
     let _ = terminal.clear();
@@ -551,11 +553,26 @@ async fn run(
     let mut frame = tokio::time::interval(Duration::from_millis(16));
     frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dirty = false;
+    // Tracks whether mouse capture is currently on, so it can follow the mode:
+    // document views release it for native text selection (see
+    // `wants_mouse_capture`). Always false when the config disabled the mouse.
+    let mut captured = mouse;
 
     terminal.draw(|f| ui::draw(f, app))?;
     loop {
         if app.should_quit {
             return Ok(());
+        }
+
+        if mouse && app.wants_mouse_capture() != captured {
+            captured = !captured;
+            if captured {
+                let _ =
+                    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture);
+            } else {
+                let _ =
+                    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+            }
         }
 
         tokio::select! {
@@ -564,7 +581,7 @@ async fn run(
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         app.handle_key(key)?;
                         if let Some(app::Suspend::Shell(argv)) = app.pending.take() {
-                            suspend_and_run(terminal, &argv, mouse);
+                            suspend_and_run(terminal, &argv, captured);
                             app.flash = format!("ran: {}", argv.join(" "));
                             app.flash_err = false;
                         }
@@ -574,7 +591,7 @@ async fn run(
                     Some(Ok(Event::Mouse(m))) => {
                         app.handle_mouse(m)?;
                         if let Some(app::Suspend::Shell(argv)) = app.pending.take() {
-                            suspend_and_run(terminal, &argv, mouse);
+                            suspend_and_run(terminal, &argv, captured);
                             app.flash = format!("ran: {}", argv.join(" "));
                             app.flash_err = false;
                         }
