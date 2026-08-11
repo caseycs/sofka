@@ -43,9 +43,13 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   session recents (·) above the rest, plus a context switcher (`:ctx`).
 - **Mouse support** - the wheel scrolls every view (one notch is three steps of
   that view's own up/down), clicking a row selects it, clicking a column header
-  sorts by it (click again to flip). Set `mouse = false` to keep the terminal's
-  native text selection instead. sofka releases the mouse while a suspended
-  command (`kubectl exec`, `$EDITOR`) runs.
+  sorts by it (click again to flip). Document views (YAML/describe, diff,
+  events, logs, help) release the mouse automatically so click-drag selects
+  text natively; the wheel still scrolls them in terminals that translate it to
+  arrow keys in the alternate screen (kitty, Ghostty, iTerm2, ...). Set
+  `mouse = false` to keep the terminal's native mouse behavior everywhere.
+  sofka also releases the mouse while a suspended command (`kubectl exec`,
+  `$EDITOR`) runs.
 - **Compact mode** (`ctrl-e`) - collapse the seven-line header and the footer
   into one info line (kind · count · namespace · context, with a flash and the
   live indicator), so a tiled pane is almost all table.

@@ -90,7 +90,8 @@ pub struct Config {
     pub forwards: Vec<Forward>,
     /// Mouse support (wheel scroll, click-to-select, header-click sort).
     /// `None` = on. Set `mouse = false` to keep the terminal's native mouse
-    /// behavior (text selection) instead.
+    /// behavior (text selection) everywhere. Document views release capture
+    /// on their own regardless — see [`crate::app::App::wants_mouse_capture`].
     pub mouse: Option<bool>,
     /// How `:notify` events are delivered — see [`NotifyConfig`].
     pub notify: NotifyConfig,
