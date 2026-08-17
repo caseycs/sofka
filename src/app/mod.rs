@@ -907,6 +907,11 @@ pub struct App {
     /// `None` for the natural namespace/name order.
     pub sort_column: Option<usize>,
     pub sort_desc: bool,
+    /// Horizontal column scroll: how many columns after the anchored
+    /// NAMESPACE/NAME prefix are hidden off the left edge (←/→ in the
+    /// table). Clamped by `draw_table`, since the header set can change
+    /// underneath it; reset when the view spec is rebuilt.
+    pub col_offset: usize,
     pub filter: String,
     /// Parsed form of `filter`, refreshed lazily when the string changes so
     /// neither row matching nor rendering reparses it per frame.
@@ -1195,6 +1200,7 @@ impl App {
             marked: HashSet::new(),
             sort_column: None,
             sort_desc: false,
+            col_offset: 0,
             filter: String::new(),
             filter_cache: RefCell::new(FilterCache {
                 raw: String::new(),

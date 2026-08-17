@@ -13,14 +13,15 @@ pub(crate) struct TableHit {
     /// Inner x extent (inside the borders).
     pub x_min: u16,
     pub x_max: u16,
-    /// Per-column `[start, end)` x ranges, aligned with `display_headers()`.
-    pub cols: Vec<(u16, u16)>,
+    /// Per-column `[start, end)` x ranges plus the `display_headers()` index
+    /// each range shows (columns can be scrolled out of view horizontally).
+    pub cols: Vec<(u16, u16, usize)>,
 }
 
 impl App {
     /// Record the table geometry the renderer just used, so clicks can be
     /// mapped back to rows and header columns. `cols` are `[start, end)` x
-    /// ranges aligned with `display_headers()`.
+    /// ranges tagged with the `display_headers()` index they show.
     pub fn record_table_hit(
         &self,
         header_y: u16,
@@ -28,7 +29,7 @@ impl App {
         rows_h: u16,
         x_min: u16,
         x_max: u16,
-        cols: Vec<(u16, u16)>,
+        cols: Vec<(u16, u16, usize)>,
     ) {
         *self.table_hit.borrow_mut() = Some(TableHit {
             header_y,
@@ -94,7 +95,7 @@ impl App {
         }
         // Header row: sort by the clicked column (again = flip direction).
         if y == hit.header_y {
-            let Some(idx) = hit.cols.iter().position(|(s, e)| x >= *s && x < *e) else {
+            let Some(&(_, _, idx)) = hit.cols.iter().find(|(s, e, _)| x >= *s && x < *e) else {
                 return;
             };
             if self.sort_column == Some(idx) {

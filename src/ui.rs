@@ -491,6 +491,15 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     // Offset from a displayed column index back to the view spec's (the spec
     // doesn't know about the prepended NAMESPACE or appended CPU/MEM).
     let ns_off = usize::from(show_ns);
+    // Horizontal column scroll: everything after the anchored NAMESPACE/NAME
+    // prefix can be shifted off the left edge with ←/→. Clamped here (not
+    // only in the key handler) because the header set can change underneath
+    // the offset (wide toggle, printer columns arriving).
+    let name_col = if show_ns { 1 } else { 0 };
+    let scrollable_cols = headers.len().saturating_sub(name_col + 1);
+    app.col_offset = app.col_offset.min(scrollable_cols.saturating_sub(1));
+    let col_offset = app.col_offset;
+    let col_visible = move |i: usize| i <= name_col || i >= name_col + 1 + col_offset;
     // Per-column custom alignment, precomputed so cells don't re-borrow app.
     let aligns: Vec<Option<Alignment>> = (0..headers.len())
         .map(|i| {
@@ -505,6 +514,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         headers
             .iter()
             .enumerate()
+            .filter(|(i, _)| col_visible(*i))
             .map(|(i, h)| {
                 // Active sort column gets a direction arrow in the sorter color
                 // (sky, bold), matching k9s; the label inherits the header color.
@@ -536,7 +546,6 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     // Column indices (fixed for the whole table) for the columns that get
     // their own visibility treatment below, computed once rather than
     // string-compared per cell.
-    let name_col = if show_ns { 1 } else { 0 };
     let age_idx = headers.iter().position(|h| h == "AGE");
     let ready_idx = headers.iter().position(|h| h == "READY");
     let restarts_idx = headers.iter().position(|h| h == "RESTARTS");
@@ -650,6 +659,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             let render_cells: Vec<Cell> = cells
                 .into_iter()
                 .enumerate()
+                .filter(|(i, _)| col_visible(*i))
                 .map(|(i, c)| {
                     let align = align_of(i);
                     if marked_row {
@@ -706,6 +716,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let widths: Vec<Constraint> = headers
         .iter()
         .enumerate()
+        .filter(|(i, _)| col_visible(*i))
         .map(|(i, h)| {
             // A custom column's configured width wins over the curated rules.
             if let Some(w) = i
@@ -752,6 +763,10 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(format!(" {kind_label} "), theme::title()),
         Span::styled(format!("[{count}]"), Style::default().fg(theme::counter())),
     ];
+    // Horizontal scroll indicator: how many columns are hidden off the left.
+    if col_offset > 0 {
+        title.push(Span::styled(format!(" ‹{col_offset}"), theme::dim()));
+    }
     if !app.marked.is_empty() {
         title.push(Span::styled(
             format!(" ✓{}", app.marked.len()),
@@ -789,7 +804,9 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     // Record the geometry for mouse hit-testing (click-to-select, header-click
     // sort). Mirrors the Table widget's own column layout: the area inside the
     // borders, the always-reserved 2-cell highlight symbol, then a horizontal
-    // layout with the same widths, spacing, and default Start flex.
+    // layout with the same widths, spacing, and default Start flex. Each range
+    // carries the display-header index it shows, since columns can be
+    // scrolled out of view.
     {
         use ratatui::layout::{Flex, Margin};
         let inner = area.inner(Margin::new(1, 1));
@@ -810,7 +827,11 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
             inner.height.saturating_sub(1),
             inner.x,
             inner.x.saturating_add(inner.width),
-            rects.iter().map(|r| (r.x, r.x + r.width)).collect(),
+            rects
+                .iter()
+                .zip((0..headers.len()).filter(|&i| col_visible(i)))
+                .map(|(r, i)| (r.x, r.x + r.width, i))
+                .collect(),
         );
     }
 
@@ -1757,6 +1778,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         ),
         bind("shift-j", "jump to owner (controller)"),
         bind("o", "show node hosting the pod"),
+        bind("←/→", "scroll columns (NAMESPACE/NAME stay anchored)"),
         bind("esc", "go back / pop view / clear filter"),
         bind("j/k g/G", "move · top/bottom"),
         bind("S · I", "sort by column (fuzzy picker) · invert direction"),

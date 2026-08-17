@@ -621,7 +621,12 @@ async fn mouse_click_selects_row_header_click_sorts_wheel_moves() {
         .iter()
         .position(|h| h == "RESTARTS")
         .unwrap();
-    let (sx, _) = hit.cols[ridx];
+    let (sx, _, _) = hit
+        .cols
+        .iter()
+        .copied()
+        .find(|(_, _, i)| *i == ridx)
+        .unwrap();
     app.handle_mouse(click(sx, hit.header_y)).unwrap();
     assert_eq!(app.sort_column, Some(ridx));
     assert!(!app.sort_desc);
@@ -642,6 +647,52 @@ async fn mouse_click_selects_row_header_click_sorts_wheel_moves() {
     // A click outside the table (e.g. the header panel) is ignored.
     app.handle_mouse(click(0, 0)).unwrap();
     assert_eq!(app.table_state.selected(), Some(1));
+}
+
+#[tokio::test]
+async fn horizontal_column_scroll_anchors_name_and_clamps() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "a", "namespace": "default"},
+            "status": {"phase": "Running"}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    let headers = app.display_headers();
+    assert_eq!(headers[0], "NAME");
+    let scrollable = headers.len() - 1;
+
+    // ← at the left edge is a no-op; → hides the column after NAME.
+    app.handle_key(press(KeyCode::Left)).unwrap();
+    assert_eq!(app.col_offset, 0);
+    app.handle_key(press(KeyCode::Right)).unwrap();
+    assert_eq!(app.col_offset, 1);
+
+    // → clamps so the last scrollable column stays visible.
+    for _ in 0..headers.len() {
+        app.handle_key(press(KeyCode::Right)).unwrap();
+    }
+    assert_eq!(app.col_offset, scrollable - 1);
+
+    // The rendered geometry skips the hidden columns: NAME (0) stays
+    // anchored, then only the last scrollable column follows.
+    let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let hit = app.table_hit.borrow().clone().expect("geometry recorded");
+    let cols: Vec<usize> = hit.cols.iter().map(|&(_, _, i)| i).collect();
+    assert_eq!(cols, vec![0, headers.len() - 1]);
+
+    // Rebuilding the view spec (view switch, wide toggle) resets the scroll.
+    app.refresh_view_spec();
+    assert_eq!(app.col_offset, 0);
 }
 
 #[tokio::test]

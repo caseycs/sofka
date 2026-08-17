@@ -53,6 +53,7 @@ plugin, bookmark, and workspace chords.
 | `C` / `U` / `D`                               | nodes: cordon / uncordon / drain                                                                                                      |
 | `ctrl-d` / `ctrl-k`                           | delete / force-delete (marked rows, or current); in confirm: `f` toggles force, `c` cycles cascade (background → foreground → orphan) |
 | `w`                                           | toggle wide-only columns (kubectl `-o wide`)                                                                                          |
+| `←` / `→`                                     | scroll columns horizontally (NAMESPACE/NAME stay anchored) — for narrow panes                                                         |
 | `:q`, `ctrl-c`                                | quit                                                                                                                                  |
 | `?`                                           | help                                                                                                                                  |
 | _(config)_                                    | plugin / bookmark / workspace key chords — `ctrl-`/`alt-`/`shift-`/`fN`; listed in `?` help                                           |
