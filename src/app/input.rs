@@ -114,6 +114,11 @@ impl App {
             }
             KeyCode::PageDown => self.move_selection(10),
             KeyCode::PageUp => self.move_selection(-10),
+            // Horizontal column scroll for narrow panes: the NAMESPACE/NAME
+            // prefix stays anchored, → hides the next column after it, ←
+            // brings one back.
+            KeyCode::Right => self.scroll_columns(1),
+            KeyCode::Left => self.scroll_columns(-1),
             // k9s: SPACE marks/unmarks the current row for bulk actions, then
             // advances so a range can be marked with repeated taps.
             KeyCode::Char(' ') => {
