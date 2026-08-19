@@ -21,6 +21,8 @@ get distracted. She is, in effect, a cluster watchman that is a cat.
 TUI and a good cat both watch things closely, and both know when something is
 wrong.
 
+<br clear="right">
+
 ## What it does
 
 sofka is a reimagining of [k9s](https://github.com/derailed/k9s) with one generic

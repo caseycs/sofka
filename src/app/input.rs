@@ -748,18 +748,17 @@ impl App {
             self.cluster.resolve(q).map(|k| k.title().to_lowercase())
         };
 
-        // Resource catalog (RBAC-filtered; the allow-list carries bare
-        // plurals, so group-qualified entries are checked by their plural).
-        // A qualified entry (`snapshots.kopiur…`) is listed only when it adds
-        // something: it's dropped while the bare plural also matches the query
-        // and resolves to the same kind, and kept when the plural is shadowed
-        // (`pods.metrics.k8s.io`) or only the group part matches (`kopiur`).
+        // Resource catalog. The empty browse list is RBAC-filtered, but an
+        // explicit query searches every discovered kind. Authorizers can return
+        // an incomplete SelfSubjectRulesReview without marking it incomplete,
+        // so using that result for search can hide resources the user can open.
+        // Qualified entries are checked by their bare plural when browsing.
         for c in &self.cluster.catalog {
             let (plural, group) = match c.split_once('.') {
                 Some((p, g)) => (p, Some(g)),
                 None => (c.as_str(), None),
             };
-            if !self.rbac_visible(plural) {
+            if q.is_empty() && !self.rbac_visible(plural) {
                 continue;
             }
             if let Some(group) = group {

@@ -112,6 +112,51 @@ async fn exact_alias_outranks_fuzzy_suggestions() {
     assert_eq!(app.cmd_suggestions[0].label, "pods");
 }
 
+#[tokio::test]
+async fn explicit_palette_search_bypasses_rbac_filter() {
+    let (mut app, _rx) = test_app();
+    app.cluster
+        .catalog
+        .extend(["nbgroups.netbird.io", "networkresources.netbird.io"].map(str::to_string));
+    app.cluster.catalog.sort();
+    app.cluster.catalog.dedup();
+    app.rbac_allowed = Some(HashSet::from(["nbgroups".to_string()]));
+
+    // Explicit group and shorthand queries search discovery even when a rules
+    // review omits a resource that the authorizer still lets the user open.
+    for query in ["netbird", "nb"] {
+        app.command = query.into();
+        app.update_suggestions();
+        let labels: Vec<_> = app
+            .cmd_suggestions
+            .iter()
+            .map(|s| s.label.as_str())
+            .collect();
+        assert!(
+            labels.contains(&"nbgroups.netbird.io"),
+            "{query}: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"networkresources.netbird.io"),
+            "{query}: {labels:?}"
+        );
+    }
+
+    // The empty browse list remains RBAC-filtered.
+    app.command.clear();
+    app.update_suggestions();
+    let labels: Vec<_> = app
+        .cmd_suggestions
+        .iter()
+        .map(|s| s.label.as_str())
+        .collect();
+    assert!(labels.contains(&"nbgroups.netbird.io"), "{labels:?}");
+    assert!(
+        !labels.contains(&"networkresources.netbird.io"),
+        "{labels:?}"
+    );
+}
+
 #[test]
 fn list_step_clamps_both_ends() {
     let mut s = ListState::default();
