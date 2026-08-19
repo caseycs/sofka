@@ -5,6 +5,9 @@ Go), not a line-by-line port. Same purpose - a fast, keyboard-driven cluster
 navigator - different architecture: one generic object pipeline instead of one
 renderer per resource kind.
 
+For measured start time, memory use, command start time, and binary size, see the
+[performance benchmark](benchmark-k9s.md).
+
 ## Design differences
 
 - **One generic render pipeline, not one file per kind.** k9s has a Go file (a

@@ -148,19 +148,20 @@ be read-only in a light skin while everything else stays as is. See the
 
 ## Docs
 
-| Doc                                    | What's in it                                                |
-| -------------------------------------- | ----------------------------------------------------------- |
-| [Features](docs/features.md)           | the complete feature list                                   |
-| [vs k9s](docs/vs-k9s.md)               | design differences and why it's faster                      |
-| [Keys](docs/keys.md)                   | full keymap, per-view keys                                  |
-| [Configuration](docs/configuration.md) | every config section, per-cluster/per-context overrides     |
-| [Views and thresholds](docs/views.md)  | custom columns, CRD printer columns, coloring bands         |
-| [Plugins](docs/plugins.md)             | plugins, bookmarks, workspaces, saved forwards              |
-| [Safety](docs/safety.md)               | read-only mode, guardrails, `:can-i`, action journal        |
-| [Providers](docs/providers.md)         | right-sizing, VictoriaLogs, fleet dashboard                 |
-| [Debugging](docs/debugging.md)         | explain, timeline, diff, notifications, debug pods, bundles |
-| [Architecture](docs/architecture.md)   | module layout, data flow, dev loop, release process         |
-| [Roadmap](docs/roadmap.md)             | milestone status                                            |
+| Doc                                            | What's in it                                                |
+| ---------------------------------------------- | ----------------------------------------------------------- |
+| [Features](docs/features.md)                   | the complete feature list                                   |
+| [vs k9s](docs/vs-k9s.md)                       | design differences and why it's faster                      |
+| [Performance benchmark](docs/benchmark-k9s.md) | measured TUI latency, memory use, and binary size           |
+| [Keys](docs/keys.md)                           | full keymap, per-view keys                                  |
+| [Configuration](docs/configuration.md)         | every config section, per-cluster/per-context overrides     |
+| [Views and thresholds](docs/views.md)          | custom columns, CRD printer columns, coloring bands         |
+| [Plugins](docs/plugins.md)                     | plugins, bookmarks, workspaces, saved forwards              |
+| [Safety](docs/safety.md)                       | read-only mode, guardrails, `:can-i`, action journal        |
+| [Providers](docs/providers.md)                 | right-sizing, VictoriaLogs, fleet dashboard                 |
+| [Debugging](docs/debugging.md)                 | explain, timeline, diff, notifications, debug pods, bundles |
+| [Architecture](docs/architecture.md)           | module layout, data flow, dev loop, release process         |
+| [Roadmap](docs/roadmap.md)                     | milestone status                                            |
 
 ## License
 
