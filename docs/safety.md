@@ -61,7 +61,9 @@ fighting the controller.
 namespace. `:can-i <verb> <resource> [ns]` checks a single action before you try
 it. Same answer as `kubectl auth can-i`, inside the TUI.
 
-The command palette is RBAC-aware too: kinds you can't `list` are hidden.
+The empty command-palette browse list hides kinds you cannot `list`. An explicit
+search includes every discovered kind because delegated authorizers can return
+incomplete rule reviews. The API still enforces access when you open the kind.
 
 ## Action journal
 

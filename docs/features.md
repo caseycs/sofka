@@ -38,7 +38,9 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   rank by fuzzy score, `⏎` jumps to the object. When a kind can't be listed
   (RBAC), the result says it's incomplete instead of pretending otherwise.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
-- **RBAC-aware palette** - kinds you can't `list` are hidden.
+- **RBAC-aware palette browse** - the empty `:` list hides kinds you cannot
+  `list`. An explicit search checks the full discovery catalog, because some
+  delegated authorizers return incomplete rule reviews.
 - **Namespace switcher** (`n`) with pinned favourites (★) and per-context
   session recents (·) above the rest, plus a context switcher (`:ctx`).
 - **Mouse support** - the wheel scrolls every view (one notch is three steps of
