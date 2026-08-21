@@ -1092,6 +1092,10 @@ pub struct App {
     pub metrics: HashMap<String, (i64, i64)>,
     /// Latest pod-container metrics: "ns/pod/container" -> (cpu_m, mem_bytes).
     pub container_metrics: HashMap<String, (i64, i64)>,
+    /// Latest pod count per node (nodes view PODS column). `None` until the
+    /// first successful pods list, so "no data yet" renders as "-" instead of
+    /// a misleading 0.
+    pub node_pods: Option<HashMap<String, usize>>,
 
     pub pulse: Pulse,
     pub xray_items: Vec<XrayItem>,
@@ -1294,6 +1298,7 @@ impl App {
             image_target: None,
             metrics: HashMap::new(),
             container_metrics: HashMap::new(),
+            node_pods: None,
             pulse: Pulse::default(),
             xray_items: Vec::new(),
             xray_state: ListState::default(),

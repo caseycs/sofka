@@ -34,6 +34,12 @@ pub enum Msg {
         /// Per-container usage keyed by `namespace/pod/container`.
         containers: HashMap<String, (i64, i64)>,
     },
+    /// Pod count per node from the pods poll on the nodes view, keyed by node
+    /// name. Counts non-terminated pods, mirroring `kubectl describe node`.
+    NodePods {
+        generation: u64,
+        counts: HashMap<String, usize>,
+    },
     /// CRD `additionalPrinterColumns` fallback for a custom-resource plural,
     /// fetched off-thread (`None` = CRD had nothing usable for the version).
     PrinterColumns {

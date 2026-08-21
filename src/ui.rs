@@ -605,6 +605,9 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     cells.push(TableCellText::Borrowed(cell));
                 }
             }
+            if app.node_capacity_columns() {
+                cells.push(TableCellText::Owned(app.node_pods_cell(obj)));
+            }
             let mut metrics_raw = None;
             let mut node_pcts: (Option<i64>, Option<i64>) = (None, None);
             if metrics_cols {
@@ -735,6 +738,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                 "AGE" => Constraint::Length(7),
                 "CPU" | "MEM" => Constraint::Length(8),
                 "%CPU" | "%MEM" => Constraint::Length(5),
+                "PODS" => Constraint::Length(5),
                 // Wide enough for the long pod reasons (ContainerCreating,
                 // CrashLoopBackOff, ImagePullBackOff…) so status is never clipped.
                 "STATUS" => Constraint::Length(19),

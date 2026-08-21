@@ -271,6 +271,7 @@ impl App {
         self.watch_key = Some(key);
         self.metrics.clear();
         self.container_metrics.clear();
+        self.node_pods = None;
         self.marked.clear();
         self.clear_rows_cache();
         if self.table_state.selected().is_none() {
@@ -291,6 +292,9 @@ impl App {
 
         if matches!(self.kind_plural.as_str(), "pods" | "nodes") {
             self.spawn_metrics_poll();
+        }
+        if self.kind_plural == "nodes" {
+            self.spawn_node_pods_poll();
         }
 
         // Refresh RBAC allow-list when the namespace changes.
@@ -534,6 +538,56 @@ impl App {
         self.tasks.push(handle);
     }
 
+    /// Poll the pods API for the nodes view: pod count per node (the PODS
+    /// column). Counts non-terminated pods — Succeeded/Failed pods hold no
+    /// node resources — mirroring `kubectl describe node`. List failures
+    /// (e.g. no cluster-wide pod list permission) leave the column at "-".
+    pub(super) fn spawn_node_pods_poll(&mut self) {
+        let Some(pkind) = self.cluster.resolve("pods") else {
+            return;
+        };
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        let flag = self.gen_flag.clone();
+        let ar = pkind.ar.clone();
+
+        let handle = tokio::spawn(async move {
+            let params =
+                ListParams::default().fields("status.phase!=Succeeded,status.phase!=Failed");
+            loop {
+                if flag.load(Ordering::SeqCst) != genr {
+                    break;
+                }
+                let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
+                if let Ok(list) = api.list(&params).await {
+                    let mut counts: HashMap<String, usize> = HashMap::new();
+                    for item in list {
+                        if let Some(node) = item
+                            .data
+                            .pointer("/spec/nodeName")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            *counts.entry(node.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                    if tx
+                        .send(Msg::NodePods {
+                            generation: genr,
+                            counts,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+        self.tasks.push(handle);
+    }
+
     pub(super) fn bump_generation(&mut self) {
         self.stop_event_stream();
         self.generation += 1;
@@ -638,6 +692,16 @@ impl App {
                 self.metrics = data;
                 self.container_metrics = containers;
                 if sort_uses_metrics {
+                    self.invalidate_rows();
+                }
+            }
+            Msg::NodePods { generation, counts } if generation == self.generation => {
+                let sort_uses_pods = self
+                    .sort_column
+                    .and_then(|i| self.display_headers().get(i).cloned())
+                    .is_some_and(|h| h == "PODS");
+                self.node_pods = Some(counts);
+                if sort_uses_pods {
                     self.invalidate_rows();
                 }
             }
