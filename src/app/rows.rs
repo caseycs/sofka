@@ -43,15 +43,29 @@ impl App {
         }
         let parsed = self.parsed_filter();
         match &*parsed {
-            ParsedFilter::Fuzzy(pat) => {
-                pat.is_empty() || self.matcher.fuzzy_match(&self.fuzzy_hay(o), pat).is_some()
-            }
+            ParsedFilter::Fuzzy(pat) => pat.is_empty() || self.fuzzy_match_row(o, pat),
             ParsedFilter::Structured(s) => s.terms.iter().all(|t| match t {
-                Term::Fuzzy(pat) => self.matcher.fuzzy_match(&self.fuzzy_hay(o), pat).is_some(),
-                Term::NotFuzzy(pat) => self.matcher.fuzzy_match(&self.fuzzy_hay(o), pat).is_none(),
+                Term::Fuzzy(pat) => self.fuzzy_match_row(o, pat),
+                Term::NotFuzzy(pat) => !self.fuzzy_match_row(o, pat),
                 Term::Cmp(cmp) => self.eval_cmp(o, cmp),
             }),
         }
+    }
+
+    /// Does one fuzzy pattern match this row? "namespace name" first (the
+    /// original haystack — cheap, and by far the most common hit), then each
+    /// rendered column cell individually, so `/10.96` finds a Service by its
+    /// CLUSTER-IP. Cells are matched one at a time rather than joined so a
+    /// pattern can't match across cell boundaries; the full row is only
+    /// rendered when the name haystack missed.
+    fn fuzzy_match_row(&self, o: &DynamicObject, pat: &str) -> bool {
+        if self.matcher.fuzzy_match(&self.fuzzy_hay(o), pat).is_some() {
+            return true;
+        }
+        let (cells, _) = self.spec.cells(o);
+        cells
+            .iter()
+            .any(|c| self.matcher.fuzzy_match(c, pat).is_some())
     }
 
     /// What fuzzy terms match against: "namespace name". Helm rows are backed
