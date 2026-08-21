@@ -618,6 +618,55 @@ async fn saved_forwards_show_as_stopped_until_running() {
     assert_eq!(app.pf_state.selected(), Some(0), "clamped to combined list");
 }
 
+#[tokio::test]
+async fn port_forward_prompt_prefills_first_exposed_port() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"ports": [{"port": 8080}, {"port": 9090}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.request_port_forward();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert_eq!(
+        app.prompt_input, "8080:8080",
+        "first service port, LOCAL:REMOTE"
+    );
+
+    // Pods take the first declared container port.
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "db", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"containers": [{"name": "pg", "ports": [{"containerPort": 5432}]}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.request_port_forward();
+    assert_eq!(app.prompt_input, "5432:5432");
+
+    // No declared ports: the prompt stays empty as before.
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "aux", "namespace": "default", "resourceVersion": "1"},
+            "spec": {"containers": [{"name": "c"}]}
+        }),
+    );
+    app.table_state.select(Some(0));
+    app.request_port_forward();
+    assert_eq!(app.prompt_input, "");
+}
+
 #[test]
 fn forward_context_matching_and_validation() {
     let f = crate::config::Forward {
