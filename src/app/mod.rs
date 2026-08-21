@@ -958,11 +958,11 @@ pub struct App {
 
     pub ctx_list: Vec<String>,
     pub ctx_state: ListState,
-    /// Filter buffer for the context switcher (typed after `/`, like the
-    /// table filter — plain letters are action keys, e.g. `r` rename).
+    /// Type-to-filter buffer for the context switcher. Plain action keys remain
+    /// available until filtering starts.
     pub ctx_filter: String,
-    /// Whether the context switcher is in filter-typing mode (`/` pressed;
-    /// esc/enter leave it).
+    /// Whether the context switcher is accepting filter input (started by
+    /// typing or explicitly with `/` for names that begin with an action key).
     pub ctx_filtering: bool,
     pub sort_picker_state: ListState,
     /// Type-to-filter buffer for the sort-column picker.
