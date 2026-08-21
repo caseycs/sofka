@@ -582,7 +582,7 @@ impl App {
             PaletteAction::Rightsize => self.open_rightsize(),
             PaletteAction::Find => self.flash_warn("usage: :find <text>"),
             PaletteAction::Diff => self.open_diff(),
-            PaletteAction::Events => self.open_events(),
+            PaletteAction::Events => self.switch_kind("events.events.k8s.io"),
             PaletteAction::PortForwards => self.open_port_forwards(),
             PaletteAction::ProviderLogs => self.open_provider_logs(),
             PaletteAction::Skin => self.open_skins(),

@@ -1775,7 +1775,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             ":xray · :diff",
             "hierarchical tree · live-vs-last-applied diff",
         ),
-        bind(":events · E", "events for the selected object"),
+        bind(
+            ":events · E",
+            "browse all events · events for the selected object",
+        ),
         bind(":pf", "view/stop background port-forwards"),
         bind(":skin", "switch color skin live"),
         bind(

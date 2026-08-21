@@ -1913,12 +1913,41 @@ async fn shadowed_builtin_stays_reachable_via_alias() {
 }
 
 #[tokio::test]
-async fn events_palette_command_dispatches() {
+async fn events_palette_opens_resource_and_e_stays_contextual() {
     let (mut app, _rx) = test_app();
-    assert!(app.run_palette_command("events"));
+    app.switch_kind("pods");
+
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "events".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+
     assert_eq!(app.mode, Mode::Table);
-    assert!(app.flash_err);
-    assert!(app.flash.contains("events"), "{}", app.flash);
+    let kind = app.kind.as_ref().expect("events resource selected");
+    assert_eq!(kind.ar.group, "events.k8s.io");
+    assert_eq!(kind.title(), "events.events.k8s.io");
+    assert!(!app.flash_err);
+
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "web",
+                "namespace": "default",
+                "uid": "pod-uid"
+            }
+        }),
+    );
+    app.handle_key(press(KeyCode::Char('E'))).unwrap();
+
+    assert_eq!(app.mode, Mode::Events);
+    assert_eq!(app.kind_plural, "pods");
+    assert_eq!(app.detail.title, "web — events");
+    app.stop_event_stream();
 }
 
 #[test]

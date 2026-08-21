@@ -35,8 +35,8 @@ impl Kind {
     /// Whether this kind comes from a custom API group (a CRD or third-party
     /// aggregated API) rather than one Kubernetes ships with. Custom kinds own
     /// their name in the command palette even when a built-in command shares
-    /// it (`:snapshots` with a snapshots.* CRD installed); vanilla kinds don't
-    /// get that priority, so `:events` keeps opening the built-in view.
+    /// it (`:snapshots` with a snapshots.* CRD installed); built-in Kubernetes
+    /// API groups don't get that priority.
     pub fn is_custom(&self) -> bool {
         let group = self.ar.group.as_str();
         !group.is_empty()
@@ -495,6 +495,7 @@ impl Cluster {
             "namespaces".to_string(),
             mk("", "Namespace", "namespaces", false),
         );
+        registry.insert("events".to_string(), mk("", "Event", "events", true));
         registry.insert("jobs".to_string(), mk("batch", "Job", "jobs", true));
         registry.insert(
             "cronjobs".to_string(),
@@ -554,6 +555,7 @@ impl Cluster {
         let mut catalog: Vec<String> = [
             "certificates",
             "deployments",
+            "events",
             "helmreleases",
             "horizontalpodautoscalers",
             "kustomizations",
@@ -575,6 +577,10 @@ impl Cluster {
             registry.insert(qualified.clone(), kind);
             catalog.push(qualified);
         }
+        registry.insert(
+            "events.events.k8s.io".to_string(),
+            mk("events.k8s.io", "Event", "events", true),
+        );
         catalog.sort();
         Self {
             client,
