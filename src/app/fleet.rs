@@ -10,12 +10,67 @@ const FLEET_CONCURRENCY: usize = 4;
 const FLEET_TIMEOUT_SECS: u64 = 8;
 
 impl App {
+    /// The fleet contexts in effect: the `[fleet] contexts` config list plus
+    /// contexts marked with `space` in the context switcher, minus config
+    /// entries unmarked the same way. Marks persist across restarts (see
+    /// [`crate::fleet::FleetMarks`]); the config file is never rewritten.
+    pub fn fleet_contexts(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .fleet_cfg
+            .contexts
+            .iter()
+            .filter(|c| !self.fleet_marks.removed.contains(c))
+            .cloned()
+            .collect();
+        for c in &self.fleet_marks.added {
+            if !out.contains(c) {
+                out.push(c.clone());
+            }
+        }
+        out
+    }
+
+    /// Whether `ctx` is currently part of the fleet (config + marks).
+    pub fn is_fleet_context(&self, ctx: &str) -> bool {
+        self.fleet_contexts().iter().any(|c| c == ctx)
+    }
+
+    /// Toggle a context in/out of the fleet (`space` in the context
+    /// switcher), saving the marks so the fleet survives restarts.
+    pub(super) fn toggle_fleet_context(&mut self, ctx: &str) {
+        if self.is_fleet_context(ctx) {
+            self.fleet_marks.added.retain(|c| c != ctx);
+            // A config-listed context can't be dropped from the config Vec
+            // (it comes back on every re-resolve), so it's masked instead.
+            if self.fleet_cfg.contexts.iter().any(|c| c == ctx)
+                && !self.fleet_marks.removed.iter().any(|c| c == ctx)
+            {
+                self.fleet_marks.removed.push(ctx.to_string());
+            }
+            self.flash = format!("fleet − {ctx}");
+        } else {
+            self.fleet_marks.removed.retain(|c| c != ctx);
+            self.fleet_marks.added.push(ctx.to_string());
+            self.flash = format!("fleet + {ctx}");
+        }
+        self.flash_err = false;
+        if let Some(path) = self.fleet_marks_path.clone()
+            && let Err(e) = self.fleet_marks.save(&path)
+        {
+            self.flash_warn(&format!("fleet mark not saved: {e}"));
+        }
+    }
+
     /// `:fleet` — open the opt-in cross-context health dashboard. Only the
-    /// contexts in `[fleet].contexts` are queried; each is gathered off-thread
-    /// with its own timeout so one slow context never blocks the rest.
+    /// contexts in `[fleet].contexts` (plus session `space`-marks) are
+    /// queried; each is gathered off-thread with its own timeout so one slow
+    /// context never blocks the rest.
     pub(super) fn open_fleet(&mut self) {
-        if self.fleet_cfg.contexts.is_empty() {
-            self.flash_warn("no fleet contexts — set [fleet] contexts = [\"ctx-a\", …]");
+        let contexts = self.fleet_contexts();
+        if contexts.is_empty() {
+            self.flash_warn(
+                "no fleet contexts — set [fleet] contexts = [\"ctx-a\", …] or mark them with space in :ctx",
+            );
             return;
         }
         // Leaving the table view: stop its watches (like the pulse dashboard),
@@ -27,9 +82,7 @@ impl App {
 
         // Seed a "connecting" row per context, resolving each one's read-only
         // policy up front (the CLI flag wins; else the per-context config).
-        self.fleet_rows = self
-            .fleet_cfg
-            .contexts
+        self.fleet_rows = contexts
             .iter()
             .map(|ctx| {
                 let cluster = crate::k8s::cluster_name_for_context(ctx);

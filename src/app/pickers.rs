@@ -447,6 +447,17 @@ impl App {
             }
             KeyCode::Char('/') => self.ctx_filtering = true,
             KeyCode::Char('r') | KeyCode::Char('R') => self.open_rename_context(),
+            // Space toggles the highlighted context in/out of the `:fleet`
+            // dashboard for this session (the bulk-mark idiom).
+            KeyCode::Char(' ') => {
+                if let Some(name) = self
+                    .ctx_state
+                    .selected()
+                    .and_then(|i| self.filtered_contexts().get(i).cloned())
+                {
+                    self.toggle_fleet_context(&name);
+                }
+            }
             KeyCode::Down | KeyCode::Char('j') => list_step(&mut self.ctx_state, len, true),
             KeyCode::Up | KeyCode::Char('k') => list_step(&mut self.ctx_state, len, false),
             KeyCode::Enter => {

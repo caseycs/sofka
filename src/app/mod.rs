@@ -996,6 +996,12 @@ pub struct App {
     /// context's summary lands.
     pub fleet_rows: Vec<crate::fleet::FleetRow>,
     pub fleet_state: ListState,
+    /// Fleet membership marks (`space` in the context switcher), overlaying
+    /// `[fleet] contexts`. Persisted to `fleet_marks_path` on every toggle.
+    pub fleet_marks: crate::fleet::FleetMarks,
+    /// Where fleet marks persist (`<state-dir>/fleet.toml`, set at startup);
+    /// `None` (tests) keeps them in memory only.
+    pub fleet_marks_path: Option<std::path::PathBuf>,
     /// Global fuzzy-find (`:find`) results and picker cursor.
     pub find_items: Vec<crate::store::FindItem>,
     pub find_state: ListState,
@@ -1245,6 +1251,8 @@ impl App {
             fleet_cfg: crate::config::FleetConfig::default(),
             fleet_rows: Vec::new(),
             fleet_state: ListState::default(),
+            fleet_marks: crate::fleet::FleetMarks::default(),
+            fleet_marks_path: None,
             find_items: Vec::new(),
             find_state: ListState::default(),
             find_query: String::new(),

@@ -169,6 +169,11 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAP);
     let panic_tx = tx.clone();
     let mut app = App::new(cluster, tx);
+    // Fleet marks (`space` in `:ctx`) persist under the state dir, overlaying
+    // the `[fleet] contexts` config list across restarts.
+    let fleet_marks_path = fleet::FleetMarks::default_path();
+    app.fleet_marks = fleet::FleetMarks::load(&fleet_marks_path);
+    app.fleet_marks_path = Some(fleet_marks_path);
     // Kubeconfig contexts are stable for the session; cache them once so the
     // palette can complete `:ctx <name>` without re-reading the file per keystroke.
     match Cluster::list_contexts() {
