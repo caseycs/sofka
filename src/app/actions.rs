@@ -1057,8 +1057,24 @@ impl App {
         }
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
+        // Pre-fill `p:p` from the first exposed port (service `spec.ports`,
+        // pod container ports) so the common case is Enter-only; still
+        // editable, and empty when the object declares no ports.
+        let port = match self.kind_plural.as_str() {
+            "services" => obj
+                .data
+                .pointer("/spec/ports/0/port")
+                .and_then(Value::as_i64),
+            _ => obj
+                .data
+                .pointer("/spec/containers")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find_map(|c| c.pointer("/ports/0/containerPort").and_then(Value::as_i64)),
+        };
         self.prompt_label = format!("Port-forward {name} (LOCAL:REMOTE, e.g. 8080:80):");
-        self.prompt_input.clear();
+        self.prompt_input = port.map(|p| format!("{p}:{p}")).unwrap_or_default();
         self.prompt_kind = Some(PromptKind::PortForward { ns, name });
         self.mode = Mode::Prompt;
     }
