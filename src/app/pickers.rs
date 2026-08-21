@@ -499,34 +499,32 @@ impl App {
         scored.into_iter().map(|(_, c)| c.clone()).collect()
     }
 
-    /// Unlike the other pickers, the switcher is not type-to-filter: `/`
-    /// starts the filter (like the table filter), which frees plain letters
-    /// for actions (`r` rename, `j`/`k` movement).
+    /// Contexts type-to-filter like the namespace picker. Existing action keys
+    /// remain available while browsing; `/` explicitly starts filter input
+    /// when a context name begins with one of those keys.
     pub(super) fn key_contexts(&mut self, key: KeyEvent) {
         let len = self.filtered_contexts().len();
         if self.ctx_filtering {
             if edit_chord(&key, &mut self.ctx_filter) {
-                self.ctx_state.select(Some(0));
+                self.select_best_context_match();
                 return;
             }
             match key.code {
-                // Esc cancels the filter, enter keeps it applied (the table
-                // filter's semantics); both return to browsing.
                 KeyCode::Esc => {
                     self.ctx_filter.clear();
                     self.ctx_filtering = false;
                     self.select_current_context();
                 }
-                KeyCode::Enter => self.ctx_filtering = false,
+                KeyCode::Enter => self.switch_selected_context(),
                 KeyCode::Down => list_step(&mut self.ctx_state, len, true),
                 KeyCode::Up => list_step(&mut self.ctx_state, len, false),
                 KeyCode::Backspace => {
                     self.ctx_filter.pop();
-                    self.ctx_state.select(Some(0));
+                    self.select_best_context_match();
                 }
                 KeyCode::Char(c) => {
                     self.ctx_filter.push(c);
-                    self.ctx_state.select(Some(0));
+                    self.select_best_context_match();
                 }
                 _ => {}
             }
@@ -534,8 +532,6 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => {
-                // First esc clears an applied filter, second closes the
-                // switcher.
                 if self.ctx_filter.is_empty() {
                     self.mode = Mode::Table;
                 } else {
@@ -558,17 +554,31 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => list_step(&mut self.ctx_state, len, true),
             KeyCode::Up | KeyCode::Char('k') => list_step(&mut self.ctx_state, len, false),
-            KeyCode::Enter => {
-                if let Some(name) = self
-                    .ctx_state
-                    .selected()
-                    .and_then(|i| self.filtered_contexts().get(i).cloned())
-                {
-                    self.mode = Mode::Table;
-                    self.switch_context(name);
-                }
+            KeyCode::Enter => self.switch_selected_context(),
+            KeyCode::Char(c) => {
+                self.ctx_filtering = true;
+                self.ctx_filter.push(c);
+                self.select_best_context_match();
             }
             _ => {}
+        }
+    }
+
+    fn select_best_context_match(&mut self) {
+        let selected = (!self.filtered_contexts().is_empty()).then_some(0);
+        self.ctx_state.select(selected);
+    }
+
+    fn switch_selected_context(&mut self) {
+        if let Some(name) = self
+            .ctx_state
+            .selected()
+            .and_then(|i| self.filtered_contexts().get(i).cloned())
+        {
+            self.mode = Mode::Table;
+            self.ctx_filter.clear();
+            self.ctx_filtering = false;
+            self.switch_context(name);
         }
     }
 

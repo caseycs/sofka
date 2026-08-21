@@ -3328,7 +3328,7 @@ async fn context_list_result_selects_current_context() {
 }
 
 #[tokio::test]
-async fn context_picker_filters_only_after_slash() {
+async fn context_picker_typing_filters_and_backspace_widens() {
     let (mut app, _rx) = test_app();
     app.mode = Mode::Contexts;
     app.handle_msg(Msg::Contexts {
@@ -3336,32 +3336,55 @@ async fn context_picker_filters_only_after_slash() {
         list: vec!["dev".into(), "prod".into(), "test".into()],
     });
 
-    // Plain letters are action keys, not filter input.
-    app.key_contexts(press(KeyCode::Char('p')));
-    assert!(app.ctx_filter.is_empty());
-    assert!(!app.ctx_filtering);
+    app.handle_key(press(KeyCode::Char('k'))).unwrap();
+    assert_eq!(app.ctx_state.selected(), Some(1));
+    app.handle_key(press(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.ctx_state.selected(), Some(2));
+    assert!(app.ctx_filter.is_empty(), "navigation keys still browse");
 
-    // `/` starts the filter; typing narrows the list live.
-    app.key_contexts(press(KeyCode::Char('/')));
+    app.handle_key(press(KeyCode::Char('p'))).unwrap();
     assert!(app.ctx_filtering);
-    app.key_contexts(press(KeyCode::Char('p')));
     assert_eq!(app.ctx_filter, "p");
     assert_eq!(app.filtered_contexts(), vec!["prod".to_string()]);
+    assert_eq!(app.ctx_state.selected(), Some(0));
 
-    // Enter keeps the filter applied and returns to browsing.
-    app.key_contexts(press(KeyCode::Enter));
-    assert!(!app.ctx_filtering);
-    assert_eq!(app.ctx_filter, "p");
-    assert_eq!(app.mode, Mode::Contexts);
-
-    // First esc clears the applied filter (cursor back on the current
-    // context), second closes the switcher.
-    app.key_contexts(press(KeyCode::Esc));
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
     assert!(app.ctx_filter.is_empty());
-    assert_eq!(app.mode, Mode::Contexts);
-    assert_eq!(app.ctx_state.selected(), Some(2), "cursor on 'test'");
-    app.key_contexts(press(KeyCode::Esc));
+    assert_eq!(
+        app.filtered_contexts(),
+        vec!["dev".to_string(), "prod".to_string(), "test".to_string()]
+    );
+    assert_eq!(app.ctx_state.selected(), Some(0));
+
+    app.handle_key(press(KeyCode::Char('z'))).unwrap();
+    assert!(app.filtered_contexts().is_empty());
+    assert_eq!(app.ctx_state.selected(), None);
+    app.handle_key(press(KeyCode::Backspace)).unwrap();
+    assert_eq!(app.ctx_state.selected(), Some(0));
+}
+
+#[tokio::test]
+async fn context_picker_enter_switches_to_filtered_selection() {
+    let (mut app, _rx) = test_app();
+    app.mode = Mode::Contexts;
+    app.handle_msg(Msg::Contexts {
+        generation: app.generation,
+        list: vec!["prod-east".into(), "prod-west".into(), "test".into()],
+    });
+
+    app.handle_key(press(KeyCode::Char('p'))).unwrap();
+    assert_eq!(
+        app.filtered_contexts(),
+        vec!["prod-east".to_string(), "prod-west".to_string()]
+    );
+    app.handle_key(press(KeyCode::Down)).unwrap();
+    assert_eq!(app.ctx_state.selected(), Some(1));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+
     assert_eq!(app.mode, Mode::Table);
+    assert!(app.ctx_filter.is_empty());
+    assert!(!app.ctx_filtering);
+    assert_eq!(app.flash, "switching to prod-west…");
 }
 
 #[tokio::test]
@@ -3372,9 +3395,8 @@ async fn context_picker_esc_while_typing_cancels_filter() {
         generation: app.generation,
         list: vec!["dev".into(), "test".into()],
     });
-    app.key_contexts(press(KeyCode::Char('/')));
-    app.key_contexts(press(KeyCode::Char('d')));
-    app.key_contexts(press(KeyCode::Esc));
+    app.handle_key(press(KeyCode::Char('d'))).unwrap();
+    app.handle_key(press(KeyCode::Esc)).unwrap();
     assert!(!app.ctx_filtering);
     assert!(app.ctx_filter.is_empty());
     assert_eq!(

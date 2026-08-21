@@ -2064,13 +2064,13 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     // While typing, show the filter buffer in the title so it reads like an
-    // input; an applied filter stays visible without the cursor.
+    // input.
     let title = if app.ctx_filtering {
         format!(" Contexts · /{}_ ", app.ctx_filter)
     } else if !app.ctx_filter.is_empty() {
         format!(" Contexts · /{} ", app.ctx_filter)
     } else {
-        " Contexts (/ filter · r rename · space fleet · ⏎ switch) ".to_string()
+        " Contexts (type to filter · r rename · space fleet · ⏎ switch) ".to_string()
     };
     render_popup_list(
         frame,
