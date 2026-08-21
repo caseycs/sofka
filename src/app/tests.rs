@@ -393,6 +393,38 @@ async fn palette_command_dispatch() {
 }
 
 #[tokio::test]
+async fn palette_opens_from_document_views() {
+    // Issue #148: `:` in a describe/YAML view did nothing — the palette was
+    // only bound in the table.
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.set_return_mode();
+    app.mode = Mode::Detail;
+
+    // `:` opens the palette; esc returns to the detail view, not the table.
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    assert_eq!(app.mode, Mode::Command);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+
+    // Dispatching a kind switch leaves the detail view for the new table.
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    for c in "deployments".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.kind_plural, "deployments");
+
+    // Logs view binds `:` too, and esc from the palette lands back on it.
+    app.mode = Mode::Logs;
+    app.handle_key(press(KeyCode::Char(':'))).unwrap();
+    assert_eq!(app.mode, Mode::Command);
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Logs);
+}
+
+#[tokio::test]
 async fn skin_palette_command_opens_picker() {
     let (mut app, _rx) = test_app();
     assert!(app.run_palette_command("skin"));

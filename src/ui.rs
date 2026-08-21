@@ -152,6 +152,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::PortForwards => draw_port_forwards(frame, app, chunks[1]),
         Mode::Fleet => draw_fleet(frame, app, chunks[1]),
         Mode::Find => draw_find(frame, app, chunks[1]),
+        // While the palette is open, keep drawing the view it was opened
+        // from, so `:` from a document view doesn't flash the table.
+        Mode::Command => match app.palette_return {
+            Mode::Diff => draw_diff(frame, &app.detail, chunks[1]),
+            Mode::Events => draw_scrollable(frame, &app.detail, chunks[1], theme::peach()),
+            Mode::Detail => draw_scrollable(frame, &app.detail, chunks[1], theme::sky()),
+            Mode::Logs => draw_logs(frame, app, chunks[1]),
+            _ => draw_table(frame, app, chunks[1]),
+        },
         _ => draw_table(frame, app, chunks[1]),
     }
 
