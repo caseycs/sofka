@@ -42,23 +42,14 @@ impl App {
     }
 
     /// Whether the run loop should keep terminal mouse capture on right now.
-    /// Document-style views (YAML/describe, diff, events, logs, help) release
-    /// capture so click-drag uses the terminal's native text selection —
-    /// nothing in them uses clicks, and scrolling still works because with
-    /// reporting off terminals translate the wheel into arrow keys in the
-    /// alternate screen ("alternate scroll"), which these views all handle.
-    /// The filter-typing overlays keep the same document on screen, so they
-    /// release too.
+    /// Most document-style views release capture so click-drag uses the
+    /// terminal's native text selection. Logs keep it because rapid alternate
+    /// scroll emits cursor-key escape sequences that can be split under load;
+    /// captured wheel events stay atomic and are clamped by `key_logs`.
     pub fn wants_mouse_capture(&self) -> bool {
         !matches!(
             self.mode,
-            Mode::Detail
-                | Mode::Diff
-                | Mode::Events
-                | Mode::Logs
-                | Mode::Help
-                | Mode::DocFilter
-                | Mode::LogFilter
+            Mode::Detail | Mode::Diff | Mode::Events | Mode::Help | Mode::DocFilter
         )
     }
 
