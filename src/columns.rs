@@ -106,6 +106,7 @@ const NODE_COLUMNS: &[Column] = &[
     column("NAME", col_name),
     status_column("STATUS", col_node_status),
     column("ROLES", col_node_roles),
+    column("TAINTS", col_node_taints),
     column("VERSION", col_node_version),
     column("AGE", col_age),
 ];
@@ -686,6 +687,10 @@ fn col_node_status(ctx: &CellContext<'_>) -> String {
 
 fn col_node_roles(ctx: &CellContext<'_>) -> String {
     node_roles(ctx.obj)
+}
+
+fn col_node_taints(ctx: &CellContext<'_>) -> String {
+    count_arr(ctx.data, &["spec", "taints"]).to_string()
 }
 
 fn col_node_version(ctx: &CellContext<'_>) -> String {
@@ -1640,6 +1645,32 @@ mod tests {
         assert_eq!(cells[4], "10.0.0.5");
         assert_eq!(cells[5], "node-1");
         assert_eq!(status_idx, Some(2));
+    }
+
+    #[test]
+    fn node_cells_count_taints() {
+        let n = obj(json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "cp-1",
+                         "labels": {"node-role.kubernetes.io/control-plane": ""}},
+            "spec": {"taints": [
+                {"key": "node-role.kubernetes.io/control-plane", "effect": "NoSchedule"},
+                {"key": "dedicated", "value": "gpu", "effect": "NoExecute"}
+            ]},
+            "status": {"conditions": [{"type": "Ready", "status": "True"}],
+                       "nodeInfo": {"kubeletVersion": "v1.31.0"}}
+        }));
+        let (node_cells, status_idx) = cells(&n, "nodes");
+        assert_eq!(node_cells[0], "cp-1");
+        assert_eq!(node_cells[1], "Ready");
+        assert_eq!(node_cells[2], "control-plane");
+        assert_eq!(node_cells[3], "2");
+        assert_eq!(node_cells[4], "v1.31.0");
+        assert_eq!(status_idx, Some(1));
+
+        let bare = obj(json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "w-1"}}));
+        let (bare_cells, _) = cells(&bare, "nodes");
+        assert_eq!(bare_cells[3], "0");
     }
 
     #[test]
