@@ -2309,6 +2309,60 @@ async fn sort_picker_esc_clears_filter_then_closes() {
 }
 
 #[tokio::test]
+async fn copy_picker_lists_full_row_fields_and_filters_on_values() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Service",
+               "metadata": {"name": "web", "namespace": "default"},
+               "spec": {"type": "ClusterIP", "clusterIP": "10.96.13.5",
+                        "ports": [{"port": 80, "protocol": "TCP"}]}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Char('Y'))).unwrap();
+    assert_eq!(app.mode, Mode::CopyPicker);
+    let fields = app.copy_picker_fields.clone();
+    assert!(
+        fields.contains(&("NAME".into(), "web".into())),
+        "{fields:?}"
+    );
+    assert!(
+        fields.contains(&("CLUSTER-IP".into(), "10.96.13.5".into())),
+        "{fields:?}"
+    );
+    // AGE has no creationTimestamp here — empty cells carry nothing to copy.
+    assert!(fields.iter().all(|(_, v)| !v.is_empty()), "{fields:?}");
+
+    // Typing part of the *value* (not the header) finds the IP, and the
+    // cursor tracks the best match.
+    for c in "96.13".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    let entries = app.filtered_copy_entries();
+    assert_eq!(entries[0], ("CLUSTER-IP".into(), "10.96.13.5".into()));
+    assert_eq!(app.copy_picker_state.selected(), Some(0));
+
+    // First esc clears the filter and stays open; second esc closes.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::CopyPicker);
+    assert!(app.copy_picker_filter.is_empty());
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn copy_picker_without_a_selection_warns_and_stays_in_table() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    app.handle_key(press(KeyCode::Char('Y'))).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash_err);
+    assert!(app.flash.contains("no row selected"));
+}
+
+#[tokio::test]
 async fn metrics_update_invalidates_metric_sorted_rows() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
