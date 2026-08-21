@@ -103,6 +103,9 @@ pub enum Mode {
     Contexts,
     /// Fuzzy sort-column picker (`S`).
     SortPicker,
+    /// Fuzzy field picker over the selected row's cells (`Y`): pick a column
+    /// value to copy to the clipboard.
+    CopyPicker,
     Containers,
     SetImage,
     Confirm,
@@ -960,6 +963,12 @@ pub struct App {
     pub sort_picker_state: ListState,
     /// Type-to-filter buffer for the sort-column picker.
     pub sort_picker_filter: String,
+    pub copy_picker_state: ListState,
+    /// Type-to-filter buffer for the copy-field picker.
+    pub copy_picker_filter: String,
+    /// The selected row's `(header, value)` pairs, captured when the copy
+    /// picker opens so a watch update can't shift entries mid-pick.
+    pub copy_picker_fields: Vec<(String, String)>,
     /// All kubeconfig context names, cached once at startup for `:ctx <name>`
     /// palette completion (the switcher popup uses `ctx_list`).
     pub all_contexts: Vec<String>,
@@ -1239,6 +1248,9 @@ impl App {
             ctx_filtering: false,
             sort_picker_state: ListState::default(),
             sort_picker_filter: String::new(),
+            copy_picker_state: ListState::default(),
+            copy_picker_filter: String::new(),
+            copy_picker_fields: Vec::new(),
             all_contexts: Vec::new(),
             user_aliases: HashMap::new(),
             plugins: Vec::new(),

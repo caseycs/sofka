@@ -580,6 +580,51 @@ impl App {
         self.selected_ref().cloned()
     }
 
+    /// `(header, value)` pairs for the selected row, mirroring the table's
+    /// displayed columns (NAMESPACE prefix, view-spec cells with volatile
+    /// overrides, PODS/CPU/MEM suffixes) — but with the full cell values,
+    /// never the width-truncated text the renderer shows. Empty cells are
+    /// dropped: there is nothing to copy from them.
+    pub fn selected_row_fields(&self) -> Vec<(String, String)> {
+        let Some(obj) = self.selected_ref() else {
+            return Vec::new();
+        };
+        let mut values: Vec<String> = Vec::new();
+        if self.show_namespace_column() {
+            values.push(obj.metadata.namespace.clone().unwrap_or_default());
+        }
+        let (cells, _) = self.spec.cells(obj);
+        for (i, cell) in cells.into_iter().enumerate() {
+            values.push(
+                self.spec
+                    .volatile(obj, &self.kind_plural, i)
+                    .unwrap_or(cell),
+            );
+        }
+        if self.node_capacity_columns() {
+            values.push(self.node_pods_cell(obj));
+        }
+        if self.metrics_columns() {
+            let (cpu, mem) = self.metrics_for(obj);
+            values.push(crate::columns::fmt_cpu(cpu));
+            values.push(crate::columns::fmt_mem(mem));
+            if self.node_capacity_columns() {
+                let (alloc_cpu, alloc_mem) = crate::columns::node_allocatable(obj);
+                values.push(crate::columns::fmt_pct(crate::columns::usage_pct(
+                    cpu, alloc_cpu,
+                )));
+                values.push(crate::columns::fmt_pct(crate::columns::usage_pct(
+                    mem, alloc_mem,
+                )));
+            }
+        }
+        self.display_headers()
+            .into_iter()
+            .zip(values)
+            .filter(|(_, v)| !v.is_empty())
+            .collect()
+    }
+
     pub fn confirm_allows_force_toggle(&self) -> bool {
         matches!(self.confirm_action, Some(ConfirmAction::Delete { .. }))
     }

@@ -60,6 +60,7 @@ impl App {
             Mode::Namespaces => self.key_namespaces(key),
             Mode::Contexts => self.key_contexts(key),
             Mode::SortPicker => self.key_sort_picker(key),
+            Mode::CopyPicker => self.key_copy_picker(key),
             Mode::Containers => self.key_containers(key),
             Mode::SetImage => self.key_set_image(key),
             Mode::Confirm => self.key_confirm(key),
@@ -149,6 +150,9 @@ impl App {
             KeyCode::Char('i') => self.request_set_image(),
             KeyCode::Char('o') => self.show_node(),
             KeyCode::Char('c') => self.copy_name(),
+            // Copy any displayed cell of the row via a field picker (`c`
+            // above copies just the name).
+            KeyCode::Char('Y') => self.open_copy_picker(),
             KeyCode::Char('J') => self.jump_owner(),
             // `X` — explain why the selection is unhealthy (evidence-backed).
             KeyCode::Char('X') => self.open_explain(),

@@ -159,6 +159,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Namespaces => draw_namespaces(frame, app, chunks[1]),
         Mode::Contexts => draw_contexts(frame, app, chunks[1]),
         Mode::SortPicker => draw_sort_picker(frame, app, chunks[1]),
+        Mode::CopyPicker => draw_copy_picker(frame, app, chunks[1]),
         Mode::Containers => draw_containers(frame, app, chunks[1]),
         Mode::SetImage => draw_set_image(frame, app, chunks[1]),
         Mode::Confirm => draw_confirm(frame, app, chunks[1]),
@@ -430,7 +431,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
         "services" => vec![
             hint_line(&[("⏎", "pods"), ("f", "port-fwd")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
-            hint_line(&[("^d", "delete")]),
+            hint_line(&[("Y", "copy cell"), ("^d", "delete")]),
         ],
         "nodes" => vec![
             hint_line(&[("⏎", "pods"), ("y", "yaml"), ("d", "describe")]),
@@ -460,7 +461,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
         ],
         _ => vec![
             hint_line(&[("⏎", "yaml"), ("d", "describe"), ("E", "events")]),
-            hint_line(&[("e", "edit"), ("c", "copy name")]),
+            hint_line(&[("e", "edit"), ("c", "copy name"), ("Y", "copy cell")]),
             hint_line(&[("^d", "delete")]),
         ],
     };
@@ -1811,6 +1812,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         ),
         bind("c", "copy resource name · in doc views: copy the document"),
         bind(
+            "shift-y",
+            "copy any cell of the selected row (picker: type to match a column or value)",
+        ),
+        bind(
             "/ · n/N",
             "search within YAML/describe/diff/events (highlight in place, n/N to jump); filters help",
         ),
@@ -2106,6 +2111,42 @@ fn draw_sort_picker(frame: &mut Frame, app: &mut App, area: Rect) {
         items,
         Span::styled(title, theme::title()),
         &mut app.sort_picker_state,
+    );
+}
+
+/// Copy-field picker (`Y`): each displayed column of the selected row with
+/// its full value; ⏎ copies the value to the clipboard. Headers are padded
+/// to a common width so the values read as a column.
+fn draw_copy_picker(frame: &mut Frame, app: &mut App, area: Rect) {
+    let entries = app.filtered_copy_entries();
+    let pad = entries
+        .iter()
+        .map(|(h, _)| h.chars().count())
+        .max()
+        .unwrap_or(0);
+    let items: Vec<ListItem> = entries
+        .iter()
+        .map(|(h, v)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{h:<pad$}  "), Style::default().fg(theme::teal())),
+                Span::styled(v.clone(), Style::default().fg(theme::text())),
+            ]))
+        })
+        .collect();
+    // Show the type-to-filter buffer in the title so it reads like an input.
+    let title = if app.copy_picker_filter.is_empty() {
+        " Copy (⏎ copies the value) ".to_string()
+    } else {
+        format!(" Copy · /{}_ ", app.copy_picker_filter)
+    };
+    render_popup_list(
+        frame,
+        area,
+        60,
+        60,
+        items,
+        Span::styled(title, theme::title()),
+        &mut app.copy_picker_state,
     );
 }
 

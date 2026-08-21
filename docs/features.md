@@ -38,6 +38,11 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   rank by fuzzy score, `⏎` jumps to the object. When a kind can't be listed
   (RBAC), the result says it's incomplete instead of pretending otherwise.
 - **Multiselect** (`space`) for bulk delete/kill/suspend/resume/reconcile.
+- **Copy to clipboard** - `c` copies the selected resource's name; `Y` opens a
+  field picker over the selected row's displayed columns (full values, never
+  the width-truncated cell text) - type to match a column name or its value
+  (an IP, an image, a node), `⏎` copies it. Falls back to OSC 52 on remote
+  terminals without a local clipboard tool.
 - **RBAC-aware palette browse** - the empty `:` list hides kinds you cannot
   `list`. An explicit search checks the full discovery catalog, because some
   delegated authorizers return incomplete rule reviews.

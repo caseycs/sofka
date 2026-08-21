@@ -37,6 +37,7 @@ plugin, bookmark, and workspace chords.
 | `l` / `p`                                     | logs (workload = all matching pods) / previous-container logs                                                                         |
 | `L` / `:vlogs`                                | VictoriaLogs history for the selection (pod, container, workload, service, namespace)                                                 |
 | `c`                                           | copy resource name to clipboard                                                                                                       |
+| `Y`                                           | copy any cell of the selected row: picker over the displayed columns (type to match a column name or value), `⏎` copies               |
 | `e`                                           | edit in `$EDITOR` (`kubectl edit`)                                                                                                    |
 | `s`                                           | shell into pod / scale a workload (context-dependent)                                                                                 |
 | `a`                                           | attach to pod                                                                                                                         |

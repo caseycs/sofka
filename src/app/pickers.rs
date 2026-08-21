@@ -263,6 +263,104 @@ impl App {
         self.flash_err = false;
     }
 
+    /// Open the copy-field picker (`Y`): every displayed column of the
+    /// selected row with its full (untruncated) value, ⏎ copies the value to
+    /// the clipboard. The fields are captured here so a watch update can't
+    /// shift entries while the picker is open.
+    pub(super) fn open_copy_picker(&mut self) {
+        let fields = self.selected_row_fields();
+        if fields.is_empty() {
+            self.flash_warn("no row selected");
+            return;
+        }
+        self.copy_picker_fields = fields;
+        self.copy_picker_filter.clear();
+        self.copy_picker_state.select(Some(0));
+        self.mode = Mode::CopyPicker;
+    }
+
+    /// Entries for the copy picker: the captured `(header, value)` pairs,
+    /// fuzzy-matched against both the header and the value (so typing part
+    /// of an IP finds it as readily as typing the column name).
+    pub fn filtered_copy_entries(&self) -> Vec<(String, String)> {
+        if self.copy_picker_filter.is_empty() {
+            return self.copy_picker_fields.clone();
+        }
+        let mut scored: Vec<(i64, (String, String))> = self
+            .copy_picker_fields
+            .iter()
+            .filter_map(|(h, v)| {
+                self.matcher
+                    .fuzzy_match(&format!("{h} {v}"), &self.copy_picker_filter)
+                    .map(|s| (s, (h.clone(), v.clone())))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.0.cmp(&b.1.0)));
+        scored.into_iter().map(|(_, e)| e).collect()
+    }
+
+    pub(super) fn key_copy_picker(&mut self, key: KeyEvent) {
+        if edit_chord(&key, &mut self.copy_picker_filter) {
+            self.select_best_copy_match();
+            return;
+        }
+        let len = self.filtered_copy_entries().len();
+        match key.code {
+            KeyCode::Esc => {
+                // First esc clears the filter, second closes the picker.
+                if self.copy_picker_filter.is_empty() {
+                    self.mode = Mode::Table;
+                } else {
+                    self.copy_picker_filter.clear();
+                    self.select_best_copy_match();
+                }
+            }
+            KeyCode::Down => list_step(&mut self.copy_picker_state, len, true),
+            KeyCode::Up => list_step(&mut self.copy_picker_state, len, false),
+            KeyCode::Enter => {
+                if let Some((header, value)) = self
+                    .copy_picker_state
+                    .selected()
+                    .and_then(|i| self.filtered_copy_entries().get(i).cloned())
+                {
+                    self.copy_field(&header, value);
+                }
+            }
+            KeyCode::Backspace => {
+                self.copy_picker_filter.pop();
+                self.select_best_copy_match();
+            }
+            KeyCode::Char(c) => {
+                self.copy_picker_filter.push(c);
+                self.select_best_copy_match();
+            }
+            _ => {}
+        }
+    }
+
+    /// Keep the cursor on the best fuzzy match while typing (see
+    /// `select_best_sort_match` — same idiom, no pinned entry here).
+    fn select_best_copy_match(&mut self) {
+        self.copy_picker_state.select(Some(0));
+    }
+
+    /// Copy a picked field's value to the clipboard and close the picker.
+    /// The flash echoes what was copied, truncated so a long value (a list
+    /// of ports, a node selector) can't flood the one-line status bar.
+    fn copy_field(&mut self, header: &str, value: String) {
+        self.mode = Mode::Table;
+        self.copy_picker_filter.clear();
+        let mut shown: String = value.chars().take(60).collect();
+        if shown.len() < value.len() {
+            shown.push('…');
+        }
+        self.copy_to_clipboard_async(
+            value,
+            format!("copied {header}: {shown}"),
+            "no clipboard target found (pbcopy/xclip/wl-copy/OSC 52)",
+        );
+    }
+
     pub(super) fn key_namespaces(&mut self, key: KeyEvent) {
         if edit_chord(&key, &mut self.ns_filter) {
             self.select_best_namespace_match();
