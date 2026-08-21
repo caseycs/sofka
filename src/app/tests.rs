@@ -5114,6 +5114,75 @@ async fn fleet_without_configured_contexts_warns() {
 }
 
 #[tokio::test]
+async fn fleet_toggle_in_context_switcher_edits_marks() {
+    let (mut app, _rx) = test_app();
+    app.fleet_cfg = crate::config::FleetConfig {
+        contexts: vec!["prod".into()],
+    };
+
+    // Space on a non-member adds it after the config entries.
+    app.ctx_list = vec!["prod".into(), "staging".into()];
+    app.ctx_state.select(Some(1));
+    app.mode = Mode::Contexts;
+    app.key_contexts(press(KeyCode::Char(' ')));
+    assert_eq!(app.fleet_contexts(), vec!["prod", "staging"]);
+    assert!(app.is_fleet_context("staging"));
+    assert!(app.flash.contains("fleet + staging"), "{}", app.flash);
+    assert_eq!(app.mode, Mode::Contexts, "toggling stays in the switcher");
+
+    // Space again removes it.
+    app.key_contexts(press(KeyCode::Char(' ')));
+    assert_eq!(app.fleet_contexts(), vec!["prod"]);
+    assert!(app.flash.contains("fleet − staging"), "{}", app.flash);
+
+    // A config-listed context can be masked out for the session too…
+    app.ctx_state.select(Some(0));
+    app.key_contexts(press(KeyCode::Char(' ')));
+    assert!(app.fleet_contexts().is_empty());
+    // …and re-added.
+    app.key_contexts(press(KeyCode::Char(' ')));
+    assert_eq!(app.fleet_contexts(), vec!["prod"]);
+}
+
+#[tokio::test]
+async fn fleet_opens_with_marked_contexts_only() {
+    let (mut app, _rx) = test_app();
+    assert!(app.fleet_cfg.contexts.is_empty());
+    app.fleet_marks.added.push("staging".into());
+    app.open_fleet();
+    assert_eq!(app.mode, Mode::Fleet);
+    assert_eq!(app.fleet_rows.len(), 1);
+    assert_eq!(app.fleet_rows[0].context, "staging");
+}
+
+#[tokio::test]
+async fn fleet_marks_persist_across_restarts() {
+    let dir = std::env::temp_dir().join(format!("sofka-fleet-test-{}", std::process::id()));
+    let path = dir.join("fleet.toml");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Toggling with a persist path saves the marks…
+    let (mut app, _rx) = test_app();
+    app.fleet_marks_path = Some(path.clone());
+    app.ctx_list = vec!["prod".into(), "staging".into()];
+    app.ctx_state.select(Some(1));
+    app.mode = Mode::Contexts;
+    app.key_contexts(press(KeyCode::Char(' ')));
+    assert!(path.exists(), "marks file written on toggle");
+    assert!(!app.flash_err, "{}", app.flash);
+
+    // …and a fresh app (a restart) loads them back.
+    let loaded = crate::fleet::FleetMarks::load(&path);
+    assert_eq!(loaded, app.fleet_marks);
+    assert_eq!(loaded.added, vec!["staging".to_string()]);
+
+    // A missing or corrupt file degrades to empty marks, never an error.
+    std::fs::write(&path, "not toml [[[").unwrap();
+    assert_eq!(crate::fleet::FleetMarks::load(&path), Default::default());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn fleet_seeds_connecting_rows_and_applies_summaries() {
     let (mut app, _rx) = test_app();
     app.fleet_cfg = crate::config::FleetConfig {

@@ -138,7 +138,8 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   usage in a Prometheus or VictoriaMetrics backend, with a patch preview. Never
   mutates. See [Providers](providers.md#right-sizing-metrics-provider).
 - **Fleet dashboard** (`:fleet`) - an opt-in health summary across contexts,
-  side by side. See [Providers](providers.md#fleet-dashboard).
+  side by side. Contexts come from config or `space` in the `:ctx` switcher.
+  See [Providers](providers.md#fleet-dashboard).
 - **YAML view** (`y`), **describe** (`d`, via `kubectl`), **events**
   (`:events` / `E`, filtered by UID when available), and **diff** (`:diff`).
 - **Diff on GitOps clusters** - `:diff` shows a unified diff of the live object

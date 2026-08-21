@@ -7,6 +7,49 @@
 //! each is gathered independently so one slow cluster never blocks the rest.
 //! Only these non-sensitive summaries are held in memory.
 
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+/// Fleet membership edits made with `space` in the context switcher,
+/// persisted to `<state-dir>/fleet.toml` so marks survive restarts. This is
+/// deliberately a separate state file: sofka never rewrites the user's config,
+/// so `[fleet] contexts` stays the hand-edited base list and these marks
+/// overlay it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FleetMarks {
+    /// Contexts added on top of `[fleet] contexts`, in toggle order.
+    pub added: Vec<String>,
+    /// Config-listed contexts masked out with `space`.
+    pub removed: Vec<String>,
+}
+
+impl FleetMarks {
+    /// Where marks live: `<state-dir>/fleet.toml`.
+    pub fn default_path() -> PathBuf {
+        crate::diagnostics::state_dir().join("fleet.toml")
+    }
+
+    /// Load persisted marks. A missing or unparsable file is an empty set —
+    /// the dashboard must still open when state was never written or got
+    /// hand-mangled.
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let text = toml::to_string(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, text).map_err(|e| e.to_string())
+    }
+}
+
 /// Where a context's summary stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FleetStatus {

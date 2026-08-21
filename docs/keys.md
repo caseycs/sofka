@@ -29,9 +29,9 @@ plugin, bookmark, and workspace chords.
 | `:can-i` / `:can-i <verb> <resource> [ns]`    | what you can do here / check a single action (`SelfSubjectAccessReview`)                                                              |
 | `:journal` / `:audit`                         | session-local log of the mutating actions you've taken                                                                                |
 | `:rightsize`                                  | historical right-sizing: P50/P95/P99 usage → suggested requests + patch preview (needs a metrics backend)                             |
-| `:ctx` / `:ctx <name>`                        | context switcher popup (`/` filters, `r` renames) / switch directly (the name tab-completes)                                          |
+| `:ctx` / `:ctx <name>`                        | context switcher popup (`/` filters, `r` renames, `space` toggles fleet membership) / switch directly (the name tab-completes)        |
 | `:helm`                                       | Helm releases (native storage-Secret decode): ⏎ history → values · `y` manifest · `d` notes · `r` rollback                            |
-| `:fleet`                                      | cross-context health dashboard (opt-in `[fleet]` contexts; `⏎` switches, `r` refreshes)                                               |
+| `:fleet`                                      | cross-context health dashboard (opt-in: `[fleet]` contexts or `space` in `:ctx`; `⏎` switches, `r` refreshes)                         |
 | `:skin`                                       | switch the color skin live (`:skin gruvbox-dark` applies directly)                                                                    |
 | `:reload` / `:config` / `:info`               | reload config from disk · config sources + warnings · runtime diagnostics                                                             |
 | `l` / `p`                                     | logs (workload = all matching pods) / previous-container logs                                                                         |

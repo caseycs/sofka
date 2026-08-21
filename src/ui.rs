@@ -1755,7 +1755,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind(":ctx · :pulse", "switch context · cluster-health dashboard"),
         bind(
             ":fleet",
-            "cross-context health dashboard (opt-in [fleet] contexts; ⏎ switches)",
+            "cross-context health dashboard ([fleet] contexts or space in :ctx; ⏎ switches)",
         ),
         bind(
             ":xray · :diff",
@@ -2023,14 +2023,23 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|c| {
             let marker = if *c == current { "● " } else { "  " };
-            ListItem::new(Span::styled(
-                format!("{marker}{c}"),
-                Style::default().fg(if *c == current {
-                    theme::green()
-                } else {
-                    theme::text()
-                }),
-            ))
+            // Fleet membership (`space` toggles) in the bulk-mark style.
+            let fleet = if app.is_fleet_context(c) {
+                "✓ "
+            } else {
+                "  "
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(fleet, Style::default().fg(theme::mark())),
+                Span::styled(
+                    format!("{marker}{c}"),
+                    Style::default().fg(if *c == current {
+                        theme::green()
+                    } else {
+                        theme::text()
+                    }),
+                ),
+            ]))
         })
         .collect();
     // While typing, show the filter buffer in the title so it reads like an
@@ -2040,7 +2049,7 @@ fn draw_contexts(frame: &mut Frame, app: &mut App, area: Rect) {
     } else if !app.ctx_filter.is_empty() {
         format!(" Contexts · /{} ", app.ctx_filter)
     } else {
-        " Contexts (/ filter · r rename · ⏎ switch) ".to_string()
+        " Contexts (/ filter · r rename · space fleet · ⏎ switch) ".to_string()
     };
     render_popup_list(
         frame,
