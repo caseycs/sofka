@@ -2397,6 +2397,94 @@ async fn node_capacity_percent_columns_render_and_sort() {
     assert_eq!(names, ["small", "big"]);
 }
 
+#[tokio::test]
+async fn nodes_view_pods_column_counts_and_sorts() {
+    let (mut app, _rx) = test_app();
+    // Pods must not grow a PODS column.
+    app.switch_kind("pods");
+    assert!(!app.display_headers().contains(&"PODS".to_string()));
+
+    app.switch_kind("nodes");
+    let headers = app.display_headers();
+    let pods_idx = headers.iter().position(|h| *h == "PODS").unwrap();
+    // PODS sits right before the CPU/MEM usage columns, k9s-style.
+    assert_eq!(headers[pods_idx + 1], "CPU", "{headers:?}");
+
+    for n in ["node-a", "node-b"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Node",
+                   "metadata": {"name": n, "resourceVersion": "1"}}),
+        );
+    }
+
+    // Before the first pods list lands the column reads "-", not a fake 0,
+    // and the capture stays one cell per column (nodes carry PODS and
+    // %CPU/%MEM headers beyond the base spec).
+    let (cols, rows) = app.snapshot_table();
+    assert!(rows.iter().all(|r| r.len() == cols.len()), "{rows:?}");
+    assert!(rows.iter().all(|r| r[pods_idx] == "-"), "{rows:?}");
+
+    app.handle_msg(Msg::NodePods {
+        generation: app.generation,
+        counts: HashMap::from([("node-b".to_string(), 7)]),
+    });
+    // node-a has no entry → genuinely zero pods once data exists.
+    let (_, rows) = app.snapshot_table();
+    let cell = |name: &str| {
+        rows.iter()
+            .find(|r| r[0] == name)
+            .map(|r| r[pods_idx].clone())
+            .unwrap()
+    };
+    assert_eq!(cell("node-a"), "0");
+    assert_eq!(cell("node-b"), "7");
+
+    app.sort_column = Some(pods_idx);
+    app.sort_desc = true;
+    app.invalidate_rows();
+    let names: Vec<String> = app
+        .rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["node-b", "node-a"]);
+}
+
+#[tokio::test]
+async fn node_pods_update_invalidates_pods_sorted_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("nodes");
+    for n in ["node-a", "node-b"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Node",
+                   "metadata": {"name": n, "resourceVersion": "1"}}),
+        );
+    }
+    let pods_idx = app
+        .display_headers()
+        .iter()
+        .position(|h| *h == "PODS")
+        .unwrap();
+    app.sort_column = Some(pods_idx);
+    app.sort_desc = true;
+    app.invalidate_rows();
+    let _ = app.rows(); // warm the sorted row cache
+
+    // A fresh count snapshot must resort without any other invalidation.
+    app.handle_msg(Msg::NodePods {
+        generation: app.generation,
+        counts: HashMap::from([("node-a".to_string(), 2), ("node-b".to_string(), 9)]),
+    });
+    let names: Vec<String> = app
+        .rows()
+        .iter()
+        .map(|o| o.metadata.name.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["node-b", "node-a"]);
+}
+
 #[test]
 fn node_allocatable_reads_status_quantities() {
     let node = obj(json!({"apiVersion": "v1", "kind": "Node",

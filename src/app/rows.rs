@@ -154,10 +154,10 @@ impl App {
         let sort_header = self
             .sort_column
             .and_then(|i| headers.get(i).map(String::as_str));
-        // CPU/MEM (and the node capacity percentages) sort by the live metrics
-        // snapshot, which moves without a new resourceVersion, so those keys
-        // can never be cached.
-        let volatile_sort = matches!(sort_header, Some("CPU" | "MEM" | "%CPU" | "%MEM"));
+        // CPU/MEM (and the node capacity percentages and pod counts) sort by
+        // live poll snapshots, which move without a new resourceVersion, so
+        // those keys can never be cached.
+        let volatile_sort = matches!(sort_header, Some("CPU" | "MEM" | "%CPU" | "%MEM" | "PODS"));
         // The aggregated Helm release list (`helm list` semantics) shows only
         // the latest revision per release; `helmhistory` (one release's full
         // history) shows every revision, so it skips this.
@@ -315,6 +315,9 @@ impl App {
         if self.show_namespace_column() {
             h.insert(0, "NAMESPACE".into());
         }
+        if self.node_capacity_columns() {
+            h.push("PODS".into());
+        }
         if self.metrics_columns() {
             h.push("CPU".into());
             h.push("MEM".into());
@@ -451,6 +454,24 @@ impl App {
         self.metrics.get(&key).copied().unwrap_or((0, 0))
     }
 
+    /// Latest pod count for a node from the pods poll; `None` before the
+    /// first successful list (renders "-", distinct from a genuinely empty
+    /// node).
+    pub fn node_pods_for(&self, o: &DynamicObject) -> Option<usize> {
+        let name = o.metadata.name.as_deref().unwrap_or_default();
+        self.node_pods
+            .as_ref()
+            .map(|m| m.get(name).copied().unwrap_or(0))
+    }
+
+    /// The PODS cell for a node as displayed.
+    pub fn node_pods_cell(&self, o: &DynamicObject) -> String {
+        match self.node_pods_for(o) {
+            Some(n) => n.to_string(),
+            None => "-".into(),
+        }
+    }
+
     /// Comparable value of `header`'s cell for object `o`.
     pub(super) fn column_sort_key(&self, o: &DynamicObject, header: &str) -> SortKey {
         // User/printer columns sort by their declared type (quantity, number,
@@ -473,6 +494,10 @@ impl App {
             "AGE" => SortKey::Num(crate::columns::age_secs(o).unwrap_or(i64::MAX) as f64),
             "CPU" => SortKey::Num(self.metrics_for(o).0 as f64),
             "MEM" => SortKey::Num(self.metrics_for(o).1 as f64),
+            // Unknown counts (poll hasn't landed) sort below every real count.
+            "PODS" if self.node_capacity_columns() => {
+                SortKey::Num(self.node_pods_for(o).map(|c| c as f64).unwrap_or(-1.0))
+            }
             // Unknown allocatable sorts below every real percentage.
             "%CPU" if self.node_capacity_columns() => SortKey::Num(
                 crate::columns::usage_pct(

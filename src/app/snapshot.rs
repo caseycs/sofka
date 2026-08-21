@@ -73,6 +73,9 @@ impl App {
                         }
                     }
                 }
+                if self.node_capacity_columns() {
+                    cells.push(self.node_pods_cell(obj));
+                }
                 if metrics_cols {
                     let name = obj.metadata.name.as_deref().unwrap_or_default();
                     let key = if pods_view {
@@ -87,6 +90,17 @@ impl App {
                     let (cpu, mem) = self.metrics.get(&key).copied().unwrap_or((0, 0));
                     cells.push(crate::columns::fmt_cpu(cpu));
                     cells.push(crate::columns::fmt_mem(mem));
+                    // Nodes also carry %CPU/%MEM headers — the capture must
+                    // stay one cell per column.
+                    if self.node_capacity_columns() {
+                        let (alloc_cpu, alloc_mem) = crate::columns::node_allocatable(obj);
+                        cells.push(crate::columns::fmt_pct(crate::columns::usage_pct(
+                            cpu, alloc_cpu,
+                        )));
+                        cells.push(crate::columns::fmt_pct(crate::columns::usage_pct(
+                            mem, alloc_mem,
+                        )));
+                    }
                 }
                 cells
             })
