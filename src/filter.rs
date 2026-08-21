@@ -1,11 +1,12 @@
 //! Structured row-filter grammar.
 //!
-//! Plain text with no structured markers stays exactly what it always was:
-//! one fuzzy pattern over "namespace name". Once any structured marker
+//! Plain text with no structured markers stays what it always was: one fuzzy
+//! pattern over "namespace name", falling back to each rendered column cell
+//! (so `/10.96` finds a Service by its CLUSTER-IP). Once any structured marker
 //! appears, the input is split on whitespace and every term must match
 //! (terms are AND-ed; there is no OR/grouping — deliberately small):
 //!
-//! - `text`                   fuzzy match (namespace + name)
+//! - `text`                   fuzzy match (namespace + name + any column cell)
 //! - `!text`                  inverse fuzzy match
 //! - `-l app=api,env=prod`    Kubernetes label selector (sent server-side)
 //! - `-f spec.nodeName=n1`    Kubernetes field selector (sent server-side)

@@ -5514,6 +5514,34 @@ async fn inverse_filter_hides_fuzzy_matches() {
 }
 
 #[tokio::test]
+async fn fuzzy_filter_matches_any_column_cell() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    for (n, ip) in [("api", "10.96.13.5"), ("web", "172.20.44.9")] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Service",
+                   "metadata": {"name": n, "namespace": "default"},
+                   "spec": {"type": "ClusterIP", "clusterIP": ip,
+                            "ports": [{"port": 80, "protocol": "TCP"}]}}),
+        );
+    }
+    // An IP substring matches via the CLUSTER-IP cell, not the name.
+    type_filter(&mut app, "10.96");
+    assert_eq!(row_names(&app), ["api"]);
+
+    // Name matching still works exactly as before.
+    app.filter = "web".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["web"]);
+
+    // Inverse terms see the cells too: hide the 10.96 service.
+    app.filter = "!10.96".into();
+    app.invalidate_rows();
+    assert_eq!(row_names(&app), ["web"]);
+}
+
+#[tokio::test]
 async fn status_filter_matches_status_column() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
