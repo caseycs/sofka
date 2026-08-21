@@ -938,6 +938,10 @@ pub struct App {
     /// was opened from, so the renderer keeps drawing it underneath and
     /// enter/esc return to it.
     pub doc_filter_return: Mode,
+    /// Which view the `:` command palette was opened from (the table or a
+    /// document view — detail/diff/events/logs), so esc returns there and the
+    /// renderer keeps drawing it underneath the suggestion popup.
+    pub palette_return: Mode,
     pub logs: LogsView,
 
     pub ns_list: Vec<String>,
@@ -1236,6 +1240,7 @@ impl App {
             detail: Scrollable::empty(),
             help_filter: String::new(),
             doc_filter_return: Mode::Detail,
+            palette_return: Mode::Table,
             logs: LogsView::default(),
             ns_list: Vec::new(),
             ns_state: ListState::default(),

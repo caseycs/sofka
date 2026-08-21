@@ -83,12 +83,7 @@ impl App {
 
     pub(super) fn key_table(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char(':') => {
-                self.mode = Mode::Command;
-                self.command.clear();
-                self.ensure_namespace_cache();
-                self.update_suggestions();
-            }
+            KeyCode::Char(':') => self.open_palette(),
             KeyCode::Char('/') => self.mode = Mode::Filter,
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => {
@@ -454,7 +449,7 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Esc => self.mode = Mode::Table,
+            KeyCode::Esc => self.mode = self.palette_return,
             KeyCode::Down | KeyCode::Tab => {
                 if !self.cmd_suggestions.is_empty() {
                     self.cmd_sel = (self.cmd_sel + 1) % self.cmd_suggestions.len();
@@ -473,6 +468,14 @@ impl App {
                 let picked = self.cmd_suggestions.get(self.cmd_sel).cloned();
                 self.mode = Mode::Table;
                 self.command.clear();
+                // Dispatch leaves the view the palette was opened from behind,
+                // so run the cleanup its own esc path would have done.
+                match self.palette_return {
+                    Mode::Logs => self.stop_log_stream(),
+                    Mode::Events => self.stop_event_stream(),
+                    _ => {}
+                }
+                self.palette_return = Mode::Table;
                 // `:kind namespace` switches both at once (`:deploy social`,
                 // `:cephclusters all`); only the first word selects the kind.
                 let (head, ns_arg) = match typed.split_once(char::is_whitespace) {
@@ -543,6 +546,17 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Open the `:` command palette. Bound in the table and the document
+    /// views (detail/diff/events/logs); `palette_return` remembers where it
+    /// was opened so esc goes back there.
+    pub(super) fn open_palette(&mut self) {
+        self.palette_return = self.mode;
+        self.mode = Mode::Command;
+        self.command.clear();
+        self.ensure_namespace_cache();
+        self.update_suggestions();
     }
 
     /// Run a built-in palette action.
@@ -928,6 +942,9 @@ impl App {
                 self.doc_filter_return = self.mode;
                 self.mode = Mode::DocFilter;
             }
+            // The command palette works from document views too — switching
+            // away doesn't require backing out to the table first.
+            KeyCode::Char(':') => self.open_palette(),
             // Jump to the next / previous search match (vim `n`/`N`). No-op
             // when no search is active.
             KeyCode::Char('n') if detail => target.step_match(true),
@@ -968,6 +985,11 @@ impl App {
             return;
         }
         match key.code {
+            // The command palette works from the logs view too.
+            KeyCode::Char(':') => {
+                self.open_palette();
+                return;
+            }
             // k9s: `s` toggles autoscroll/follow (we also accept `f`).
             KeyCode::Char('s') | KeyCode::Char('f') => {
                 self.logs.follow = !self.logs.follow;
