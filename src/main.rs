@@ -2,6 +2,7 @@
 //!
 //! A from-scratch reimagining of k9s built on kube-rs + ratatui, async-first.
 
+mod altscroll;
 mod app;
 mod bundle;
 mod columns;
@@ -543,6 +544,29 @@ fn print_info(loader: &config::ConfigLoader, warnings: &[String]) {
     }
 }
 
+/// Feed keys to the app and redraw. Returns whether anything was dispatched,
+/// so a repair that swallowed its input costs no frame.
+fn dispatch(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    keys: Vec<crossterm::event::KeyEvent>,
+    captured: bool,
+) -> Result<bool> {
+    if keys.is_empty() {
+        return Ok(false);
+    }
+    for key in keys {
+        app.handle_key(key)?;
+        if let Some(app::Suspend::Shell(argv)) = app.pending.take() {
+            suspend_and_run(terminal, &argv, captured);
+            app.flash = format!("ran: {}", argv.join(" "));
+            app.flash_err = false;
+        }
+    }
+    terminal.draw(|f| ui::draw(f, app))?;
+    Ok(true)
+}
+
 async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -562,6 +586,9 @@ async fn run(
     // document views release it for native text selection (see
     // `wants_mouse_capture`). Always false when the config disabled the mouse.
     let mut captured = mouse;
+    // Reassembles cursor-key escape sequences split mid-read; only ever fed
+    // while capture is released, which is the only time they can arrive.
+    let mut repair = altscroll::Repair::default();
 
     terminal.draw(|f| ui::draw(f, app))?;
     loop {
@@ -578,20 +605,30 @@ async fn run(
                 let _ =
                     crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
             }
+            // No more alternate-scroll sequences either way: release any Esc
+            // still waiting for a tail that can no longer come.
+            if dispatch(terminal, app, repair.flush(), captured)? {
+                dirty = false;
+            }
         }
 
         tokio::select! {
             maybe_event = reader.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        app.handle_key(key)?;
-                        if let Some(app::Suspend::Shell(argv)) = app.pending.take() {
-                            suspend_and_run(terminal, &argv, captured);
-                            app.flash = format!("ran: {}", argv.join(" "));
-                            app.flash_err = false;
+                        // With capture released the wheel reaches us as
+                        // cursor-key escape sequences, and a fast burst can
+                        // split one across reads; `altscroll` puts those back
+                        // together. Nothing to repair while capture is on, so
+                        // the key goes straight through.
+                        let keys = if captured {
+                            vec![key]
+                        } else {
+                            repair.push(key)
+                        };
+                        if dispatch(terminal, app, keys, captured)? {
+                            dirty = false;
                         }
-                        terminal.draw(|f| ui::draw(f, app))?;
-                        dirty = false;
                     }
                     Some(Ok(Event::Mouse(m))) => {
                         app.handle_mouse(m)?;
@@ -627,6 +664,13 @@ async fn run(
             _ = tick.tick() => {
                 app.reap_port_forwards(); // age columns + drop dead forwards
                 dirty = true;
+            }
+            // A held Esc was a real keypress after all, not the head of a
+            // split escape sequence: act on it.
+            _ = tokio::time::sleep(altscroll::Repair::TIMEOUT), if repair.pending() => {
+                if dispatch(terminal, app, repair.flush(), captured)? {
+                    dirty = false;
+                }
             }
         }
     }

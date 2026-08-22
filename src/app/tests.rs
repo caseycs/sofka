@@ -826,24 +826,21 @@ async fn document_views_release_mouse_capture_for_text_selection() {
     let (mut app, _rx) = test_app();
     assert!(app.wants_mouse_capture(), "table keeps capture");
 
-    // Full-screen text views release capture so click-drag selects text
-    // natively (#133), including the document filter overlay.
+    // Every full-screen text view releases capture so click-drag selects text
+    // natively (#133), including the filter overlays that keep it on screen.
+    // Logs included: the alternate-scroll bursts that used to throw the view
+    // off (#152) are repaired in `crate::altscroll`, not by holding capture.
     for mode in [
         Mode::Detail,
         Mode::Diff,
         Mode::Events,
+        Mode::Logs,
         Mode::Help,
         Mode::DocFilter,
+        Mode::LogFilter,
     ] {
         app.mode = mode;
         assert!(!app.wants_mouse_capture(), "{mode:?} releases capture");
-    }
-
-    // Logs keep capture so rapid wheel input arrives as atomic mouse events
-    // rather than alternate-scroll escape sequences (#152).
-    for mode in [Mode::Logs, Mode::LogFilter] {
-        app.mode = mode;
-        assert!(app.wants_mouse_capture(), "{mode:?} keeps capture");
     }
 
     // Interactive pickers and dashboards still want clicks/wheel captured.
@@ -1149,10 +1146,12 @@ async fn logs_pause_freezes_and_survives_new_lines() {
     assert_eq!(app.logs.view.scroll, 60);
 }
 
+/// A fast wheel-down burst in the log view reaches us as alternate-scroll
+/// escape sequences, split at the `ESC` byte when a read boundary lands there.
+/// Repaired (as the run loop does) they must stay Down keys clamped to the
+/// bottom of the buffer, never a stray Esc that closes the view (#152).
 #[tokio::test]
 async fn rapid_log_wheel_down_clamps_without_leaving_logs() {
-    use crossterm::event::{MouseEvent, MouseEventKind};
-
     let (mut app, _rx) = test_app();
     app.mode = Mode::Logs;
     app.return_mode = Mode::Table;
@@ -1165,20 +1164,23 @@ async fn rapid_log_wheel_down_clamps_without_leaving_logs() {
     app.handle_key(press(KeyCode::Up)).unwrap();
     assert!(!app.logs.follow);
     assert_eq!(app.logs.view.scroll, 59);
-    assert!(app.wants_mouse_capture());
+    assert!(
+        !app.wants_mouse_capture(),
+        "logs release capture for selection"
+    );
 
-    let wheel_down = MouseEvent {
-        kind: MouseEventKind::ScrollDown,
-        column: 0,
-        row: 0,
-        modifiers: KeyModifiers::NONE,
-    };
+    let mut repair = crate::altscroll::Repair::default();
     for _ in 0..100 {
-        app.handle_mouse(wheel_down).unwrap();
+        for code in [KeyCode::Esc, KeyCode::Char('['), KeyCode::Char('B')] {
+            for key in repair.push(press(code)) {
+                app.handle_key(key).unwrap();
+            }
+        }
         assert_eq!(app.mode, Mode::Logs);
         assert!(app.logs.view.scroll <= 60);
     }
     assert_eq!(app.logs.view.scroll, 60);
+    assert!(!repair.pending());
 }
 
 #[tokio::test]
