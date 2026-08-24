@@ -8,7 +8,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, ListState,
     Paragraph, Row, Table, Wrap,
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, DEFAULT_SORT_LABEL, Mode, SuggestKind, TRANSFER_MENU_ITEMS};
 use crate::{columns, theme};
@@ -592,6 +592,18 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let spec = app.view_spec();
     let thresholds = app.resolved_thresholds();
 
+    // Widest visible value per display column (headers count too, plus the
+    // sort arrow on the active sort column). Drives the content-aware widths
+    // below so a narrow window trims padding, not data (#166).
+    let mut needed: Vec<u16> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let arrow = if Some(i) == sort_col { 2 } else { 0 };
+            cell_width(h) + arrow
+        })
+        .collect();
+
     let rows: Vec<Row> = visible_objects
         .iter()
         .map(|obj| {
@@ -643,6 +655,11 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     );
                     cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.0)));
                     cells.push(TableCellText::Owned(columns::fmt_pct(node_pcts.1)));
+                }
+            }
+            for (i, c) in cells.iter().enumerate() {
+                if let Some(n) = needed.get_mut(i) {
+                    *n = (*n).max(cell_width(c.as_str()));
                 }
             }
             // Combined colorer: the whole row takes a k9s-style status tint
@@ -726,49 +743,70 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let widths: Vec<Constraint> = headers
+    // Content-aware column widths (#166): every column asks for its widest
+    // visible value, the rules below bound or weight that ask, and
+    // `distribute_column_widths` splits the frame. A `Fill`-style layout is
+    // deliberately avoided — it hands NAME padding it doesn't need while a
+    // long EXTERNAL-IP next to it gets silently trimmed.
+    let col_rules: Vec<(ColWidth, u16)> = headers
         .iter()
         .enumerate()
         .filter(|(i, _)| col_visible(*i))
         .map(|(i, h)| {
             // A custom column's configured width wins over the curated rules.
-            if let Some(w) = i
+            let rule = if let Some(w) = i
                 .checked_sub(ns_off)
                 .and_then(|si| app.view_spec().width_at(si))
             {
-                return Constraint::Length(w);
-            }
-            match h.as_str() {
-                // NAME is the column you actually read — give it most of the
-                // remaining space so long pod/deployment names don't truncate
-                // while NODE (a full GKE node name) crowds it out.
-                "NAME" => Constraint::Fill(6),
-                "NAMESPACE" => Constraint::Fill(2),
-                "NODE" | "CLAIM" | "VOLUME" | "HOSTS" => Constraint::Fill(1),
-                "AGE" => Constraint::Length(7),
-                "CPU" | "MEM" => Constraint::Length(8),
-                "%CPU" | "%MEM" => Constraint::Length(5),
-                "PODS" => Constraint::Length(5),
-                // Wide enough for the long pod reasons (ContainerCreating,
-                // CrashLoopBackOff, ImagePullBackOff…) so status is never clipped.
-                "STATUS" => Constraint::Length(19),
-                "READY" | "RESTARTS" => Constraint::Length(10),
-                // CRD view: group domains run long (e.g.
-                // "kustomize.toolkit.fluxcd.io"), so give GROUP/KIND/VERSIONS a
-                // fixed floor wide enough that real-world values don't clip —
-                // Fill(1) alongside NAME's Fill(6) would crush them.
-                "GROUP" => Constraint::Length(30),
-                "KIND" => Constraint::Length(20),
-                "VERSIONS" => Constraint::Length(20),
-                "SCOPE" => Constraint::Length(12),
-                // Flux views: the Ready condition message and git/chart revision
-                // are the columns you read — split the leftover space with NAME.
-                "MESSAGE" => Constraint::Fill(4),
-                "REVISION" => Constraint::Fill(2),
-                "SUSPENDED" => Constraint::Length(9),
-                _ => Constraint::Fill(1),
-            }
+                ColWidth::Exact(w)
+            } else {
+                match h.as_str() {
+                    // NAME is the column you actually read — its weight takes
+                    // most of a wide window's surplus, and most of the shared
+                    // space when the window can't fit everything.
+                    "NAME" => ColWidth::Flex(6),
+                    "NAMESPACE" => ColWidth::Flex(2),
+                    "NODE" | "CLAIM" | "VOLUME" | "HOSTS" => ColWidth::Flex(1),
+                    "AGE" => ColWidth::Cap(7),
+                    // Volatile numerics keep a fixed width so a metrics tick
+                    // never reflows the whole table.
+                    "CPU" | "MEM" => ColWidth::Exact(8),
+                    "%CPU" | "%MEM" => ColWidth::Exact(5),
+                    "PODS" => ColWidth::Exact(5),
+                    // Caps, not fixed: room for the long pod reasons
+                    // (ContainerCreating, CrashLoopBackOff…) when they occur,
+                    // shrink to the visible values when they don't.
+                    "STATUS" => ColWidth::Cap(19),
+                    "READY" | "RESTARTS" => ColWidth::Cap(10),
+                    // CRD view: group domains run long (e.g.
+                    // "kustomize.toolkit.fluxcd.io"), so GROUP/KIND/VERSIONS
+                    // get generous ceilings NAME's weight can't crush.
+                    "GROUP" => ColWidth::Cap(30),
+                    "KIND" | "VERSIONS" => ColWidth::Cap(20),
+                    "SCOPE" => ColWidth::Cap(12),
+                    // Flux views: the Ready condition message and git/chart
+                    // revision are the columns you read — they split the
+                    // leftover space with NAME.
+                    "MESSAGE" => ColWidth::Flex(4),
+                    "REVISION" => ColWidth::Flex(2),
+                    "SUSPENDED" => ColWidth::Cap(9),
+                    _ => ColWidth::Flex(1),
+                }
+            };
+            (rule, needed[i])
         })
+        .collect();
+    // Mirror the Table widget's fixed overhead: borders, the always-reserved
+    // 2-cell highlight symbol, and the 2-cell spacing between columns.
+    let ncols = col_rules.len() as u16;
+    let content_budget = area
+        .width
+        .saturating_sub(2)
+        .saturating_sub(2)
+        .saturating_sub(2 * ncols.saturating_sub(1));
+    let widths: Vec<Constraint> = distribute_column_widths(content_budget, &col_rules)
+        .into_iter()
+        .map(Constraint::Length)
         .collect();
 
     let kind_label = app.list_title();
@@ -868,6 +906,103 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
         );
 
     frame.render_stateful_widget(table, area, &mut render_state);
+}
+
+/// How a table column's width is decided when splitting the frame (#166).
+enum ColWidth {
+    /// User-configured width, honored exactly.
+    Exact(u16),
+    /// Sized to the widest visible value, never above the cap.
+    Cap(u16),
+    /// Sized to the widest visible value when it fits; surplus and deficit
+    /// are shared between Flex columns proportionally to the weight.
+    Flex(u16),
+}
+
+/// Display width of a table cell in terminal columns.
+fn cell_width(s: &str) -> u16 {
+    u16::try_from(s.width()).unwrap_or(u16::MAX)
+}
+
+/// Split `budget` cells across columns. Exact/Cap columns take their width
+/// first; each Flex column then gets its full content width whenever its
+/// weight-share covers it (a waterfall, so a short NAME frees space for a
+/// long EXTERNAL-IP), and the final surplus or deficit is shared by weight.
+/// Padding is always trimmed before data.
+fn distribute_column_widths(budget: u16, cols: &[(ColWidth, u16)]) -> Vec<u16> {
+    let mut widths: Vec<u16> = cols
+        .iter()
+        .map(|(rule, needed)| match rule {
+            ColWidth::Exact(w) => *w,
+            ColWidth::Cap(cap) => (*needed).min(*cap),
+            ColWidth::Flex(_) => 0,
+        })
+        .collect();
+    let fixed: u32 = widths.iter().map(|&w| u32::from(w)).sum();
+    let mut left = u32::from(budget).saturating_sub(fixed);
+
+    let flex: Vec<(usize, u32, u32)> = cols
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (rule, needed))| match rule {
+            ColWidth::Flex(w) => Some((i, u32::from(*w), u32::from(*needed))),
+            _ => None,
+        })
+        .collect();
+
+    // Waterfall: grant the full content width to any column whose weight-share
+    // covers it, then let the freed remainder raise the others' shares.
+    let mut unsat = flex.clone();
+    loop {
+        let total: u32 = unsat.iter().map(|&(_, w, _)| w).sum();
+        if total == 0 {
+            break;
+        }
+        let Some(p) = unsat
+            .iter()
+            .position(|&(_, w, need)| left * w / total >= need)
+        else {
+            break;
+        };
+        let (i, _, need) = unsat.swap_remove(p);
+        widths[i] = need as u16;
+        left -= need;
+    }
+
+    if unsat.is_empty() {
+        // Everyone fits: spread the surplus by weight so NAME still takes the
+        // lion's share of a wide window.
+        share_by_weight(left, &flex, &mut widths);
+    } else {
+        // Deficit: the columns that can't be satisfied split what's left by
+        // weight — exactly the old Fill behavior, but only once padding is
+        // already gone.
+        share_by_weight(left, &unsat, &mut widths);
+    }
+    widths
+}
+
+/// Add `left` extra cells to `widths` proportionally to each column's weight,
+/// handing out the integer-division remainder one cell at a time.
+fn share_by_weight(mut left: u32, cols: &[(usize, u32, u32)], widths: &mut [u16]) {
+    let total: u32 = cols.iter().map(|&(_, w, _)| w).sum();
+    if total == 0 {
+        return;
+    }
+    let budget = left;
+    for &(i, w, _) in cols {
+        let share = budget * w / total;
+        widths[i] = widths[i].saturating_add(share as u16);
+        left -= share;
+    }
+    // remainder < cols.len(), so a single pass hands it all out.
+    for &(i, _, _) in cols {
+        if left == 0 {
+            break;
+        }
+        widths[i] = widths[i].saturating_add(1);
+        left -= 1;
+    }
 }
 
 /// `true` when a `n/m` READY cell has every container ready. Cells that
@@ -3336,6 +3471,61 @@ fn centered_rect_with_min(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deficit: a Flex column whose content fits inside its weight-share takes
+    /// only what it needs — the padding it would have hoarded under a pure
+    /// Fill split goes to the column that's actually starved (#166).
+    #[test]
+    fn width_deficit_trims_padding_before_data() {
+        // NAME needs 10 but weighs 6; EXTERNAL-IP needs 15 and weighs 1.
+        let cols = [
+            (ColWidth::Flex(6), 10),
+            (ColWidth::Flex(1), 15),
+            (ColWidth::Cap(7), 3),
+        ];
+        let widths = distribute_column_widths(28, &cols);
+        // 28 - AGE(3) = 25 for the flex pair: NAME's share (25*6/7 = 21)
+        // covers its 10, so EXTERNAL-IP gets the remaining 15 in full.
+        assert_eq!(widths, vec![10, 15, 3]);
+    }
+
+    /// Surplus: everyone gets their content width, then the leftover spreads
+    /// by weight so NAME still dominates a wide window.
+    #[test]
+    fn width_surplus_spreads_by_weight() {
+        let cols = [(ColWidth::Flex(6), 10), (ColWidth::Flex(2), 5)];
+        let widths = distribute_column_widths(55, &cols);
+        // 55 - 15 needed = 40 surplus → 30/10 by weight.
+        assert_eq!(widths, vec![40, 15]);
+        assert_eq!(widths.iter().map(|&w| u32::from(w)).sum::<u32>(), 55);
+    }
+
+    /// A genuinely too-narrow window falls back to weight shares for the
+    /// unsatisfiable columns — the old Fill behavior, minus the padding.
+    #[test]
+    fn width_hard_deficit_shares_by_weight() {
+        let cols = [(ColWidth::Flex(6), 100), (ColWidth::Flex(1), 100)];
+        let widths = distribute_column_widths(21, &cols);
+        assert_eq!(widths, vec![18, 3]);
+    }
+
+    /// Exact widths are honored verbatim; caps shrink to content but never
+    /// grow past the ceiling.
+    #[test]
+    fn width_exact_and_cap_rules() {
+        let cols = [
+            (ColWidth::Exact(12), 3),
+            (ColWidth::Cap(19), 7),
+            (ColWidth::Cap(19), 25),
+            (ColWidth::Flex(1), 5),
+        ];
+        let widths = distribute_column_widths(60, &cols);
+        assert_eq!(widths[0], 12, "user width kept even when content is short");
+        assert_eq!(widths[1], 7, "cap shrinks to the widest visible value");
+        assert_eq!(widths[2], 19, "cap still bounds long content");
+        // Flex takes its 5 plus the whole surplus (60 - 12 - 7 - 19 = 22).
+        assert_eq!(widths[3], 22);
+    }
 
     /// `set_background(true)` fills the whole frame — including cells no widget
     /// draws on and popup regions cleared by `Clear` — with the skin's `base`,
