@@ -2958,6 +2958,51 @@ async fn container_picker_renders_qos_and_utilization() {
 }
 
 #[tokio::test]
+async fn narrow_window_keeps_full_external_ip_visible() {
+    // #166: with `Fill`-weighted widths, NAME hoarded padding on narrow
+    // windows while EXTERNAL-IP was silently trimmed. Content-aware widths
+    // must show the whole IP whenever the frame can fit every column's
+    // widest value.
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {"type": "LoadBalancer", "clusterIP": "10.0.0.1",
+                     "ports": [{"port": 80, "protocol": "TCP"}]},
+            "status": {"loadBalancer": {"ingress": [{"ip": "203.0.113.219"}]}}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    let mut term = Terminal::new(TestBackend::new(70, 20)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let buffer = term.backend().buffer().clone();
+    let screen: String = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        screen.contains("203.0.113.219"),
+        "external IP trimmed in:\n{screen}"
+    );
+    assert!(
+        screen.contains("LoadBalancer"),
+        "type column trimmed in:\n{screen}"
+    );
+}
+
+#[tokio::test]
 async fn logs_keep_view_and_restore_selection() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
