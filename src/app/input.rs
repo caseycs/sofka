@@ -809,7 +809,7 @@ impl App {
             }
         }
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.label.cmp(&b.1.label)));
+        rank_completions(&mut scored, |s| s.label.as_str(), !q.is_empty());
         self.cmd_suggestions = scored.into_iter().take(100).map(|(_, s)| s).collect();
         self.cmd_sel = 0;
     }
@@ -838,7 +838,7 @@ impl App {
             };
             scored.push((score, n));
         }
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        rank_completions(&mut scored, |s| s.as_str(), !arg.is_empty());
         self.cmd_suggestions = scored
             .into_iter()
             .take(100)
@@ -864,7 +864,7 @@ impl App {
             };
             scored.push((score, c.clone()));
         }
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        rank_completions(&mut scored, |s| s.as_str(), !arg.is_empty());
         self.cmd_suggestions = scored
             .into_iter()
             .take(100)
@@ -1383,4 +1383,25 @@ fn plugin_flash(name: &str, n: usize, suffix: &str) -> String {
     } else {
         format!("plugin: {name}{suffix}…")
     }
+}
+
+/// Order scored palette completions: score descending, then label length,
+/// then alphabetical. Skim scores only the matched characters — unmatched
+/// trailing ones cost nothing — so short queries tie constantly (`serv`
+/// scores `services` and `serviceaccounts` identically; issue #164), and a
+/// purely alphabetical tie-break buried the shorter, denser match. Browse
+/// lists (empty query: everything ties at one score) skip the length
+/// tie-break so they stay alphabetical.
+fn rank_completions<T>(scored: &mut [(i64, T)], label: fn(&T) -> &str, by_len: bool) {
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| {
+                if by_len {
+                    label(&a.1).len().cmp(&label(&b.1).len())
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then_with(|| label(&a.1).cmp(label(&b.1)))
+    });
 }

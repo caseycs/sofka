@@ -113,6 +113,34 @@ async fn exact_alias_outranks_fuzzy_suggestions() {
 }
 
 #[tokio::test]
+async fn shorter_label_wins_fuzzy_score_ties() {
+    // Issue #164: skim scores only the matched characters, so `serv` scores
+    // `services` and `serviceaccounts` identically; the alphabetical
+    // tie-break buried `services`. Shorter label (denser match) wins ties.
+    let (mut app, _rx) = test_app();
+    app.cluster
+        .catalog
+        .extend(["serviceaccounts", "servicemonitors"].map(str::to_string));
+    app.cluster.catalog.sort();
+
+    app.command = "serv".into();
+    app.update_suggestions();
+    assert_eq!(app.cmd_suggestions[0].label, "services");
+
+    // The empty browse list stays purely alphabetical.
+    app.command.clear();
+    app.update_suggestions();
+    let labels: Vec<_> = app
+        .cmd_suggestions
+        .iter()
+        .map(|s| s.label.as_str())
+        .collect();
+    let mut sorted = labels.clone();
+    sorted.sort_unstable();
+    assert_eq!(labels, sorted);
+}
+
+#[tokio::test]
 async fn explicit_palette_search_bypasses_rbac_filter() {
     let (mut app, _rx) = test_app();
     app.cluster
