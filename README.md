@@ -55,8 +55,9 @@ Every [release](https://github.com/nklmilojevic/sofka/releases) ships prebuilt
 binaries for macOS (aarch64/x86_64) and Linux (aarch64/x86_64).
 
 ```sh
-nix run github:nklmilojevic/sofka   # Nix, nothing to install
-cargo install sofka                 # Cargo
+brew install nklmilojevic/sofka/sofka   # Homebrew (macOS/Linux)
+nix run github:nklmilojevic/sofka       # Nix, nothing to install
+cargo install sofka                     # Cargo
 ```
 
 Or build from source: `cargo build --release` (see
