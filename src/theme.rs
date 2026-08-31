@@ -462,15 +462,17 @@ pub fn accent() -> Style {
 pub fn status_color(s: &str) -> Color {
     match s {
         "Running" | "Ready" | "Active" | "Bound" | "True" | "deployed" => green(),
-        // Faded, not "healthy green" — a finished pod isn't running.
-        "Succeeded" | "Completed" | "superseded" | "uninstalled" => overlay0(),
+        // Faded, not "healthy green" — a finished pod isn't running, and a
+        // scaled-to-zero workload isn't serving.
+        "Succeeded" | "Completed" | "superseded" | "uninstalled" | "ScaledDown" => overlay0(),
         "Pending" | "ContainerCreating" | "PodInitializing" | "Progressing" | "pending-install"
         | "pending-upgrade" | "pending-rollback" => yellow(),
         // Matches row_color's killColor — a distinct "on its way out" hue,
         // not the same bucket as Pending.
         "Terminating" | "uninstalling" => mauve(),
         "Failed" | "Error" | "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull"
-        | "Evicted" | "OOMKilled" | "NotReady" | "False" | "failed" => red(),
+        | "Evicted" | "OOMKilled" | "NotReady" | "False" | "failed" | "Degraded"
+        | "Unavailable" | "Stalled" => red(),
         "Unknown" | "" | "unknown" => overlay1(),
         _ => text(),
     }
@@ -489,10 +491,11 @@ pub fn status_color(s: &str) -> Color {
 pub fn row_color(s: &str) -> Color {
     match s {
         "Failed" | "Error" | "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull"
-        | "Evicted" | "OOMKilled" | "NotReady" | "Unhealthy" | "False" | "failed" => red(),
+        | "Evicted" | "OOMKilled" | "NotReady" | "Unhealthy" | "False" | "failed" | "Degraded"
+        | "Unavailable" | "Stalled" => red(),
         "Pending" | "ContainerCreating" | "PodInitializing" | "Progressing" | "pending-install"
         | "pending-upgrade" | "pending-rollback" => peach(),
-        "Completed" | "Succeeded" | "superseded" | "uninstalled" => overlay0(),
+        "Completed" | "Succeeded" | "superseded" | "uninstalled" | "ScaledDown" => overlay0(),
         // k9s killColor — terminating/deleting rows.
         "Terminating" | "uninstalling" => mauve(),
         _ => blue(),
