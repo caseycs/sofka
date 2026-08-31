@@ -110,6 +110,23 @@ jobs:
       - name: Upload release assets
         run: gh release upload "$RELEASE_TAG" dist/*.tar.gz --clobber
 
+  # Kick the tap's bump workflow so `brew install nklmilojevic/sofka/sofka`
+  # picks up the new version immediately instead of waiting for the tap's
+  # 6-hourly cron (which stays as the fallback). Needs TAP_GITHUB_TOKEN, a
+  # fine-grained PAT scoped to homebrew-sofka with Actions read/write.
+  homebrew-bump:
+    needs: upload-assets
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Dispatch tap bump
+        run: |
+          gh workflow run bump.yaml \
+            -R nklmilojevic/homebrew-sofka \
+            -f tag="$RELEASE_TAG"
+
   crates-publish:
     needs: upload-assets
     runs-on: ubuntu-latest
