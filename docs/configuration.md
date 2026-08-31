@@ -31,7 +31,7 @@ dep = "deployments"
 # name omitted: auto-detects dark/light and picks catppuccin-mocha/-latte.
 # Or pick one explicitly: catppuccin-mocha, -latte, -frappe, -macchiato,
 # gruvbox-dark, gruvbox-light, nord, dracula, solarized-dark, solarized-light,
-# tokyo-night, one-dark, rose-pine, monokai.
+# tokyo-night, one-dark, rose-pine, monokai, flexoki-dark, flexoki-light.
 name = "gruvbox-dark"
 background = true        # fill views with the skin's own background swatch
                          # (default: false = inherit the terminal background)
