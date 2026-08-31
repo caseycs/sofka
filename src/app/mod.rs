@@ -1015,6 +1015,12 @@ pub struct App {
     /// Where fleet marks persist (`<state-dir>/fleet.toml`, set at startup);
     /// `None` (tests) keeps them in memory only.
     pub fleet_marks_path: Option<std::path::PathBuf>,
+    /// Remembered sort per kind (`S`/`I`/header click), restored on every
+    /// view start. Persisted to `sort_memory_path` on every change.
+    pub sort_memory: crate::sortmem::SortMemory,
+    /// Where remembered sorts persist (`<state-dir>/sort.toml`, set at
+    /// startup); `None` (tests) keeps them in memory only.
+    pub sort_memory_path: Option<std::path::PathBuf>,
     /// Global fuzzy-find (`:find`) results and picker cursor.
     pub find_items: Vec<crate::store::FindItem>,
     pub find_state: ListState,
@@ -1276,6 +1282,8 @@ impl App {
             fleet_state: ListState::default(),
             fleet_marks: crate::fleet::FleetMarks::default(),
             fleet_marks_path: None,
+            sort_memory: crate::sortmem::SortMemory::default(),
+            sort_memory_path: None,
             find_items: Vec::new(),
             find_state: ListState::default(),
             find_query: String::new(),

@@ -241,6 +241,7 @@ impl App {
         self.sort_picker_filter.clear();
         if entry == DEFAULT_SORT_LABEL {
             self.reset_sort();
+            self.remember_sort();
             self.invalidate_rows();
             self.flash = format!("sort by {DEFAULT_SORT_LABEL}");
             self.flash_err = false;
@@ -252,6 +253,7 @@ impl App {
         self.sort_desc = self.sort_column == Some(idx) && !self.sort_desc;
         self.sort_column = Some(idx);
         self.invalidate_rows();
+        self.remember_sort();
         self.flash = format!(
             "sort by {entry} {}",
             if self.sort_desc {

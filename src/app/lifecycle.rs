@@ -278,6 +278,9 @@ impl App {
             self.table_state.select(Some(0));
         }
         self.refresh_view_spec();
+        // The remembered per-kind sort wins over a view's configured initial
+        // sort: the memory *is* the user's last explicit choice for this kind.
+        self.apply_remembered_sort();
         self.apply_view_sort();
         self.maybe_fetch_printer_columns(&kind);
         let handle = self.cluster.spawn_watch(
@@ -717,6 +720,9 @@ impl App {
                 self.crd_views.insert(plural, *view);
                 if for_current {
                     self.refresh_view_spec();
+                    // A remembered sort on a printer column only becomes
+                    // resolvable now that the CRD's columns are known.
+                    self.apply_remembered_sort();
                 }
             }
             Msg::FindResults {

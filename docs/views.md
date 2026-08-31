@@ -9,7 +9,9 @@ lowercase kind. The most specific key wins.
 
 ```toml
 [views."cert-manager.io/v1/certificates"]
-sort = "EXPIRES:desc"     # initial sort column, ":asc" (default) or ":desc"
+sort = "EXPIRES:desc"     # initial sort column, ":asc" (default) or ":desc";
+                          # a sort you pick in the TUI (S/I/header click) is
+                          # remembered per kind and wins over this
 # replace = true          # replace the curated columns instead of overlaying
 
 [[views."cert-manager.io/v1/certificates".columns]]

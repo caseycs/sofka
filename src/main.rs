@@ -20,6 +20,7 @@ mod logfilter;
 mod providers;
 mod rightsize;
 mod snapshot;
+mod sortmem;
 mod store;
 mod text;
 mod theme;
@@ -175,6 +176,11 @@ async fn main() -> Result<()> {
     let fleet_marks_path = fleet::FleetMarks::default_path();
     app.fleet_marks = fleet::FleetMarks::load(&fleet_marks_path);
     app.fleet_marks_path = Some(fleet_marks_path);
+    // Remembered sort columns (`S`/`I`/header clicks) persist the same way,
+    // restored per kind on every view start.
+    let sort_memory_path = sortmem::SortMemory::default_path();
+    app.sort_memory = sortmem::SortMemory::load(&sort_memory_path);
+    app.sort_memory_path = Some(sort_memory_path);
     // Kubeconfig contexts are stable for the session; cache them once so the
     // palette can complete `:ctx <name>` without re-reading the file per keystroke.
     match Cluster::list_contexts() {
