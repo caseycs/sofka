@@ -65,6 +65,7 @@ const POD_COLUMNS: &[Column] = &[
 const DEPLOYMENT_COLUMNS: &[Column] = &[
     column("NAME", col_name),
     column("READY", col_deploy_ready),
+    status_column("STATUS", col_deploy_status),
     column("UP-TO-DATE", col_deploy_updated),
     column("AVAILABLE", col_deploy_available),
     column("AGE", col_age),
@@ -75,12 +76,14 @@ const REPLICASET_COLUMNS: &[Column] = &[
     column("DESIRED", col_rs_desired),
     column("CURRENT", col_rs_current),
     column("READY", col_rs_ready),
+    status_column("STATUS", col_rs_status),
     column("AGE", col_age),
 ];
 
 const STATEFULSET_COLUMNS: &[Column] = &[
     column("NAME", col_name),
     column("READY", col_sts_ready),
+    status_column("STATUS", col_sts_status),
     column("AGE", col_age),
 ];
 
@@ -90,6 +93,7 @@ const DAEMONSET_COLUMNS: &[Column] = &[
     column("CURRENT", col_ds_current),
     column("READY", col_ds_ready),
     column("AVAILABLE", col_ds_available),
+    status_column("STATUS", col_ds_status),
     column("AGE", col_age),
 ];
 
@@ -663,6 +667,147 @@ fn col_ds_ready(ctx: &CellContext<'_>) -> String {
 
 fn col_ds_available(ctx: &CellContext<'_>) -> String {
     iget(ctx.data, &["status", "numberAvailable"]).to_string()
+}
+
+fn col_deploy_status(ctx: &CellContext<'_>) -> String {
+    if ctx.obj.metadata.deletion_timestamp.is_some() {
+        return "Terminating".into();
+    }
+    workload_status(ctx.data, WorkloadCounts::deployment(ctx.data))
+}
+
+fn col_sts_status(ctx: &CellContext<'_>) -> String {
+    if ctx.obj.metadata.deletion_timestamp.is_some() {
+        return "Terminating".into();
+    }
+    workload_status(ctx.data, WorkloadCounts::statefulset(ctx.data))
+}
+
+fn col_rs_status(ctx: &CellContext<'_>) -> String {
+    if ctx.obj.metadata.deletion_timestamp.is_some() {
+        return "Terminating".into();
+    }
+    workload_status(ctx.data, WorkloadCounts::replicaset(ctx.data))
+}
+
+fn col_ds_status(ctx: &CellContext<'_>) -> String {
+    if ctx.obj.metadata.deletion_timestamp.is_some() {
+        return "Terminating".into();
+    }
+    workload_status(ctx.data, WorkloadCounts::daemonset(ctx.data))
+}
+
+/// The replica counts a workload's health is judged by, normalized across
+/// the four controller shapes (Deployment/StatefulSet/ReplicaSet count
+/// replicas; DaemonSet counts scheduled nodes).
+struct WorkloadCounts {
+    desired: i64,
+    current: i64,
+    ready: i64,
+    /// Replicas already on the current template revision — below `desired`
+    /// means a rollout is still replacing pods.
+    updated: i64,
+}
+
+impl WorkloadCounts {
+    fn deployment(d: &Value) -> Self {
+        WorkloadCounts {
+            // spec.replicas defaults to 1 when unset.
+            desired: iopt(d, &["spec", "replicas"]).unwrap_or(1),
+            current: iget(d, &["status", "replicas"]),
+            ready: iget(d, &["status", "readyReplicas"]),
+            updated: iget(d, &["status", "updatedReplicas"]),
+        }
+    }
+
+    fn statefulset(d: &Value) -> Self {
+        Self::deployment(d)
+    }
+
+    fn replicaset(d: &Value) -> Self {
+        WorkloadCounts {
+            desired: iopt(d, &["spec", "replicas"]).unwrap_or(1),
+            current: iget(d, &["status", "replicas"]),
+            ready: iget(d, &["status", "readyReplicas"]),
+            // ReplicaSets manage a single template revision; every replica
+            // they create is "updated" by definition.
+            updated: iget(d, &["status", "replicas"]),
+        }
+    }
+
+    fn daemonset(d: &Value) -> Self {
+        WorkloadCounts {
+            desired: iget(d, &["status", "desiredNumberScheduled"]),
+            current: iget(d, &["status", "currentNumberScheduled"]),
+            ready: iget(d, &["status", "numberReady"]),
+            updated: iget(d, &["status", "updatedNumberScheduled"]),
+        }
+    }
+}
+
+/// Rollout-health summary for workload kinds, derived from the object's own
+/// replica counts and conditions — the same evidence `X`/explain weighs, so
+/// a red row here and an `X` verdict never disagree. The strings feed the
+/// STATUS badge and the whole-row colorer (`theme::row_color`), which is how
+/// an unhealthy deployment reads red like k9s instead of uniformly blue:
+///
+/// - `Ready` — every desired replica is ready (healthy blue row)
+/// - `ScaledDown` — desired 0, nothing running (faded, like Completed)
+/// - `Unavailable` — desired > 0 but zero ready, or Available=False (red)
+/// - `Progressing` — a rollout/scale is actively replacing or creating
+///   pods (peach, transitional)
+/// - `Degraded` — fully rolled out yet pods aren't ready: crash loops,
+///   failing probes, unschedulable (red)
+/// - `Stalled` — the Progressing condition gave up
+///   (ProgressDeadlineExceeded) or ReplicaFailure is set (red)
+fn workload_status(d: &Value, c: WorkloadCounts) -> String {
+    if c.desired == 0 {
+        return if c.current == 0 {
+            "ScaledDown".into()
+        } else {
+            // Scale-to-zero still tearing pods down.
+            "Progressing".into()
+        };
+    }
+    if condition_is(d, "ReplicaFailure", "True")
+        || condition_reason(d, "Progressing") == Some("ProgressDeadlineExceeded")
+    {
+        return "Stalled".into();
+    }
+    if c.ready >= c.desired {
+        return if condition_is(d, "Available", "False") {
+            "Unavailable".into()
+        } else {
+            "Ready".into()
+        };
+    }
+    if c.ready == 0 {
+        return "Unavailable".into();
+    }
+    if c.updated < c.desired || c.current < c.desired {
+        return "Progressing".into();
+    }
+    "Degraded".into()
+}
+
+/// Status of the condition with type `ty` equals `status`; a missing
+/// condition never matches.
+fn condition_is(d: &Value, ty: &str, status: &str) -> bool {
+    condition(d, ty)
+        .and_then(|c| c.get("status"))
+        .and_then(Value::as_str)
+        == Some(status)
+}
+
+fn condition_reason<'a>(d: &'a Value, ty: &str) -> Option<&'a str> {
+    condition(d, ty)?.get("reason")?.as_str()
+}
+
+fn condition<'a>(d: &'a Value, ty: &str) -> Option<&'a Value> {
+    d.pointer("/status/conditions")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("type").and_then(Value::as_str) == Some(ty))
 }
 
 fn col_service_type(ctx: &CellContext<'_>) -> String {
@@ -1645,6 +1790,132 @@ mod tests {
         assert_eq!(cells[4], "10.0.0.5");
         assert_eq!(cells[5], "node-1");
         assert_eq!(status_idx, Some(2));
+    }
+
+    fn deploy(spec_replicas: i64, status: serde_json::Value) -> DynamicObject {
+        obj(json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default"},
+            "spec": {"replicas": spec_replicas},
+            "status": status
+        }))
+    }
+
+    #[test]
+    fn deployment_status_reflects_replica_health() {
+        // All ready → healthy.
+        let d = deploy(
+            3,
+            json!({"replicas": 3, "readyReplicas": 3, "updatedReplicas": 3}),
+        );
+        let (c, status_idx) = cells(&d, "deployments");
+        assert_eq!(c[1], "3/3");
+        assert_eq!(c[2], "Ready");
+        assert_eq!(status_idx, Some(2));
+
+        // Zero ready with replicas desired → unavailable (red).
+        let d = deploy(
+            3,
+            json!({"replicas": 3, "readyReplicas": 0, "updatedReplicas": 3}),
+        );
+        assert_eq!(cells(&d, "deployments").0[2], "Unavailable");
+
+        // Rollout replacing pods (updated < desired) → progressing.
+        let d = deploy(
+            3,
+            json!({"replicas": 4, "readyReplicas": 2, "updatedReplicas": 1}),
+        );
+        assert_eq!(cells(&d, "deployments").0[2], "Progressing");
+
+        // Fully rolled out but pods unready (crash loops, failed probes) →
+        // degraded, not "progressing" — nothing is coming to fix it.
+        let d = deploy(
+            3,
+            json!({"replicas": 3, "readyReplicas": 2, "updatedReplicas": 3}),
+        );
+        assert_eq!(cells(&d, "deployments").0[2], "Degraded");
+
+        // Scaled to zero reads faded, not broken.
+        let d = deploy(0, json!({}));
+        assert_eq!(cells(&d, "deployments").0[2], "ScaledDown");
+        // ... and still tearing down reads transitional.
+        let d = deploy(0, json!({"replicas": 2, "readyReplicas": 2}));
+        assert_eq!(cells(&d, "deployments").0[2], "Progressing");
+    }
+
+    #[test]
+    fn deployment_status_honors_conditions() {
+        // ProgressDeadlineExceeded → the rollout gave up.
+        let d = deploy(
+            3,
+            json!({
+                "replicas": 3, "readyReplicas": 1, "updatedReplicas": 3,
+                "conditions": [{"type": "Progressing", "status": "False",
+                                "reason": "ProgressDeadlineExceeded"}]
+            }),
+        );
+        assert_eq!(cells(&d, "deployments").0[2], "Stalled");
+
+        // Available=False overrides a numerically-satisfied ready count.
+        let d = deploy(
+            3,
+            json!({
+                "replicas": 3, "readyReplicas": 3, "updatedReplicas": 3,
+                "conditions": [{"type": "Available", "status": "False"}]
+            }),
+        );
+        assert_eq!(cells(&d, "deployments").0[2], "Unavailable");
+    }
+
+    #[test]
+    fn statefulset_daemonset_replicaset_status() {
+        let sts = obj(json!({
+            "apiVersion": "apps/v1", "kind": "StatefulSet",
+            "metadata": {"name": "db", "namespace": "default"},
+            "spec": {"replicas": 3},
+            "status": {"replicas": 3, "readyReplicas": 2, "updatedReplicas": 2}
+        }));
+        // Rolling update in flight (updated < desired) → progressing.
+        assert_eq!(cells(&sts, "statefulsets").0[2], "Progressing");
+
+        let ds = obj(json!({
+            "apiVersion": "apps/v1", "kind": "DaemonSet",
+            "metadata": {"name": "agent", "namespace": "default"},
+            "status": {"desiredNumberScheduled": 5, "currentNumberScheduled": 5,
+                       "numberReady": 3, "updatedNumberScheduled": 5}
+        }));
+        // Fully rolled out, nodes unready → degraded. STATUS follows AVAILABLE.
+        assert_eq!(cells(&ds, "daemonsets").0[5], "Degraded");
+
+        // An old, scaled-down ReplicaSet must read faded, not broken.
+        let rs = obj(json!({
+            "apiVersion": "apps/v1", "kind": "ReplicaSet",
+            "metadata": {"name": "web-abc", "namespace": "default"},
+            "spec": {"replicas": 0},
+            "status": {"replicas": 0}
+        }));
+        assert_eq!(cells(&rs, "replicasets").0[4], "ScaledDown");
+
+        // spec.replicas unset defaults to 1 — a bare RS with one ready pod
+        // is healthy, not degraded.
+        let rs = obj(json!({
+            "apiVersion": "apps/v1", "kind": "ReplicaSet",
+            "metadata": {"name": "web-abc", "namespace": "default"},
+            "status": {"replicas": 1, "readyReplicas": 1}
+        }));
+        assert_eq!(cells(&rs, "replicasets").0[4], "Ready");
+    }
+
+    #[test]
+    fn terminating_workload_reads_terminating() {
+        let d = obj(json!({
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "web", "namespace": "default",
+                         "deletionTimestamp": "2024-01-01T00:00:00Z"},
+            "spec": {"replicas": 3},
+            "status": {"replicas": 3, "readyReplicas": 3, "updatedReplicas": 3}
+        }));
+        assert_eq!(cells(&d, "deployments").0[2], "Terminating");
     }
 
     #[test]

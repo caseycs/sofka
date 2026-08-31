@@ -73,6 +73,12 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
 - **Configurable thresholds** for the RESTARTS/CPU/MEM/request-limit coloring,
   globally and per resource and per context. See
   [Views and thresholds](views.md#thresholds).
+- **Workload health at a glance** - Deployments, StatefulSets, DaemonSets, and
+  ReplicaSets carry a STATUS column derived from their replica counts and
+  conditions (`Ready`, `Progressing`, `Degraded`, `Unavailable`, `Stalled`,
+  `ScaledDown`, `Terminating`), and the whole row is tinted by it - so a
+  workload whose pods are crashing or whose desired replicas aren't met reads
+  red/peach in the list, like k9s, instead of looking uniformly healthy.
 - **Explain-unhealthy view** (`X` / `:explain`) - a deterministic, evidence-based
   explanation of why the selection is unhealthy: rollout state, degraded
   conditions, blocking pods and their container failure reasons
