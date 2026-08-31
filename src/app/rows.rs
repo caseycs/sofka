@@ -427,6 +427,9 @@ impl App {
     pub(super) fn toggle_wide(&mut self) {
         self.wide = !self.wide;
         self.refresh_view_spec();
+        // A remembered sort on a wide-only column comes back the moment its
+        // column does.
+        self.apply_remembered_sort();
         self.flash = format!("wide columns: {}", if self.wide { "on" } else { "off" });
         self.flash_err = false;
     }
@@ -563,6 +566,51 @@ impl App {
         self.sort_desc = false;
     }
 
+    /// Record the active sort for the current kind (and persist it), so the
+    /// choice survives view switches and restarts. Called after every user
+    /// sort change; with no active sort (the picker's default entry) the
+    /// kind's entry is forgotten instead. View switches call `reset_sort`
+    /// directly and must NOT land here — a switch isn't a sort choice.
+    pub(super) fn remember_sort(&mut self) {
+        if self.kind_plural.is_empty() {
+            return;
+        }
+        let kind = self.kind_plural.clone();
+        match self
+            .sort_column
+            .and_then(|i| self.display_headers().get(i).cloned())
+        {
+            Some(h) => self.sort_memory.set(&kind, &h, self.sort_desc),
+            None if self.sort_memory.clear(&kind) => {}
+            None => return, // nothing was remembered; skip the disk write
+        }
+        if let Some(path) = self.sort_memory_path.clone()
+            && let Err(e) = self.sort_memory.save(&path)
+        {
+            self.flash_warn(&format!("failed to save sort state: {e}"));
+        }
+    }
+
+    /// Restore the remembered sort for the current kind, unless a sort is
+    /// already active (a bookmark's sort spec, or a header repinned across a
+    /// spec refresh, must win). A remembered header missing from the current
+    /// layout is left in memory untouched: CRD printer columns arrive after
+    /// the watch starts (see `Msg::PrinterColumns`, which retries this), and
+    /// a wide-only column simply stays dormant until `w`.
+    pub(super) fn apply_remembered_sort(&mut self) {
+        if self.sort_column.is_some() {
+            return;
+        }
+        let Some((header, desc)) = self.sort_memory.get(&self.kind_plural) else {
+            return;
+        };
+        if let Some(i) = self.display_headers().iter().position(|h| *h == header) {
+            self.sort_column = Some(i);
+            self.sort_desc = desc;
+            self.invalidate_rows();
+        }
+    }
+
     /// Toggle ascending/descending for the active sort column (k9s `I`).
     pub(super) fn toggle_sort_dir(&mut self) {
         let Some(i) = self.sort_column else {
@@ -571,6 +619,7 @@ impl App {
         };
         self.sort_desc = !self.sort_desc;
         self.invalidate_rows();
+        self.remember_sort();
         let label = self.display_headers().get(i).cloned().unwrap_or_default();
         self.flash = format!(
             "sort by {label} {}",

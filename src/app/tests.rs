@@ -2515,6 +2515,63 @@ async fn sort_picker_picks_toggles_and_clears() {
 }
 
 #[tokio::test]
+async fn sort_choice_is_remembered_per_kind_across_view_switches() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+
+    // Pick RESTARTS via the picker, then invert with `I`.
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    for c in "rst".chars() {
+        app.handle_key(press(KeyCode::Char(c))).unwrap();
+    }
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    app.handle_key(press(KeyCode::Char('I'))).unwrap();
+    let restarts = app.display_headers().iter().position(|h| h == "RESTARTS");
+    assert_eq!(app.sort_column, restarts);
+    assert!(app.sort_desc);
+    assert_eq!(app.sort_memory.get("pods"), Some(("RESTARTS".into(), true)));
+
+    // A kind with no memory starts unsorted; the pods memory is untouched.
+    app.switch_kind("deployments");
+    assert_eq!(app.sort_column, None);
+    assert_eq!(app.sort_memory.get("pods"), Some(("RESTARTS".into(), true)));
+
+    // Coming back restores column and direction.
+    app.switch_kind("pods");
+    assert_eq!(
+        app.sort_column,
+        app.display_headers().iter().position(|h| h == "RESTARTS")
+    );
+    assert!(app.sort_desc);
+
+    // A header click is remembered too.
+    app.switch_kind("deployments");
+    let ready = app
+        .display_headers()
+        .iter()
+        .position(|h| h == "READY")
+        .unwrap();
+    app.sort_column = Some(ready);
+    app.sort_desc = false;
+    app.remember_sort();
+    assert_eq!(
+        app.sort_memory.get("deployments"),
+        Some(("READY".into(), false))
+    );
+
+    // Picking the pinned default forgets the kind's memory.
+    app.switch_kind("pods");
+    app.handle_key(press(KeyCode::Char('S'))).unwrap();
+    app.sort_picker_state.select(Some(0));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.sort_column, None);
+    assert_eq!(app.sort_memory.get("pods"), None);
+    app.switch_kind("deployments");
+    app.switch_kind("pods");
+    assert_eq!(app.sort_column, None);
+}
+
+#[tokio::test]
 async fn sort_picker_esc_clears_filter_then_closes() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

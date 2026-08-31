@@ -106,6 +106,7 @@ impl App {
                 self.sort_desc = false;
             }
             self.invalidate_rows();
+            self.remember_sort();
             let label = self.display_headers().get(idx).cloned().unwrap_or_default();
             self.flash = format!(
                 "sort by {label} {}",
