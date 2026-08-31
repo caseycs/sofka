@@ -966,6 +966,11 @@ impl App {
             KeyCode::Char('c') if detail => {
                 self.copy_doc();
             }
+            // `x` decodes the secret's data from inside its describe/YAML
+            // view too — no need to back out to the table first.
+            KeyCode::Char('x') if self.mode == Mode::Detail && self.kind_plural == "secrets" => {
+                self.show_decoded_secret();
+            }
             KeyCode::Char('j') | KeyCode::Down => target.scroll_by(1),
             KeyCode::Char('k') | KeyCode::Up => target.scroll_by(-1),
             KeyCode::Char('h') | KeyCode::Left => target.scroll_h(-5),

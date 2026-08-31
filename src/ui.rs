@@ -1966,7 +1966,10 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "/ · n/N",
             "search within YAML/describe/diff/events (highlight in place, n/N to jump); filters help",
         ),
-        bind("x", "secrets: show data base64-decoded"),
+        bind(
+            "x",
+            "secrets: show data base64-decoded (also inside YAML/describe)",
+        ),
         bind(
             "shift-x · :explain",
             "explain why the selection is unhealthy (evidence-backed)",
@@ -3299,7 +3302,12 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::Detail | Mode::Events | Mode::Diff => {
-            let hint = "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  n/N:next/prev  w:wrap  c:copy  esc:back";
+            // The `x` decode binding only applies to a secret's document view.
+            let hint = if app.mode == Mode::Detail && app.kind_plural == "secrets" {
+                "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  n/N:next/prev  w:wrap  c:copy  x:decode  esc:back"
+            } else {
+                "  j/k:scroll  h/l:← →  g/G:top/bottom  /:search  n/N:next/prev  w:wrap  c:copy  esc:back"
+            };
             Line::from(Span::styled(hint, theme::dim()))
         }
         Mode::Help => Line::from(Span::styled("  /:search  ?/esc:back", theme::dim())),

@@ -5309,6 +5309,38 @@ async fn x_decodes_secret_data_into_detail_view() {
 }
 
 #[tokio::test]
+async fn x_decodes_secret_from_inside_the_detail_view() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let (mut app, _rx) = test_app();
+    app.switch_kind("secrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Secret",
+        "metadata": {"name": "creds", "namespace": "default"},
+        "type": "Opaque",
+        "data": {"password": BASE64.encode("hunter2")}}),
+    );
+    app.table_state.select(Some(0));
+
+    // Open the YAML view (stands in for describe — same Mode::Detail), then
+    // decode from inside it without backing out to the table.
+    app.handle_key(press(KeyCode::Char('y'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.title.contains("YAML"), "{}", app.detail.title);
+    app.handle_key(press(KeyCode::Char('x'))).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.detail.title.contains("decoded"), "{}", app.detail.title);
+    let lines: Vec<&str> = app.detail.lines.iter().map(String::as_str).collect();
+    assert!(lines.contains(&"password: hunter2"), "{lines:?}");
+
+    // Esc still returns to where the original view was opened from.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
 async fn x_on_secret_without_data_warns() {
     let (mut app, _rx) = test_app();
     app.switch_kind("secrets");
