@@ -63,6 +63,13 @@ impl App {
     /// search and `c` copy work like every other single-document view.
     pub(super) fn open_decoded_secret(&mut self) {
         self.set_return_mode();
+        self.show_decoded_secret();
+    }
+
+    /// The decoded-secret view itself, without touching the return mode — the
+    /// in-document `x` binding lands here, so esc still returns to wherever
+    /// the describe/YAML view was opened from.
+    pub(super) fn show_decoded_secret(&mut self) {
         let Some(obj) = self.selected_ref() else {
             return;
         };
