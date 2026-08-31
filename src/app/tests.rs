@@ -1912,6 +1912,53 @@ async fn crd_plural_outranks_builtin_command() {
 }
 
 #[tokio::test]
+async fn palette_completion_keys_are_rebindable() {
+    let (mut app, _rx) = test_app();
+    let keys_cfg: crate::config::Config = toml::from_str(
+        r#"
+        [keys]
+        palette_next = "ctrl-n"
+        palette_prev = "ctrl-p"
+        palette_accept = ["ctrl-y", "enter"]
+    "#,
+    )
+    .unwrap();
+    let (palette_keys, warnings) = crate::config::compile_palette_keys(&keys_cfg.keys);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    app.palette_keys = palette_keys;
+
+    app.mode = Mode::Command;
+    app.update_suggestions();
+    assert!(app.cmd_suggestions.len() > 1);
+    assert_eq!(app.cmd_sel, 0);
+
+    // ctrl-n / ctrl-p move the highlight; the overridden tab/arrows don't.
+    app.key_command(ctrl(KeyCode::Char('n')));
+    assert_eq!(app.cmd_sel, 1);
+    app.key_command(press(KeyCode::Tab));
+    app.key_command(press(KeyCode::Down));
+    assert_eq!(app.cmd_sel, 1, "tab/down were overridden away");
+    app.key_command(ctrl(KeyCode::Char('p')));
+    assert_eq!(app.cmd_sel, 0);
+
+    // ctrl-y runs the command line exactly like enter does by default.
+    for c in "snapshots media".chars() {
+        app.key_command(press(KeyCode::Char(c)));
+    }
+    app.key_command(ctrl(KeyCode::Char('y')));
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.namespace, "media");
+
+    // Enter stays usable because the config listed it too.
+    app.mode = Mode::Command;
+    for c in "pods".chars() {
+        app.key_command(press(KeyCode::Char(c)));
+    }
+    app.key_command(press(KeyCode::Enter));
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
 async fn qualified_names_surface_without_doubling_the_list() {
     let (mut app, _rx) = test_app();
 

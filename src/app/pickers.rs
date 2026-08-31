@@ -702,6 +702,10 @@ impl App {
         plugin_warnings.extend(crate::config::bookmark_warnings(&self.bookmarks));
         plugin_warnings.extend(crate::config::workspace_warnings(&self.workspaces));
         plugin_warnings.extend(crate::config::guardrail_warnings(&self.guardrails));
+        let (palette_keys, key_warnings) =
+            crate::config::compile_palette_keys(&resolved.config.keys);
+        self.palette_keys = palette_keys;
+        plugin_warnings.extend(key_warnings);
         let (views, view_warnings) = crate::views::compile(&resolved.config.views);
         self.user_views = views;
         let (thresholds, threshold_warnings) =

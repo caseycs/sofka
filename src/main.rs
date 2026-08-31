@@ -210,6 +210,12 @@ async fn main() -> Result<()> {
         eprintln!("warning: {w}");
         config_warnings.push(w);
     }
+    let (palette_keys, key_warnings) = config::compile_palette_keys(&cfg.keys);
+    for w in key_warnings {
+        eprintln!("warning: {w}");
+        config_warnings.push(w);
+    }
+    app.palette_keys = palette_keys;
     let (user_views, view_warnings) = views::compile(&cfg.views);
     for w in &view_warnings {
         eprintln!("warning: {w}");

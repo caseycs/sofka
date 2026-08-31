@@ -444,98 +444,35 @@ impl App {
     }
 
     pub(super) fn key_command(&mut self, key: KeyEvent) {
+        // Configured completion chords win over everything else (including
+        // the shared line-editing chords), so a `[keys]` rebind like ctrl-w
+        // always does what the user asked. Defaults: tab/down, backtab/up,
+        // enter — see [`crate::config::PaletteKeys`].
+        if self.palette_keys.next.iter().any(|c| c.matches(&key)) {
+            if !self.cmd_suggestions.is_empty() {
+                self.cmd_sel = (self.cmd_sel + 1) % self.cmd_suggestions.len();
+            }
+            return;
+        }
+        if self.palette_keys.prev.iter().any(|c| c.matches(&key)) {
+            if !self.cmd_suggestions.is_empty() {
+                self.cmd_sel = self
+                    .cmd_sel
+                    .checked_sub(1)
+                    .unwrap_or(self.cmd_suggestions.len() - 1);
+            }
+            return;
+        }
+        if self.palette_keys.accept.iter().any(|c| c.matches(&key)) {
+            self.palette_accept();
+            return;
+        }
         if edit_chord(&key, &mut self.command) {
             self.update_suggestions();
             return;
         }
         match key.code {
             KeyCode::Esc => self.mode = self.palette_return,
-            KeyCode::Down | KeyCode::Tab => {
-                if !self.cmd_suggestions.is_empty() {
-                    self.cmd_sel = (self.cmd_sel + 1) % self.cmd_suggestions.len();
-                }
-            }
-            KeyCode::Up | KeyCode::BackTab => {
-                if !self.cmd_suggestions.is_empty() {
-                    self.cmd_sel = self
-                        .cmd_sel
-                        .checked_sub(1)
-                        .unwrap_or(self.cmd_suggestions.len() - 1);
-                }
-            }
-            KeyCode::Enter => {
-                let typed = self.command.trim().to_string();
-                let picked = self.cmd_suggestions.get(self.cmd_sel).cloned();
-                self.mode = Mode::Table;
-                self.command.clear();
-                // Dispatch leaves the view the palette was opened from behind,
-                // so run the cleanup its own esc path would have done.
-                match self.palette_return {
-                    Mode::Logs => self.stop_log_stream(),
-                    Mode::Events => self.stop_event_stream(),
-                    _ => {}
-                }
-                self.palette_return = Mode::Table;
-                // `:kind namespace` switches both at once (`:deploy social`,
-                // `:cephclusters all`); only the first word selects the kind.
-                let (head, ns_arg) = match typed.split_once(char::is_whitespace) {
-                    Some((h, rest)) => (h.to_string(), rest.split_whitespace().next()),
-                    None => (typed.clone(), None),
-                };
-                match picked.as_ref().map(|s| s.kind) {
-                    // Argument completions act on the highlighted suggestion:
-                    // apply the completed namespace/context, not the partial
-                    // text still in the buffer.
-                    Some(SuggestKind::Namespace) => {
-                        if let Some(s) = picked {
-                            self.switch_kind_ns(&head, Some(s.label.as_str()));
-                        }
-                    }
-                    Some(SuggestKind::Context) => {
-                        if let Some(s) = picked {
-                            self.switch_context(s.label);
-                        }
-                    }
-                    Some(SuggestKind::Bookmark) => {
-                        if let Some(s) = picked {
-                            self.apply_bookmark_named(&s.label);
-                        }
-                    }
-                    Some(SuggestKind::Workspace) => {
-                        if let Some(s) = picked {
-                            self.open_workspace_named(&s.label);
-                        }
-                    }
-                    // A name owned by a CRD resolves to the CRD even when a
-                    // built-in command shares it — the cluster's vocabulary
-                    // outranks ours, and the suggestion list already ranks the
-                    // resource first. After that an exact typed built-in wins
-                    // (stable muscle memory), then the highlighted suggestion,
-                    // then the raw text as a resource.
-                    _ => {
-                        let crd_owned = self.cluster.resolve(&head).is_some_and(|k| k.is_custom());
-                        if crd_owned {
-                            self.switch_kind_ns(&head, ns_arg);
-                        } else if self.run_palette_command(&typed) {
-                            // handled
-                        } else if let Some(s) = picked {
-                            match s.kind {
-                                SuggestKind::Command => {
-                                    self.run_palette_command(&s.label);
-                                }
-                                SuggestKind::Resource => self.switch_kind_ns(&s.label, ns_arg),
-                                // Handled by the outer match arms above.
-                                SuggestKind::Namespace
-                                | SuggestKind::Context
-                                | SuggestKind::Bookmark
-                                | SuggestKind::Workspace => {}
-                            }
-                        } else if !head.is_empty() {
-                            self.switch_kind_ns(&head, ns_arg);
-                        }
-                    }
-                }
-            }
             KeyCode::Backspace => {
                 self.command.pop();
                 self.update_suggestions();
@@ -545,6 +482,81 @@ impl App {
                 self.update_suggestions();
             }
             _ => {}
+        }
+    }
+
+    /// Run the highlighted palette suggestion (or the raw typed text).
+    fn palette_accept(&mut self) {
+        let typed = self.command.trim().to_string();
+        let picked = self.cmd_suggestions.get(self.cmd_sel).cloned();
+        self.mode = Mode::Table;
+        self.command.clear();
+        // Dispatch leaves the view the palette was opened from behind,
+        // so run the cleanup its own esc path would have done.
+        match self.palette_return {
+            Mode::Logs => self.stop_log_stream(),
+            Mode::Events => self.stop_event_stream(),
+            _ => {}
+        }
+        self.palette_return = Mode::Table;
+        // `:kind namespace` switches both at once (`:deploy social`,
+        // `:cephclusters all`); only the first word selects the kind.
+        let (head, ns_arg) = match typed.split_once(char::is_whitespace) {
+            Some((h, rest)) => (h.to_string(), rest.split_whitespace().next()),
+            None => (typed.clone(), None),
+        };
+        match picked.as_ref().map(|s| s.kind) {
+            // Argument completions act on the highlighted suggestion:
+            // apply the completed namespace/context, not the partial
+            // text still in the buffer.
+            Some(SuggestKind::Namespace) => {
+                if let Some(s) = picked {
+                    self.switch_kind_ns(&head, Some(s.label.as_str()));
+                }
+            }
+            Some(SuggestKind::Context) => {
+                if let Some(s) = picked {
+                    self.switch_context(s.label);
+                }
+            }
+            Some(SuggestKind::Bookmark) => {
+                if let Some(s) = picked {
+                    self.apply_bookmark_named(&s.label);
+                }
+            }
+            Some(SuggestKind::Workspace) => {
+                if let Some(s) = picked {
+                    self.open_workspace_named(&s.label);
+                }
+            }
+            // A name owned by a CRD resolves to the CRD even when a
+            // built-in command shares it — the cluster's vocabulary
+            // outranks ours, and the suggestion list already ranks the
+            // resource first. After that an exact typed built-in wins
+            // (stable muscle memory), then the highlighted suggestion,
+            // then the raw text as a resource.
+            _ => {
+                let crd_owned = self.cluster.resolve(&head).is_some_and(|k| k.is_custom());
+                if crd_owned {
+                    self.switch_kind_ns(&head, ns_arg);
+                } else if self.run_palette_command(&typed) {
+                    // handled
+                } else if let Some(s) = picked {
+                    match s.kind {
+                        SuggestKind::Command => {
+                            self.run_palette_command(&s.label);
+                        }
+                        SuggestKind::Resource => self.switch_kind_ns(&s.label, ns_arg),
+                        // Handled by the outer match arms above.
+                        SuggestKind::Namespace
+                        | SuggestKind::Context
+                        | SuggestKind::Bookmark
+                        | SuggestKind::Workspace => {}
+                    }
+                } else if !head.is_empty() {
+                    self.switch_kind_ns(&head, ns_arg);
+                }
+            }
         }
     }
 

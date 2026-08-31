@@ -1068,6 +1068,8 @@ pub struct App {
     pub forwards_cfg: Vec<crate::config::Forward>,
     /// `[notify]` delivery options (bell, desktop-notification protocol).
     pub notify_cfg: crate::config::NotifyConfig,
+    /// Compiled `[keys]` palette-completion bindings.
+    pub palette_keys: crate::config::PaletteKeys,
 
     pub skin_list: Vec<String>,
     pub skin_state: ListState,
@@ -1296,6 +1298,7 @@ impl App {
             port_forwards: Vec::new(),
             forwards_cfg: Vec::new(),
             notify_cfg: crate::config::NotifyConfig::default(),
+            palette_keys: crate::config::PaletteKeys::default(),
             pf_state: ListState::default(),
             skin_list: crate::theme::BUILTIN_NAMES
                 .iter()

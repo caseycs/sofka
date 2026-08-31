@@ -85,6 +85,24 @@ drill into has a trailing `→`.
 
 `ctrl-u` clears the line, `ctrl-w` / `alt-⌫` delete the previous word.
 
+## Palette completion keys
+
+In the `:` palette, `tab`/`↓` and `shift-tab`/`↑` move through the suggestion
+list and `⏎` runs the highlighted one. Rebind them under `[keys]` in
+`config.toml` — emacs/cmp style, for example:
+
+```toml
+[keys]
+palette_next   = "ctrl-n"
+palette_prev   = "ctrl-p"
+palette_accept = ["ctrl-y", "enter"]
+```
+
+Each value is one [key chord](plugins.md) or a list of chords, and replaces
+the default set for that action (`["tab", "down"]`, `["backtab", "up"]`,
+`["enter"]`) — include a default in the list to keep it too. `ctrl-c` (quit)
+and `ctrl-e` (compact mode) are reserved by built-ins and can't be bound.
+
 ## What suspends the TUI
 
 Interactive actions (`e`, `s` for shell, `a`) suspend the TUI and shell out to
