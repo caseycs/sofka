@@ -31,7 +31,8 @@ For measured start time, memory use, command start time, and binary size, see th
   CustomResourceDefinition resolves its served version and lists the actual
   objects.
 - **Skins, not one fixed palette.** Built-in Catppuccin, Gruvbox, Solarized,
-  Nord, Dracula, Tokyo Night, One Dark, Rosé Pine, and Monokai, picked in the
+  Nord, Dracula, Tokyo Night, One Dark, Rosé Pine, Monokai, and Flexoki, picked
+  in the
   config with a per-swatch hex override. With no skin configured, sofka detects a
   light or dark terminal background. Every semantic color (row status, severity
   badges, headers, borders) is derived from the active palette, so one skin

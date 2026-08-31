@@ -129,6 +129,8 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "one-dark",
     "rose-pine",
     "monokai",
+    "flexoki-dark",
+    "flexoki-light",
 ];
 
 /// Look up a built-in palette by name (case-insensitive; a few aliases). The
@@ -215,6 +217,21 @@ pub fn builtin(name: &str) -> Option<Palette> {
             "#31748f", "#31748f", "#9ccfd8", "#9ccfd8", "#9ccfd8", "#c4a7e7", "#e0def4", "#908caa",
             "#6e6a86", "#6e6a86", "#524f67", "#524f67", "#403d52", "#26233a", "#191724", "#191724",
             "#14121d",
+        ],
+        // Flexoki (https://stephango.com/flexoki): dark uses the 400 accents
+        // on the black/base-950..800 surface ramp, light the 600 accents on
+        // paper/base-50..200, per the palette's own theme role tables.
+        "flexoki" | "flexoki-dark" => [
+            "#E47DA8", "#CE5D97", "#CE5D97", "#8B7EC8", "#D14D41", "#AF3029", "#DA702C", "#D0A215",
+            "#879A39", "#3AA99F", "#5ABDAC", "#66A0C8", "#4385BE", "#A699D0", "#CECDC3", "#B7B5AC",
+            "#878580", "#6F6E69", "#575653", "#403E3C", "#343331", "#282726", "#100F0F", "#1C1B1A",
+            "#100F0F",
+        ],
+        "flexoki-light" => [
+            "#CE5D97", "#A02F6F", "#A02F6F", "#5E409D", "#AF3029", "#C03E35", "#BC5215", "#AD8301",
+            "#66800B", "#24837B", "#2F968D", "#3171B2", "#205EA6", "#735EB5", "#100F0F", "#575653",
+            "#6F6E69", "#878580", "#9F9D96", "#B7B5AC", "#CECDC3", "#DAD8CE", "#FFFCF0", "#F2F0E5",
+            "#E6E4D9",
         ],
         "monokai" => [
             "#f92672", "#f92672", "#f92672", "#ae81ff", "#f92672", "#f92672", "#fd971f", "#e6db74",
@@ -507,6 +524,20 @@ mod tests {
     fn mocha_base_matches_golden_swatch() {
         let p = builtin("catppuccin-mocha").unwrap();
         assert_eq!(p.base, Color::Rgb(30, 30, 46));
+    }
+
+    #[test]
+    fn flexoki_swatches_match_palette_spec() {
+        let dark = builtin("flexoki-dark").unwrap();
+        assert_eq!(dark.base, Color::Rgb(0x10, 0x0F, 0x0F)); // flexoki black
+        assert_eq!(dark.red, Color::Rgb(0xD1, 0x4D, 0x41)); // red-400
+        assert_eq!(dark.text, Color::Rgb(0xCE, 0xCD, 0xC3)); // base-200
+        // Bare "flexoki" aliases the dark variant.
+        assert_eq!(builtin("flexoki").unwrap().base, dark.base);
+        let light = builtin("flexoki-light").unwrap();
+        assert_eq!(light.base, Color::Rgb(0xFF, 0xFC, 0xF0)); // paper
+        assert_eq!(light.red, Color::Rgb(0xAF, 0x30, 0x29)); // red-600
+        assert_eq!(light.text, Color::Rgb(0x10, 0x0F, 0x0F)); // black
     }
 
     #[test]
