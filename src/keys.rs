@@ -72,6 +72,12 @@ impl KeyChord {
             shift = false;
         }
 
+        // Terminals deliver shift-tab as its own key, not tab+shift.
+        if let (true, KeyCode::Tab) = (shift, code) {
+            code = KeyCode::BackTab;
+            shift = false;
+        }
+
         Ok(KeyChord {
             code,
             ctrl,
@@ -97,6 +103,8 @@ impl KeyChord {
                     a == b
                 }
             }
+            // Terminals disagree on whether BackTab carries a SHIFT modifier.
+            (KeyCode::BackTab, KeyCode::BackTab) => true,
             (a, b) => a == b && self.shift == event.modifiers.contains(KeyModifiers::SHIFT),
         }
     }
@@ -134,6 +142,7 @@ fn parse_key(token: &str) -> Option<KeyCode> {
     Some(match lower.as_str() {
         "enter" | "return" | "ret" => KeyCode::Enter,
         "tab" => KeyCode::Tab,
+        "backtab" => KeyCode::BackTab,
         "esc" | "escape" => KeyCode::Esc,
         "space" => KeyCode::Char(' '),
         "backspace" | "bs" => KeyCode::Backspace,
@@ -158,6 +167,7 @@ fn key_label(code: KeyCode) -> String {
         KeyCode::F(n) => format!("f{n}"),
         KeyCode::Enter => "enter".into(),
         KeyCode::Tab => "tab".into(),
+        KeyCode::BackTab => "backtab".into(),
         KeyCode::Esc => "esc".into(),
         KeyCode::Backspace => "backspace".into(),
         KeyCode::Delete => "delete".into(),
@@ -280,6 +290,18 @@ mod tests {
         assert!(upper.matches(&ev(KeyCode::Char('B'), KeyModifiers::NONE)));
         // But not the lowercase.
         assert!(!upper.matches(&ev(KeyCode::Char('b'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn backtab_and_shift_tab_are_the_same_key() {
+        let named = KeyChord::parse("backtab").unwrap();
+        assert_eq!(named.code, KeyCode::BackTab);
+        assert_eq!(named, KeyChord::parse("shift-tab").unwrap());
+        assert_eq!(named.label(), "backtab");
+        // Terminals disagree on whether BackTab carries SHIFT — match both.
+        assert!(named.matches(&ev(KeyCode::BackTab, KeyModifiers::SHIFT)));
+        assert!(named.matches(&ev(KeyCode::BackTab, KeyModifiers::NONE)));
+        assert!(!named.matches(&ev(KeyCode::Tab, KeyModifiers::NONE)));
     }
 
     #[test]

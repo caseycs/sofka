@@ -1330,6 +1330,10 @@ impl App {
         warnings.extend(crate::config::guardrail_warnings(&self.guardrails));
         warnings.extend(crate::config::forward_warnings(&self.forwards_cfg));
         warnings.extend(crate::config::notify_warnings(&self.notify_cfg));
+        let (palette_keys, key_warnings) =
+            crate::config::compile_palette_keys(&resolved.config.keys);
+        self.palette_keys = palette_keys;
+        warnings.extend(key_warnings);
         // Thresholds only change cell coloring (never the column layout), so —
         // unlike custom views — they're safe to re-apply live without yanking
         // the current view.

@@ -2807,11 +2807,26 @@ fn draw_palette(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let mut state = ListState::default();
     state.select(Some(app.cmd_sel));
+    // The hint mirrors the user's `[keys]` rebinds (first chord of each
+    // action); the default set keeps its compact symbols.
+    let hint = if app.palette_keys.is_default() {
+        " commands & resources (tab/↑↓ · ⏎) ".to_string()
+    } else {
+        let first = |chords: &[crate::keys::KeyChord]| {
+            chords.first().map(|c| c.label()).unwrap_or_default()
+        };
+        format!(
+            " commands & resources ({}/{} · {}) ",
+            first(&app.palette_keys.next),
+            first(&app.palette_keys.prev),
+            first(&app.palette_keys.accept),
+        )
+    };
     render_framed_list(
         frame,
         rect,
         items,
-        Span::styled(" commands & resources (tab/↑↓ · ⏎) ", theme::title()),
+        Span::styled(hint, theme::title()),
         &mut state,
     );
 }

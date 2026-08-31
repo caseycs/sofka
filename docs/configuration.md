@@ -59,6 +59,7 @@ Each of these is documented where the feature itself is:
 | `[[guardrails]]`      | enforced rules on destructive actions       | [Safety](safety.md#guardrails)                             |
 | `[logs]`              | log tail, follow buffer, `since` lookback   | [Log controls](debugging.md#log-controls)                  |
 | `[notify]`            | bell and desktop notification delivery      | [Notifications](debugging.md#notifications)                |
+| `[keys]`              | palette completion key rebinds              | [Key reference](keys.md#palette-completion-keys)           |
 | `[debug]`             | ephemeral and node debug images             | [Debug containers](debugging.md#debug-containers-and-pods) |
 | `[bundle]`            | redaction and size caps for `:bundle`       | [Diagnostic bundles](debugging.md#diagnostic-bundles)      |
 | `[providers.metrics]` | Prometheus/VictoriaMetrics for `:rightsize` | [Providers](providers.md#right-sizing-metrics-provider)    |
