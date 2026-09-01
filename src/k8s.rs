@@ -329,6 +329,11 @@ impl Cluster {
                     },
                     Ok(watcher::Event::Init) => Msg::Reset { generation },
                     Ok(watcher::Event::InitDone) => Msg::Synced { generation },
+                    // The watcher heals a desync by re-listing on its own
+                    // (the stream continues with Init/…/InitDone), so the
+                    // "too old resource version: Expired" error is routine —
+                    // the sync dot already shows the re-list. No error flash.
+                    Err(e) if watch_error_is_benign(&e) => continue,
                     Err(e) => Msg::Error {
                         generation,
                         error: e.to_string(),
@@ -357,6 +362,15 @@ impl Cluster {
             Ok(vec![])
         }
     }
+}
+
+/// A watch error the watcher recovers from by itself: the resourceVersion the
+/// watch resumed from was already compacted away by etcd (HTTP 410 Gone,
+/// reason `Expired` — "too old resource version"). Routine on quiet resources
+/// with short compaction windows; the watcher re-lists and carries on.
+pub fn watch_error_is_benign(e: &watcher::Error) -> bool {
+    matches!(e, watcher::Error::WatchError(status)
+        if status.code == 410 || status.reason == "Expired")
 }
 
 /// Higher wins when two API groups expose the same bare plural/kind (e.g.
@@ -599,6 +613,24 @@ impl Cluster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_watch_errors_are_benign() {
+        let expired = watcher::Error::WatchError(Box::new(kube::core::Status {
+            code: 410,
+            reason: "Expired".into(),
+            message: "too old resource version: 1 (2)".into(),
+            ..Default::default()
+        }));
+        assert!(watch_error_is_benign(&expired));
+        let forbidden = watcher::Error::WatchError(Box::new(kube::core::Status {
+            code: 403,
+            reason: "Forbidden".into(),
+            ..Default::default()
+        }));
+        assert!(!watch_error_is_benign(&forbidden));
+        assert!(!watch_error_is_benign(&watcher::Error::NoResourceVersion));
+    }
 
     #[test]
     fn core_group_outranks_metrics() {
