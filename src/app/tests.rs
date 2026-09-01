@@ -1511,6 +1511,65 @@ async fn restart_key_opens_confirm() {
 }
 
 #[tokio::test]
+async fn scale_prompt_targets_marked_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    for n in ["a", "b", "c"] {
+        apply(
+            &mut app,
+            json!({"apiVersion": "apps/v1", "kind": "Deployment",
+                   "metadata": {"name": n, "namespace": "default"},
+                   "spec": {"replicas": 2}}),
+        );
+    }
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    app.handle_key(press(KeyCode::Char(' '))).unwrap();
+    assert_eq!(app.marked.len(), 2);
+
+    app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(
+        app.prompt_label.contains("Scale 2 deployments"),
+        "{}",
+        app.prompt_label
+    );
+    assert!(matches!(
+        app.prompt_kind,
+        Some(PromptKind::Scale { ref targets }) if targets.len() == 2
+    ));
+
+    app.handle_key(press(KeyCode::Char('0'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.marked.is_empty());
+    assert!(
+        app.flash.contains("scaling 2 deployments → 0"),
+        "{}",
+        app.flash
+    );
+}
+
+#[tokio::test]
+async fn scale_prompt_single_row_shows_current_replicas() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    apply(
+        &mut app,
+        json!({"apiVersion": "apps/v1", "kind": "Deployment",
+               "metadata": {"name": "web", "namespace": "default"},
+               "spec": {"replicas": 3}}),
+    );
+    app.handle_key(press(KeyCode::Char('s'))).unwrap();
+    assert_eq!(app.mode, Mode::Prompt);
+    assert!(
+        app.prompt_label
+            .contains("Scale web to replicas (current 3)"),
+        "{}",
+        app.prompt_label
+    );
+}
+
+#[tokio::test]
 async fn esc_clears_marks_before_popping() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

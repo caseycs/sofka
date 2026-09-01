@@ -306,8 +306,7 @@ enum LogSource {
 
 enum PromptKind {
     Scale {
-        ns: String,
-        name: String,
+        targets: Vec<(String, String)>,
     },
     PortForward {
         ns: String,
