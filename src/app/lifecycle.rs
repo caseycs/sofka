@@ -923,8 +923,14 @@ impl App {
                     ..Default::default()
                 };
                 self.mode = Mode::Detail;
-                if let Some(w) = warn {
-                    self.flash_warn(&w);
+                match warn {
+                    Some(w) => self.flash_warn(&w),
+                    // The "describing X…" progress flash has served its
+                    // purpose once the document arrives.
+                    None => {
+                        self.flash.clear();
+                        self.flash_err = false;
+                    }
                 }
             }
             Msg::Events {

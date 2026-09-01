@@ -1511,6 +1511,30 @@ async fn restart_key_opens_confirm() {
 }
 
 #[tokio::test]
+async fn detail_arrival_clears_progress_flash() {
+    let (mut app, _rx) = test_app();
+    app.flash = "describing web…".into();
+    app.handle_msg(Msg::Detail {
+        generation: app.generation,
+        title: "web — describe".into(),
+        lines: vec!["Name: web".into()],
+        warn: None,
+    });
+    assert_eq!(app.mode, Mode::Detail);
+    assert!(app.flash.is_empty(), "{}", app.flash);
+
+    // A fallback warning still replaces the progress flash.
+    app.flash = "describing web…".into();
+    app.handle_msg(Msg::Detail {
+        generation: app.generation,
+        title: "web — YAML".into(),
+        lines: vec!["kind: Pod".into()],
+        warn: Some("kubectl not found; showing YAML".into()),
+    });
+    assert!(app.flash.contains("kubectl not found"), "{}", app.flash);
+}
+
+#[tokio::test]
 async fn scale_prompt_targets_marked_rows() {
     let (mut app, _rx) = test_app();
     app.switch_kind("deployments");
