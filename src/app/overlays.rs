@@ -247,8 +247,8 @@ impl App {
                     Mode::Table
                 };
                 match self.prompt_kind.take() {
-                    Some(PromptKind::Scale { ns, name }) => match input.parse::<i32>() {
-                        Ok(n) if n >= 0 => self.do_scale(ns, name, n),
+                    Some(PromptKind::Scale { targets }) => match input.parse::<i32>() {
+                        Ok(n) if n >= 0 => self.do_scale(targets, n),
                         _ => self.flash_warn("invalid replica count"),
                     },
                     Some(PromptKind::PortForward { ns, name }) => {

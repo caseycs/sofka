@@ -1031,19 +1031,32 @@ impl App {
             self.flash_warn("scale applies to deployments/statefulsets/replicasets");
             return;
         }
-        let Some(obj) = self.selected_ref() else {
+        let objs = self.action_target_objects();
+        if objs.is_empty() {
             return;
+        }
+        self.prompt_label = if let [obj] = objs.as_slice() {
+            let name = obj.metadata.name.clone().unwrap_or_default();
+            let cur = obj
+                .data
+                .pointer("/spec/replicas")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            format!("Scale {name} to replicas (current {cur}):")
+        } else {
+            format!("Scale {} {} to replicas:", objs.len(), self.kind_plural)
         };
-        let name = obj.metadata.name.clone().unwrap_or_default();
-        let ns = obj.metadata.namespace.clone().unwrap_or_default();
-        let cur = obj
-            .data
-            .pointer("/spec/replicas")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        self.prompt_label = format!("Scale {name} to replicas (current {cur}):");
+        let targets = objs
+            .iter()
+            .map(|o| {
+                (
+                    o.metadata.name.clone().unwrap_or_default(),
+                    o.metadata.namespace.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
         self.prompt_input.clear();
-        self.prompt_kind = Some(PromptKind::Scale { ns, name });
+        self.prompt_kind = Some(PromptKind::Scale { targets });
         self.mode = Mode::Prompt;
     }
 
@@ -1456,18 +1469,28 @@ impl App {
             .select(if len == 0 { None } else { Some(i.min(len - 1)) });
     }
 
-    pub(super) fn do_scale(&mut self, ns: String, name: String, replicas: i32) {
+    pub(super) fn do_scale(&mut self, targets: Vec<(String, String)>, replicas: i32) {
         let Some(kind) = self.kind.clone() else {
             return;
         };
-        self.note_action(format!("scale to {replicas}"), format!("{name} in {ns}"));
-        self.flash = format!("scaling {name} → {replicas}");
+        let label = self.action_label(&targets);
+        self.note_action(format!("scale to {replicas}"), label);
+        self.flash = if let [(name, _)] = targets.as_slice() {
+            format!("scaling {name} → {replicas}")
+        } else {
+            format!(
+                "scaling {} {} → {replicas}",
+                targets.len(),
+                self.kind_plural
+            )
+        };
         self.flash_err = false;
+        self.marked.clear();
         self.spawn_patch_action(
             kind,
-            vec![(name, ns)],
+            targets,
             Patch::Merge(scale_patch(replicas)),
-            |_, e| format!("scale failed: {e}"),
+            |name, e| format!("scale {name} failed: {e}"),
         );
     }
 
