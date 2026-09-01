@@ -333,6 +333,10 @@ impl App {
                         items.remove(&row_key(&obj));
                     }
                     Ok(watcher::Event::InitDone) => {}
+                    // Self-healing desync (410 Expired) — the watcher
+                    // re-lists on its own; don't scribble an error line
+                    // over the events document.
+                    Err(e) if crate::k8s::watch_error_is_benign(&e) => continue,
                     Err(e) => {
                         let _ = tx
                             .send(Msg::Events {
