@@ -29,9 +29,10 @@ mod timeline;
 mod ui;
 mod views;
 
+use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::Parser;
 use crossterm::event::{Event, KeyEventKind};
 use futures_util::StreamExt;
@@ -57,6 +58,15 @@ struct Args {
     /// Start across all namespaces.
     #[arg(short = 'A', long)]
     all_namespaces: bool,
+
+    /// Kubeconfig context to start in (defaults to the current context).
+    #[arg(long)]
+    context: Option<String>,
+
+    /// Path to the kubeconfig file (sets $KUBECONFIG for the whole session,
+    /// including kubectl shell-outs).
+    #[arg(long, value_name = "PATH")]
+    kubeconfig: Option<PathBuf>,
 
     /// Disable every action that could modify the cluster (delete, edit,
     /// scale, shell, plugins, …). Overrides the config `readonly` option,
@@ -86,9 +96,23 @@ struct Args {
     info: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
+    // `--kubeconfig`: export for the whole process so every kubeconfig read
+    // (kube-rs config inference, context listing/switching, `--info`) and
+    // every kubectl shell-out sees the same file.
+    // SAFETY: single-threaded here — the tokio runtime only spawns below.
+    if let Some(path) = &args.kubeconfig {
+        unsafe { std::env::set_var("KUBECONFIG", path) };
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting tokio runtime")?
+        .block_on(run_main(args))
+}
+
+async fn run_main(args: Args) -> Result<()> {
     let (loader, mut config_warnings) = config::ConfigLoader::load();
 
     // `--info`: print static diagnostics (no cluster connection) and exit.
@@ -102,7 +126,11 @@ async fn main() -> Result<()> {
     // in the context picker instead (k9s behavior). Headless modes still exit
     // with the error, since there is no picker to fall back to.
     eprintln!("Connecting to cluster…");
-    let (mut cluster, connect_error) = match Cluster::connect().await {
+    let connect = match args.context.as_deref() {
+        Some(name) => Cluster::connect_context(name).await,
+        None => Cluster::connect().await,
+    };
+    let (mut cluster, connect_error) = match connect {
         Ok(c) => (c, None),
         Err(e) if args.check || args.snapshot => {
             eprintln!("\x1b[31merror:\x1b[0m {e:#}");
@@ -110,7 +138,10 @@ async fn main() -> Result<()> {
         }
         Err(e) => {
             eprintln!("\x1b[33mwarning:\x1b[0m {e:#}");
-            (Cluster::disconnected(), Some(format!("{e:#}")))
+            (
+                Cluster::disconnected(args.context.as_deref()),
+                Some(format!("{e:#}")),
+            )
         }
     };
     // Per-cluster/per-context override files merge over the base config.
