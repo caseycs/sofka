@@ -346,11 +346,7 @@ fn draw_compact_header(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(app.flash.clone(), style));
     }
 
-    let (synced, sync_color) = if app.store.synced {
-        ("● live", theme::green())
-    } else {
-        ("○ syncing", theme::yellow())
-    };
+    let (synced, sync_color) = sync_indicator(app.mode, app.doc_filter_return, app.store.synced);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(10), Constraint::Length(10)])
@@ -3357,17 +3353,33 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+/// Status-bar sync indicator. The table (and the views rebuilt from its
+/// store) is watch-backed, so it's honestly "live"/"syncing" — but a
+/// describe/YAML/diff document is a point-in-time snapshot that never
+/// updates, so label it "static" instead of claiming it's live.
+fn sync_indicator(mode: Mode, doc_filter_return: Mode, synced: bool) -> (&'static str, Color) {
+    let static_doc = match mode {
+        Mode::Detail | Mode::Diff => true,
+        // `/` search over one of those documents — same underlying snapshot.
+        Mode::DocFilter => matches!(doc_filter_return, Mode::Detail | Mode::Diff),
+        _ => false,
+    };
+    if static_doc {
+        ("○ static", theme::overlay1())
+    } else if synced {
+        ("● live", theme::green())
+    } else {
+        ("○ syncing", theme::yellow())
+    }
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let style = if app.flash_err {
         Style::default().fg(theme::red())
     } else {
         Style::default().fg(theme::subtext0())
     };
-    let synced = if app.store.synced {
-        "● live"
-    } else {
-        "○ syncing"
-    };
+    let (synced, sync_color) = sync_indicator(app.mode, app.doc_filter_return, app.store.synced);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(10), Constraint::Length(12)])
@@ -3376,11 +3388,6 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(Span::styled(format!(" {}", app.flash), style))),
         cols[0],
     );
-    let sync_color = if app.store.synced {
-        theme::green()
-    } else {
-        theme::yellow()
-    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             synced,
@@ -3494,6 +3501,34 @@ fn centered_rect_with_min(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A describe/YAML/diff document is a snapshot — the status bar must not
+    /// claim it's live (#175 follow-up report from Discord).
+    #[test]
+    fn sync_indicator_labels_static_documents() {
+        assert_eq!(sync_indicator(Mode::Table, Mode::Detail, true).0, "● live");
+        assert_eq!(
+            sync_indicator(Mode::Table, Mode::Detail, false).0,
+            "○ syncing"
+        );
+        assert_eq!(
+            sync_indicator(Mode::Detail, Mode::Detail, true).0,
+            "○ static"
+        );
+        assert_eq!(sync_indicator(Mode::Diff, Mode::Detail, true).0, "○ static");
+        // `/` search inside a document keeps the static label…
+        assert_eq!(
+            sync_indicator(Mode::DocFilter, Mode::Detail, true).0,
+            "○ static"
+        );
+        // …but searching help (not resource data) doesn't.
+        assert_eq!(
+            sync_indicator(Mode::DocFilter, Mode::Help, true).0,
+            "● live"
+        );
+        // Events are watch-backed, genuinely live.
+        assert_eq!(sync_indicator(Mode::Events, Mode::Detail, true).0, "● live");
+    }
 
     /// Deficit: a Flex column whose content fits inside its weight-share takes
     /// only what it needs — the padding it would have hoarded under a pure
