@@ -79,11 +79,13 @@ notarization are on the [roadmap](docs/roadmap.md).
 ## Usage
 
 ```
-sofka [RESOURCE] [-n NAMESPACE] [-A] [--readonly | --write]
+sofka [RESOURCE] [-n NAMESPACE] [-A] [--context NAME] [--kubeconfig PATH] [--readonly | --write]
 
   RESOURCE          resource to open (alias/plural/kind), default: pods
   -n, --namespace   namespace to start in
   -A, --all-namespaces
+  --context         kubeconfig context to start in (default: current context)
+  --kubeconfig      kubeconfig file to use (sets $KUBECONFIG for the session)
   --readonly        disable every mutating action for the session
   --write           force write mode, overriding any config `readonly`
 ```

@@ -127,11 +127,14 @@ impl Cluster {
     /// instead of exiting). Identity fields come straight from the kubeconfig
     /// so the header still names the broken context; the client points at the
     /// configured server but nothing uses it until a real context connects.
-    pub fn disconnected() -> Self {
+    /// `requested` is the `--context` flag when the failed connect targeted a
+    /// named context, so the header names what the user asked for instead of
+    /// the kubeconfig current-context.
+    pub fn disconnected(requested: Option<&str>) -> Self {
         let kubeconfig = Kubeconfig::read().ok();
-        let context = kubeconfig
-            .as_ref()
-            .and_then(|k| k.current_context.clone())
+        let context = requested
+            .map(str::to_owned)
+            .or_else(|| kubeconfig.as_ref().and_then(|k| k.current_context.clone()))
             .unwrap_or_default();
         let cluster_name = kubeconfig
             .as_ref()
