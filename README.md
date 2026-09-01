@@ -4,9 +4,10 @@ A Kubernetes TUI written in Rust, on [`kube-rs`](https://kube.rs) and
 [`ratatui`](https://ratatui.rs). Async everywhere, so the UI never blocks on the
 cluster.
 
-| Pod list + command palette                                                | Namespace switcher                                                          | Flux suspend/resume/reconcile menu                                                      |
-| ------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| ![Pod list with the fuzzy command palette open](docs/screenshot-pods.png) | ![Namespace switcher popup over a pod list](docs/screenshot-namespaces.png) | ![Flux Kustomizations with the suspend/resume/reconcile menu](docs/screenshot-flux.png) |
+**[sofka.rs](https://sofka.rs)** - the website, with a watchable tour of a real
+session ([sofka.rs/#play](https://sofka.rs/#play)).
+
+[![A one-minute sofka session: filtering to a crashloop, explaining why it's broken, following its logs, and inspecting Helm releases](docs/demo.gif)](https://sofka.rs/#play)
 
 ## Why "sofka"
 
