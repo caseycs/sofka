@@ -4966,6 +4966,42 @@ async fn namespace_switcher_pins_favorites_then_recents() {
 }
 
 #[tokio::test]
+async fn last_picked_namespace_is_remembered_per_context() {
+    let (mut app, _rx) = test_app();
+    let dir = std::env::temp_dir().join(format!("sofka-nsmem-app-{}", std::process::id()));
+    let path = dir.join("namespaces.toml");
+    app.namespace_memory_path = Some(path.clone());
+    app.switch_kind("pods");
+
+    // Every explicit pick lands in memory and on disk.
+    app.set_namespace("payments".into());
+    assert_eq!(app.namespace_memory.get("test"), Some("payments".into()));
+    assert_eq!(
+        crate::nsmem::NamespaceMemory::load(&path).get("test"),
+        Some("payments".into())
+    );
+    app.switch_kind_ns("deployments", Some("checkout"));
+    assert_eq!(app.namespace_memory.get("test"), Some("checkout".into()));
+    app.handle_key(press(KeyCode::Char('0'))).unwrap();
+    assert_eq!(app.namespace_memory.get("test"), Some(String::new()));
+    assert_eq!(
+        crate::nsmem::NamespaceMemory::load(&path).get("test"),
+        Some(String::new())
+    );
+
+    // Drill-downs and history don't count as picks.
+    app.set_namespace("payments".into());
+    app.push_frame();
+    app.namespace = "kube-system".into();
+    app.pop_frame();
+    assert_eq!(app.namespace_memory.get("test"), Some("payments".into()));
+
+    // Other contexts are untouched.
+    assert_eq!(app.namespace_memory.get("other"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn recent_namespaces_dedupe_and_bound() {
     let (mut app, _rx) = test_app();
     for n in ["a", "b", "c", "a"] {

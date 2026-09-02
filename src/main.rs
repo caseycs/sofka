@@ -17,6 +17,7 @@ mod journal;
 mod k8s;
 mod keys;
 mod logfilter;
+mod nsmem;
 mod providers;
 mod rightsize;
 mod snapshot;
@@ -212,6 +213,11 @@ async fn run_main(args: Args) -> Result<()> {
     let sort_memory_path = sortmem::SortMemory::default_path();
     app.sort_memory = sortmem::SortMemory::load(&sort_memory_path);
     app.sort_memory_path = Some(sort_memory_path);
+    // The last namespace picked per context persists too, so a relaunch (or
+    // a `:ctx` switch back) lands where you left off.
+    let namespace_memory_path = nsmem::NamespaceMemory::default_path();
+    app.namespace_memory = nsmem::NamespaceMemory::load(&namespace_memory_path);
+    app.namespace_memory_path = Some(namespace_memory_path);
     // Kubeconfig contexts are stable for the session; cache them once so the
     // palette can complete `:ctx <name>` without re-reading the file per keystroke.
     match Cluster::list_contexts() {
@@ -290,9 +296,13 @@ async fn run_main(args: Args) -> Result<()> {
         _ => None,
     };
     app.readonly = app.readonly_override.unwrap_or(cfg.readonly);
+    // CLI flags win; then the namespace remembered for this context from the
+    // last session; then the config default; then the kubeconfig's.
     if args.all_namespaces {
         app.namespace = String::new();
     } else if let Some(ns) = args.namespace {
+        app.namespace = ns;
+    } else if let Some(ns) = app.namespace_memory.get(&app.cluster.context) {
         app.namespace = ns;
     } else if let Some(ns) = cfg.default_namespace.clone() {
         app.namespace = ns;

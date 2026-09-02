@@ -1020,6 +1020,13 @@ pub struct App {
     /// Where remembered sorts persist (`<state-dir>/sort.toml`, set at
     /// startup); `None` (tests) keeps them in memory only.
     pub sort_memory_path: Option<std::path::PathBuf>,
+    /// Last namespace picked per context (`n`/`0`/`:ns`/`:<kind> <ns>`),
+    /// restored at launch and on `:ctx`. Persisted to `namespace_memory_path`
+    /// on every pick.
+    pub namespace_memory: crate::nsmem::NamespaceMemory,
+    /// Where remembered namespaces persist (`<state-dir>/namespaces.toml`,
+    /// set at startup); `None` (tests) keeps them in memory only.
+    pub namespace_memory_path: Option<std::path::PathBuf>,
     /// Global fuzzy-find (`:find`) results and picker cursor.
     pub find_items: Vec<crate::store::FindItem>,
     pub find_state: ListState,
@@ -1283,6 +1290,8 @@ impl App {
             fleet_marks_path: None,
             sort_memory: crate::sortmem::SortMemory::default(),
             sort_memory_path: None,
+            namespace_memory: crate::nsmem::NamespaceMemory::default(),
+            namespace_memory_path: None,
             find_items: Vec::new(),
             find_state: ListState::default(),
             find_query: String::new(),
