@@ -47,7 +47,9 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   `list`. An explicit search checks the full discovery catalog, because some
   delegated authorizers return incomplete rule reviews.
 - **Namespace switcher** (`n`) with pinned favourites (★) and per-context
-  session recents (·) above the rest, plus a context switcher (`:ctx`).
+  session recents (·) above the rest, plus a context switcher (`:ctx`). The
+  last namespace picked in each context is remembered across restarts
+  (`<state-dir>/namespaces.toml`); `-n`/`-A` override it for a session.
 - **Mouse support** - the wheel scrolls every view (one notch is three steps of
   that view's own up/down), clicking a row selects it, clicking a column header
   sorts by it (click again to flip). Document views (YAML/describe, diff,

@@ -177,6 +177,7 @@ impl App {
             // k9s: 0 = all namespaces.
             KeyCode::Char('0') => {
                 self.namespace.clear();
+                self.remember_namespace();
                 self.flash = "namespace: all namespaces".into();
                 self.flash_err = false;
                 self.table_state.select(Some(0));

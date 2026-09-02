@@ -140,6 +140,24 @@ impl App {
         }
     }
 
+    /// Persist the active namespace as the current context's last pick, so
+    /// the next launch (and the next `:ctx` back here) restores it. Called
+    /// after every explicit namespace choice — not after drill-downs,
+    /// history, or bookmarks, which scope a view rather than pick a home.
+    pub(super) fn remember_namespace(&mut self) {
+        if !self
+            .namespace_memory
+            .set(&self.cluster.context, &self.namespace)
+        {
+            return;
+        }
+        if let Some(path) = self.namespace_memory_path.clone()
+            && let Err(e) = self.namespace_memory.save(&path)
+        {
+            self.flash_warn(&format!("failed to save namespace state: {e}"));
+        }
+    }
+
     /// Open the sort-column picker (k9s cycles with `S`; sofka jumps straight
     /// to a column instead, which scales to wide mode and custom views). The
     /// cursor starts on the active sort so enter-without-typing re-selects it,
@@ -427,6 +445,7 @@ impl App {
     pub(super) fn set_namespace(&mut self, sel: String) {
         self.namespace = normalize_ns(&sel);
         self.note_recent_namespace(&sel);
+        self.remember_namespace();
         self.flash = format!("namespace: {}", self.namespace_label());
         self.flash_err = false;
         self.ns_filter.clear();
@@ -729,9 +748,11 @@ impl App {
         self.readonly = self.readonly_override.unwrap_or(resolved.config.readonly);
         cluster.add_aliases(&self.user_aliases);
         self.bump_generation();
-        self.namespace = resolved
-            .config
-            .default_namespace
+        // Where you last were in this context beats its config default.
+        self.namespace = self
+            .namespace_memory
+            .get(&cluster.context)
+            .or(resolved.config.default_namespace)
             .unwrap_or_else(|| cluster.default_namespace.clone());
         self.cluster = *cluster;
         self.stack.clear();

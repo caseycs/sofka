@@ -9,7 +9,8 @@ Everything below is optional. An empty config behaves exactly like no config.
 ## Base options
 
 ```toml
-default_namespace = "kube-system"
+default_namespace = "kube-system"  # fallback only: the last namespace picked in a
+                                   # context is remembered across restarts
 default_resource  = "deployments"
 readonly          = false  # true disables every mutating action (delete, edit,
                            # scale, shell, plugins, …); --readonly/--write win
