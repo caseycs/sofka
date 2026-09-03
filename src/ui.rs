@@ -1924,10 +1924,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
             "drill down (deploy→pods, pod→containers, ns→re-scope)",
         ),
         bind("shift-j", "jump to owner (controller)"),
-        bind(
-            "o",
-            "show the node this row names (pod, nodeclaim, views.node)",
-        ),
+        bind("o", "show node hosting the pod"),
         bind("←/→", "scroll columns (NAMESPACE/NAME stay anchored)"),
         bind("esc", "go back / pop view / clear filter"),
         bind("j/k g/G", "move · top/bottom"),
