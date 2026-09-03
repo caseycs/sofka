@@ -1,7 +1,7 @@
 //! Heap cost of the object store and the view cache.
 //!
-//! Criterion measures time; the Tier 1 items in `plan.txt` are justified by
-//! memory, so they need their own probe. dhat's ad-hoc stats give live heap
+//! Criterion measures time; the view-cache optimization is justified by
+//! memory, so it needs its own probe. dhat's ad-hoc stats give live heap
 //! bytes at a point in the program, which is exactly the question here: what
 //! does holding N pods cost, and what does the view cache multiply it by?
 //!

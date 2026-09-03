@@ -2,8 +2,8 @@
 //!
 //! Run with `cargo bench --features bench`.
 //!
-//! Each group maps to a numbered item in `plan.txt`, so a change can be
-//! accepted or reverted on its own number rather than on a hunch:
+//! Each group isolates one optimized hot path so changes can be evaluated
+//! independently:
 //!
 //! - `rows_cache`  -> 2.1 (full-store rebuild per watch event)
 //! - `filter`      -> 3.1 (uncached cell extraction per keystroke)

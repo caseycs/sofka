@@ -77,7 +77,7 @@ struct Args {
 /// allocator and writes `dhat-heap.json` when `_profiler` drops, so the guard
 /// has to outlive the whole run — hence the binding in `main` rather than a
 /// helper. Attributes RSS to a call site, which is the only way to check the
-/// memory claims in `plan.txt` against reality rather than arithmetic.
+/// memory claims against reality rather than arithmetic.
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;

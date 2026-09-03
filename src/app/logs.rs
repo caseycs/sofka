@@ -263,6 +263,10 @@ impl App {
             lines: VecDeque::new(),
             ..Default::default()
         };
+        // A new Scrollable starts at revision 0, which can match the previous
+        // buffer's revision. Do not let refresh_index mistake the replacement
+        // for an append and retain stale line positions or wrapped heights.
+        self.logs.index = LogIndex::default();
         self.logs.follow = true;
         self.logs.set_filter(String::new());
         self.logs.stopped = false;

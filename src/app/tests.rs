@@ -7245,6 +7245,31 @@ async fn log_index_rebuilds_when_the_buffer_is_trimmed_or_cleared() {
 }
 
 #[tokio::test]
+async fn launching_logs_invalidates_the_previous_buffers_index() {
+    let (mut app, _rx) = test_app();
+    app.logs.wrap = true;
+    app.logs.set_filter(String::new());
+    app.logs
+        .view
+        .lines
+        .extend((0..30).map(|i| format!("old line {i} xxxxxxxxxxxxxxxx")));
+    app.logs.refresh_index(10);
+
+    app.launch_logs(
+        LogSource::Pod {
+            ns: "default".into(),
+            name: "new".into(),
+            containers: Vec::new(),
+        },
+        "new".into(),
+    );
+    app.logs.view.lines.extend((0..40).map(|i| format!("n{i}")));
+
+    let want = naive_log_index(&app.logs, 10).1;
+    assert_eq!(app.logs.refresh_index(10).total_rows(), want);
+}
+
+#[tokio::test]
 async fn log_index_first_at_row_finds_the_line_covering_a_row() {
     let mut logs = LogsView::default();
     // Deterministic heights: at width 10, a 25-char line is 3 rows.
