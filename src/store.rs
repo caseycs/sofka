@@ -301,6 +301,10 @@ pub enum StoreMutation {
 #[derive(Default)]
 pub struct Store {
     items: Items,
+    /// Bumped by every mutation. Lets a derived view (the Helm latest-revision
+    /// dedup) cache its result and reuse it across rebuilds that were staled
+    /// by a filter or sort change rather than by the store moving.
+    version: u64,
     /// Fresh rows accumulating during a (re)list while `items` still shows the
     /// previous set — a cached view snapshot or the pre-relist state. Swapped
     /// in wholesale on `Synced`, so stale rows are replaced atomically instead
@@ -311,6 +315,7 @@ pub struct Store {
 
 impl Store {
     pub fn clear(&mut self) {
+        self.version += 1;
         self.items.clear();
         self.pending = None;
         self.synced = false;
@@ -319,6 +324,7 @@ impl Store {
     /// Replace the contents with a cached snapshot from a previous visit to
     /// this view — shown (unsynced) until the new watch's initial list lands.
     pub fn seed(&mut self, items: Items) {
+        self.version += 1;
         self.items = items;
         self.pending = None;
         self.synced = false;
@@ -327,6 +333,7 @@ impl Store {
     /// Move the items out (for stashing in the view cache), leaving the store
     /// empty.
     pub fn take_items(&mut self) -> Items {
+        self.version += 1;
         self.pending = None;
         self.synced = false;
         std::mem::take(&mut self.items)
@@ -338,6 +345,7 @@ impl Store {
     /// store keeps the old behavior of applying rows as they stream in.
     /// Returns whether the visible items were cleared.
     pub fn begin_reset(&mut self) -> bool {
+        self.version += 1;
         self.synced = false;
         if self.items.is_empty() {
             self.pending = None;
@@ -351,6 +359,7 @@ impl Store {
     /// Mark the initial list complete, swapping in the buffered rows if a
     /// reset was in progress. Returns whether a swap replaced the visible set.
     pub fn finish_sync(&mut self) -> bool {
+        self.version += 1;
         self.synced = true;
         match self.pending.take() {
             Some(fresh) => {
@@ -362,6 +371,7 @@ impl Store {
     }
 
     pub fn apply(&mut self, key: String, obj: DynamicObject) -> StoreMutation {
+        self.version += 1;
         let key: RowKey = key.into();
         let obj = Arc::new(obj);
         match &mut self.pending {
@@ -377,6 +387,7 @@ impl Store {
     }
 
     pub fn remove(&mut self, key: &str) -> StoreMutation {
+        self.version += 1;
         match &mut self.pending {
             Some(pending) => {
                 pending.remove(key);
@@ -398,6 +409,11 @@ impl Store {
             .as_ref()
             .and_then(|p| p.get(key))
             .or_else(|| self.items.get(key))
+    }
+
+    /// Monotonic mutation counter — see [`Self::version`]'s field docs.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub fn len(&self) -> usize {

@@ -4168,6 +4168,35 @@ async fn helm_list_shows_only_latest_revision_per_release() {
     assert_eq!(cells[3], "mychart-1.0.0");
 }
 
+/// The latest-revision dedup is cached against the store's mutation counter,
+/// so a rebuild staled by a filter or sort reuses it. A new revision arriving
+/// *after* the rows were read must still invalidate it.
+#[tokio::test]
+async fn helm_list_dedup_refreshes_when_a_new_revision_arrives() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "deployed"),
+    );
+    // Read once so the dedup is cached, then supersede it.
+    assert_eq!(app.rows().len(), 1);
+    assert_eq!(crate::helm::revision(app.rows()[0]), Some(1));
+
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+
+    let rows = app.rows();
+    assert_eq!(rows.len(), 1, "still one row per release");
+    assert_eq!(
+        crate::helm::revision(rows[0]),
+        Some(2),
+        "a cached dedup must not pin the superseded revision"
+    );
+}
+
 #[tokio::test]
 async fn helm_filter_matches_release_name_not_secret_name() {
     let (mut app, _rx) = test_app();

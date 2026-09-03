@@ -4,6 +4,7 @@
 //! drills into a child (workload -> pods, pod -> containers, namespace ->
 //! re-scope the previous view), and `esc` pops back.
 
+use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -34,6 +35,17 @@ use crate::k8s::{Cluster, Kind};
 use crate::store::{Msg, Pulse, RowKey, Store, StoreMutation, XrayItem, row_key};
 
 pub(crate) use guardrails::ConfirmLevel;
+
+impl App {
+    /// Mark the row ordering stale without touching the store — the shape of a
+    /// filter keystroke or a sort toggle. `invalidate_rows` is `pub(super)`;
+    /// this exposes it to `benchsupport` under the bench feature only, rather
+    /// than widening it for the shipped binary.
+    #[cfg(feature = "bench")]
+    pub fn bench_invalidate_rows(&self) {
+        self.invalidate_rows();
+    }
+}
 
 /// Larger cap used while autoscroll is paused: we stop trimming so the line
 /// indices don't shift under the frozen view (which would make it appear to
@@ -1025,6 +1037,10 @@ struct RowsCache {
     /// Computed primary sort keys, valid per (sort header, resourceVersion) —
     /// a rebuild touches every object, but only changed rows re-extract.
     sort_keys: HashMap<RowKey, SortKeyEntry>,
+    /// Helm view only: the latest-revision dedup, paired with the store
+    /// version it was computed from. A rebuild staled by a filter keystroke or
+    /// a sort toggle leaves the store untouched, so the dedup still holds.
+    helm_latest: Option<(u64, HashSet<RowKey>)>,
 }
 
 struct CellCacheEntry {
@@ -1635,6 +1651,7 @@ impl App {
                 keys: Vec::new(),
                 cells: HashMap::new(),
                 sort_keys: HashMap::new(),
+                helm_latest: None,
             }),
             log_provider: None,
             metrics_provider: None,

@@ -590,6 +590,11 @@ impl App {
             let mut pod_nodes: HashMap<String, String> = HashMap::new();
             let mut counts: HashMap<String, usize> = HashMap::new();
             let mut dirty = false;
+            // The initial list arrives as a stream of `InitApply`s, so the
+            // counts are incomplete until `InitDone`. Publishing mid-init
+            // would walk the PODS column up from zero on every (re)sync —
+            // the old full-list poll only ever emitted complete counts.
+            let mut synced = false;
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -638,9 +643,12 @@ impl App {
                             Ok(watcher::Event::Init) => {
                                 pod_nodes.clear();
                                 counts.clear();
+                                synced = false;
+                            }
+                            Ok(watcher::Event::InitDone) => {
+                                synced = true;
                                 dirty = true;
                             }
-                            Ok(watcher::Event::InitDone) => dirty = true,
                             Err(_) => {}
                         }
                     }
@@ -648,7 +656,7 @@ impl App {
                         if flag.load(Ordering::SeqCst) != genr {
                             break;
                         }
-                        if dirty {
+                        if dirty && synced {
                             if tx
                                 .send(Msg::NodePods {
                                     generation: genr,

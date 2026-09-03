@@ -1411,6 +1411,9 @@ fn plugin_flash(name: &str, n: usize, suffix: &str) -> String {
 /// lists (empty query: everything ties at one score) skip the length
 /// tie-break so they stay alphabetical.
 fn rank_completions<T>(scored: &mut [(i64, T)], label: fn(&T) -> &str, by_len: bool) {
+    // Stable on purpose: `T` is `Suggestion` at one call site, whose `kind` is
+    // not part of the ordering, so two suggestions sharing a label compare
+    // equal and an unstable sort could swap which one the list offers first.
     scored.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then_with(|| {

@@ -12,6 +12,7 @@ impl App {
         cache.keys.clear();
         cache.cells.clear();
         cache.sort_keys.clear();
+        cache.helm_latest = None;
     }
 
     pub(super) fn invalidate_row(&self, key: &str) {
@@ -192,8 +193,14 @@ impl App {
                     .eval(crate::columns::parse_leading_num(&cell).total_cmp(want)),
                 None => false,
             },
+            // `want` is already case-folded by the parser and the cell is
+            // folded lazily through the iterator, so a text comparison
+            // allocates nothing per object. UTF-8 orders by code point, so
+            // comparing `char`s matches what comparing the folded `str`s did.
             CmpValue::Str(want) => match self.column_cell(o, &cmp.key) {
-                Some(cell) => cmp.op.eval(cell.to_lowercase().cmp(&want.to_lowercase())),
+                Some(cell) => cmp
+                    .op
+                    .eval(cell.chars().flat_map(char::to_lowercase).cmp(want.chars())),
                 None => false,
             },
         }
@@ -203,16 +210,18 @@ impl App {
     /// header), plus NAMESPACE and a `/status/phase` fallback for kinds
     /// without a STATUS column. Extracts only the named column — this runs
     /// per object per rebuild when a structured filter is active.
-    fn column_cell(&self, o: &DynamicObject, key: &str) -> Option<String> {
+    fn column_cell<'o>(&self, o: &'o DynamicObject, key: &str) -> Option<Cow<'o, str>> {
         if key.eq_ignore_ascii_case("namespace") || key.eq_ignore_ascii_case("ns") {
-            return Some(o.metadata.namespace.clone().unwrap_or_default());
+            // Borrowed: the namespace is already a `String` on the object, and
+            // this runs per object per rebuild.
+            return Some(o.metadata.namespace.as_deref().unwrap_or("").into());
         }
         if let Some(i) = self.spec.header_index(key) {
-            return self.spec.cell_at(o, i);
+            return self.spec.cell_at(o, i).map(Cow::Owned);
         }
         if key.eq_ignore_ascii_case("status") {
             let phase = phase(o);
-            return (!phase.is_empty()).then_some(phase);
+            return (!phase.is_empty()).then_some(Cow::Owned(phase));
         }
         None
     }
@@ -267,22 +276,39 @@ impl App {
         // The aggregated Helm release list (`helm list` semantics) shows only
         // the latest revision per release; `helmhistory` (one release's full
         // history) shows every revision, so it skips this.
-        let helm_latest = (self.kind_plural == "helm").then(|| self.helm_latest_revision_keys());
+        // Recomputed only when the store actually moved: a rebuild staled by a
+        // filter keystroke or a sort toggle reuses the previous dedup.
+        if self.kind_plural == "helm" {
+            let version = self.store.version();
+            if cache
+                .helm_latest
+                .as_ref()
+                .is_none_or(|(v, _)| *v != version)
+            {
+                cache.helm_latest = Some((version, self.helm_latest_revision_keys()));
+            }
+        } else if cache.helm_latest.is_some() {
+            cache.helm_latest = None;
+        }
         // Parsed once, not once per object: the filter check used to re-borrow
         // the filter cache and re-compare the raw filter string for every row.
         let parsed = self.parsed_filter();
         // Disjoint field borrows so the filter can warm the cell cache while
         // the sort-key cache is also held.
         let RowsCache {
-            cells, sort_keys, ..
+            cells,
+            sort_keys,
+            helm_latest,
+            ..
         } = &mut *cache;
+        let helm_latest = helm_latest.as_ref().map(|(_, keys)| keys);
 
         // (primary sort key, (ns, name) tiebreak, store key)
         let empty_sort: Rc<str> = Rc::from("");
         let mut entries: Vec<(SortKey, (&str, &str), &RowKey)> =
             Vec::with_capacity(self.store.len());
         for (k, o) in self.store.iter() {
-            if let Some(keep) = &helm_latest
+            if let Some(keep) = helm_latest
                 && !keep.contains(k)
             {
                 continue;
@@ -344,11 +370,19 @@ impl App {
         // `clear_rows_cache` on a view change — bound their growth once they
         // have drifted well past what the current view needs (stale entries
         // for rows removed one-by-one mid-view, rather than by a view
-        // switch). A no-op when the cache already tracks the store 1:1.
-        if cache.cells.len() > cache.keys.len().saturating_mul(2).max(64) {
-            let live: HashSet<RowKey> = cache.keys.iter().cloned().collect();
-            cache.cells.retain(|k, _| live.contains(k));
-            cache.sort_keys.retain(|k, _| live.contains(k));
+        // switch). The bound is the *store* size, not the visible row count:
+        // the filter path warms a cell entry for every object it tests,
+        // including the ones it rejects, so a narrow filter legitimately
+        // leaves far more cells than keys. Bounding against `keys` there
+        // evicted the whole cache on every rebuild and re-rendered every
+        // row's cells on the next one.
+        if cache.cells.len() > self.store.len().saturating_mul(2).max(64) {
+            cache
+                .cells
+                .retain(|k, _| self.store.get(k.as_ref()).is_some());
+            cache
+                .sort_keys
+                .retain(|k, _| self.store.get(k.as_ref()).is_some());
         }
     }
 
@@ -646,7 +680,7 @@ impl App {
             // timestamp, never the rendered string. Negated epoch seconds so
             // ascending = most recent first, matching AGE; unknowns last.
             "UPDATED" => SortKey::Num(
-                crate::helm::decode(o)
+                crate::helm::decode_summary(o)
                     .and_then(|r| r.last_deployed_secs)
                     .map(|s| -(s as f64))
                     .unwrap_or(f64::INFINITY),

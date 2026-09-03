@@ -525,7 +525,9 @@ where
             (seen.clone(), event_line(event, events_v1, &seen))
         })
         .collect();
-    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    // Unstable: the comparator orders on both tuple fields, i.e. the whole
+    // element, so a tie means the two rows are indistinguishable.
+    rows.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
     let mut lines = vec![format!(
         "{:<20} {:<8} {:<24} {:>5} {}",

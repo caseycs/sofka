@@ -94,7 +94,9 @@ pub enum CmpValue {
     Mem(i64),
     /// Duration in seconds (`age<2h`).
     Duration(i64),
-    /// Anything else: case-insensitive text comparison.
+    /// Anything else: case-insensitive text comparison. Stored pre-folded to
+    /// lowercase — the comparison runs per object per rebuild, so folding the
+    /// needle once at parse time keeps it out of that loop.
     Str(String),
 }
 
@@ -277,7 +279,7 @@ fn typed_value(key: &str, raw: &str) -> Result<CmpValue, String> {
         _ => Ok(raw
             .parse::<f64>()
             .map(CmpValue::Num)
-            .unwrap_or_else(|_| CmpValue::Str(raw.to_string()))),
+            .unwrap_or_else(|_| CmpValue::Str(raw.to_lowercase()))),
     }
 }
 
@@ -412,6 +414,9 @@ mod tests {
         assert!(s.terms.is_empty());
     }
 
+    /// `CmpValue::Str` is stored pre-folded: the comparison is
+    /// case-insensitive, so the needle is lowercased once here rather than
+    /// once per object per rebuild.
     #[test]
     fn status_equality_and_inequality() {
         let s = structured("status=CrashLoopBackOff");
@@ -420,7 +425,7 @@ mod tests {
             vec![Term::Cmp(Cmp {
                 key: "status".into(),
                 op: Op::Eq,
-                value: CmpValue::Str("CrashLoopBackOff".into()),
+                value: CmpValue::Str("crashloopbackoff".into()),
             })]
         );
 
@@ -430,7 +435,7 @@ mod tests {
             vec![Term::Cmp(Cmp {
                 key: "status".into(),
                 op: Op::Ne,
-                value: CmpValue::Str("Running".into()),
+                value: CmpValue::Str("running".into()),
             })]
         );
     }
@@ -549,7 +554,7 @@ mod tests {
                 Term::Cmp(Cmp {
                     key: "status".into(),
                     op: Op::Eq,
-                    value: CmpValue::Str("Running".into()),
+                    value: CmpValue::Str("running".into()),
                 }),
             ]
         );
