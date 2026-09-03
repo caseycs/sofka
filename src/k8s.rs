@@ -550,6 +550,36 @@ impl Cluster {
     ///
     /// Also compiled under the `bench` feature, because `benches/` links the
     /// library without `cfg(test)` and needs the same offline fixture.
+    /// Add one kind to a test cluster, indexed the way [`Cluster::discover`]
+    /// indexes a discovered one. Lets a test that needs a specific CRD declare
+    /// it itself, rather than parking every such kind in [`Cluster::fake`].
+    pub fn register_kind(&mut self, group: &str, kind: &str, plural: &str, namespaced: bool) {
+        let plural = plural.to_lowercase();
+        let k = Kind {
+            ar: ApiResource {
+                group: group.to_string(),
+                version: "v1".to_string(),
+                api_version: if group.is_empty() {
+                    "v1".to_string()
+                } else {
+                    format!("{group}/v1")
+                },
+                kind: kind.to_string(),
+                plural: plural.clone(),
+            },
+            namespaced,
+        };
+        self.registry.insert(kind.to_lowercase(), k.clone());
+        self.registry.insert(plural.clone(), k.clone());
+        self.catalog.push(plural.clone());
+        if !group.is_empty() {
+            let qualified = format!("{plural}.{group}");
+            self.registry.insert(qualified.clone(), k);
+            self.catalog.push(qualified);
+        }
+        self.catalog.sort();
+    }
+
     pub fn fake() -> Self {
         let config = Config::new("https://127.0.0.1:6443".parse().unwrap());
         let client = Client::try_from(config).expect("build test client");
@@ -623,12 +653,6 @@ impl Cluster {
                 "externalsecrets",
                 true,
             ),
-        );
-        // A cluster-scoped CR that navigates to another kind (Karpenter's
-        // NodeClaim -> its node).
-        registry.insert(
-            "nodeclaims".to_string(),
-            mk("karpenter.sh", "NodeClaim", "nodeclaims", false),
         );
         // A CR without curated columns, for custom-view tests.
         registry.insert(

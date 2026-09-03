@@ -1276,6 +1276,8 @@ async fn enter_on_nodeclaim_scopes_to_its_node() {
     // `enter` and `o` are the same jump, and esc unwinds either.
     for key in [KeyCode::Enter, KeyCode::Char('o')] {
         let (mut app, _rx) = test_app();
+        app.cluster
+            .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
         app.switch_kind("nodeclaims");
         apply(&mut app, claim.clone());
         app.table_state.select(Some(0));
@@ -1300,6 +1302,8 @@ async fn enter_on_nodeclaim_scopes_to_its_node() {
 #[tokio::test]
 async fn unregistered_nodeclaim_warns_instead_of_navigating() {
     let (mut app, _rx) = test_app();
+    app.cluster
+        .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
     app.switch_kind("nodeclaims");
     // Launched but not yet registered: no status.nodeName to jump to.
     apply(
