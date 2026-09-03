@@ -564,10 +564,11 @@ impl App {
         self.tasks.push(handle);
     }
 
-    /// Poll the pods API for the nodes view: pod count per node (the PODS
+    /// Watch the pods API for the nodes view: pod count per node (the PODS
     /// column). Counts non-terminated pods — Succeeded/Failed pods hold no
-    /// node resources — mirroring `kubectl describe node`. List failures
-    /// (e.g. no cluster-wide pod list permission) leave the column at "-".
+    /// node resources — mirroring `kubectl describe node`. Replaces a full
+    /// cluster-wide pod re-list every 10s with one watch, kept incrementally
+    /// up to date and coalesced to at most one `Msg::NodePods` per second.
     pub(super) fn spawn_node_pods_poll(&mut self) {
         let Some(pkind) = self.cluster.resolve("pods") else {
             return;
@@ -579,36 +580,89 @@ impl App {
         let ar = pkind.ar.clone();
 
         let handle = tokio::spawn(async move {
-            let params =
-                ListParams::default().fields("status.phase!=Succeeded,status.phase!=Failed");
+            let api: Api<DynamicObject> = Api::all_with(client, &ar);
+            let cfg = watcher::Config::default()
+                .any_semantic()
+                .fields("status.phase!=Succeeded,status.phase!=Failed");
+            let mut stream = watcher(api, cfg).boxed();
+            // Node per pod, kept incrementally so per-node counts never need
+            // a full rescan of the cluster's pods.
+            let mut pod_nodes: HashMap<String, String> = HashMap::new();
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            let mut dirty = false;
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                if flag.load(Ordering::SeqCst) != genr {
-                    break;
-                }
-                let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
-                if let Ok(list) = api.list(&params).await {
-                    let mut counts: HashMap<String, usize> = HashMap::new();
-                    for item in list {
-                        if let Some(node) = item
-                            .data
-                            .pointer("/spec/nodeName")
-                            .and_then(serde_json::Value::as_str)
-                        {
-                            *counts.entry(node.to_string()).or_insert(0) += 1;
+                tokio::select! {
+                    maybe_event = stream.next() => {
+                        let Some(event) = maybe_event else { break };
+                        if flag.load(Ordering::SeqCst) != genr {
+                            break;
+                        }
+                        let retire = |node: &str, counts: &mut HashMap<String, usize>| {
+                            if let Some(c) = counts.get_mut(node) {
+                                *c = c.saturating_sub(1);
+                                if *c == 0 {
+                                    counts.remove(node);
+                                }
+                            }
+                        };
+                        match event {
+                            Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
+                                let key = row_key(&obj);
+                                let new_node = obj
+                                    .data
+                                    .pointer("/spec/nodeName")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_string);
+                                let old_node = match &new_node {
+                                    Some(n) => pod_nodes.insert(key, n.clone()),
+                                    None => pod_nodes.remove(&key),
+                                };
+                                if old_node != new_node {
+                                    if let Some(old) = &old_node {
+                                        retire(old, &mut counts);
+                                    }
+                                    if let Some(new) = &new_node {
+                                        *counts.entry(new.clone()).or_insert(0) += 1;
+                                    }
+                                    dirty = true;
+                                }
+                            }
+                            Ok(watcher::Event::Delete(obj)) => {
+                                if let Some(old) = pod_nodes.remove(&row_key(&obj)) {
+                                    retire(&old, &mut counts);
+                                    dirty = true;
+                                }
+                            }
+                            Ok(watcher::Event::Init) => {
+                                pod_nodes.clear();
+                                counts.clear();
+                                dirty = true;
+                            }
+                            Ok(watcher::Event::InitDone) => dirty = true,
+                            Err(_) => {}
                         }
                     }
-                    if tx
-                        .send(Msg::NodePods {
-                            generation: genr,
-                            counts,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
+                    _ = ticker.tick() => {
+                        if flag.load(Ordering::SeqCst) != genr {
+                            break;
+                        }
+                        if dirty {
+                            if tx
+                                .send(Msg::NodePods {
+                                    generation: genr,
+                                    counts: counts.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            dirty = false;
+                        }
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(10)).await;
             }
         });
         self.tasks.push(handle);

@@ -339,6 +339,17 @@ impl App {
         });
         cache.keys = entries.into_iter().map(|(_, _, k)| k.clone()).collect();
         cache.dirty = false;
+
+        // `cells`/`sort_keys` are otherwise only ever cleared wholesale by
+        // `clear_rows_cache` on a view change — bound their growth once they
+        // have drifted well past what the current view needs (stale entries
+        // for rows removed one-by-one mid-view, rather than by a view
+        // switch). A no-op when the cache already tracks the store 1:1.
+        if cache.cells.len() > cache.keys.len().saturating_mul(2).max(64) {
+            let live: HashSet<RowKey> = cache.keys.iter().cloned().collect();
+            cache.cells.retain(|k, _| live.contains(k));
+            cache.sort_keys.retain(|k, _| live.contains(k));
+        }
     }
 
     /// Store keys of the highest-revision secret per (namespace, release) —
