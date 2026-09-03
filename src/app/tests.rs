@@ -24,6 +24,185 @@ fn alt(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::ALT)
 }
 
+/// A stand-in API server for the nodes view's pod counter: the *watch* is
+/// refused, the plain *list* succeeds. That is the RBAC shape — `list` granted,
+/// `watch` not — the poll fallback exists for. Records every request path.
+async fn mock_pods_api() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const POD_LIST: &str = concat!(
+        r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"7"},"items":["#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"1"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"b","namespace":"default","resourceVersion":"2"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"c","namespace":"default","resourceVersion":"3"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}}"#,
+        r#"]}"#
+    );
+    const FORBIDDEN: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"pods is forbidden: cannot watch at the cluster scope","reason":"Forbidden","code":403}"#;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock pods api");
+    let addr = listener.local_addr().expect("local addr");
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let seen = Arc::clone(&seen);
+            tokio::spawn(async move {
+                let (r, mut w) = sock.split();
+                let mut reader = BufReader::new(r);
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).await.unwrap_or(0) == 0 || header == "\r\n" {
+                        break;
+                    }
+                }
+                let path = request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string();
+                let (status, body) = if path.contains("watch=true") {
+                    ("403 Forbidden", FORBIDDEN)
+                } else {
+                    ("200 OK", POD_LIST)
+                };
+                seen.lock().unwrap().push(path);
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = w.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), requests)
+}
+
+/// A `Cluster` whose client talks to `url` instead of a real API server.
+fn mock_cluster(url: &str) -> Cluster {
+    let mut config = kube::Config::new(url.parse().expect("mock url"));
+    // The client's own retry policy would turn each 403 into a long stall;
+    // this test is about the app's fallback, not the client's retries.
+    config.default_retry = false;
+    let mut cluster = Cluster::fake();
+    cluster.client = Client::try_from(config).expect("mock client");
+    cluster.cluster_url = url.into();
+    cluster
+}
+
+/// RBAC granting `list` but not `watch`. `watcher` serves the initial list
+/// itself, so the counts still arrive; the risk is the refused watch spinning
+/// the list-watch cycle as fast as the API server can answer it.
+#[tokio::test]
+async fn node_pods_survives_a_forbidden_watch_without_hammering_the_api() {
+    let (url, seen) = mock_pods_api().await;
+    let (tx, mut rx) = mpsc::channel(1024);
+    let mut app = App::new(mock_cluster(&url), tx);
+
+    app.spawn_node_pods_poll();
+
+    let counts = loop {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv())
+            .await
+            .expect("no NodePods message before the timeout")
+            .expect("channel closed");
+        if let Msg::NodePods { counts, .. } = msg {
+            break counts;
+        }
+    };
+    assert_eq!(counts.get("node-a"), Some(&2), "counts: {counts:?}");
+    assert_eq!(counts.get("node-b"), Some(&1), "counts: {counts:?}");
+
+    // Now let the refused watch keep failing for a while. Unbackoffed, the
+    // cycle re-lists as fast as the server answers.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let watch_attempts = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.contains("watch=true"))
+        .count();
+    // Backoff holds this to a couple of attempts; without it the same second
+    // measured ~9,800 — a hot retry loop against the API server for as long as
+    // the nodes view stays open.
+    assert!(
+        watch_attempts <= 10,
+        "the refused watch must be paced by backoff, saw {watch_attempts} attempts in ~1s"
+    );
+}
+
+/// The row cache's cleanup pass runs at the end of a rebuild; it must both
+/// drop stale entries and hand the memory back. `retain` on its own keeps the
+/// peak allocation, which is the whole point of the bound.
+#[tokio::test]
+async fn row_cache_releases_capacity_after_a_large_view_contracts() {
+    let (mut app, _rx) = test_app();
+    // A filter is what fills `cells`: every object it tests gets an entry,
+    // including the ones it rejects.
+    app.filter = "zzz-matches-nothing".into();
+    for i in 0..2_000 {
+        apply(
+            &mut app,
+            serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": format!("pod-{i:05}"),
+                    "namespace": "default",
+                    "resourceVersion": format!("{i}"),
+                },
+                "status": {"phase": "Running"},
+            }),
+        );
+    }
+    assert_eq!(app.row_count(), 0, "filter matches nothing");
+    let peak = app.rows_cache.borrow().cells.capacity();
+    assert!(peak >= 2_000, "cells cached an entry per tested object");
+
+    for i in 0..1_990 {
+        app.handle_msg(Msg::Deleted {
+            generation: app.generation,
+            key: format!("default/pod-{i:05}"),
+        });
+    }
+    app.row_count();
+
+    let cache = app.rows_cache.borrow();
+    assert!(
+        cache.cells.len() <= 10,
+        "stale entries dropped, got {}",
+        cache.cells.len()
+    );
+    assert!(
+        cache.cells.capacity() < peak / 2,
+        "capacity must be handed back, not just emptied: {} -> {}",
+        peak,
+        cache.cells.capacity()
+    );
+    let settled = cache.cells.capacity();
+    drop(cache);
+
+    // ...and then hold still. Shrinking to a capacity that immediately trips
+    // the same check again would rehash the table on every single rebuild.
+    for _ in 0..3 {
+        app.invalidate_rows();
+        app.row_count();
+    }
+    assert_eq!(
+        app.rows_cache.borrow().cells.capacity(),
+        settled,
+        "the shrink must settle, not re-fire on every rebuild"
+    );
+}
+
 /// Inject a watched object as the current generation would.
 fn apply(app: &mut App, v: serde_json::Value) {
     let o = obj(v);

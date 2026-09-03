@@ -569,6 +569,11 @@ impl App {
     /// node resources — mirroring `kubectl describe node`. Replaces a full
     /// cluster-wide pod re-list every 10s with one watch, kept incrementally
     /// up to date and coalesced to at most one `Msg::NodePods` per second.
+    ///
+    /// RBAC granting `list` but not `watch` still works: `watcher` serves the
+    /// initial list itself, so counts publish from that, and a refused watch
+    /// just sends it round again for a fresh list. Backoff is what keeps that
+    /// loop from becoming a hot retry against the API server.
     pub(super) fn spawn_node_pods_poll(&mut self) {
         let Some(pkind) = self.cluster.resolve("pods") else {
             return;
@@ -584,7 +589,12 @@ impl App {
             let cfg = watcher::Config::default()
                 .any_semantic()
                 .fields("status.phase!=Succeeded,status.phase!=Failed");
-            let mut stream = watcher(api, cfg).boxed();
+            // `watcher` re-lists as fast as the stream is polled, so an error
+            // that does not clear itself (a refused watch) would hammer the API
+            // server — measured at ~9,800 requests a second against a test
+            // server. `DefaultBackoff` is client-go's: 800ms doubling to 30s,
+            // jittered, reset after 2 minutes of quiet.
+            let mut stream = watcher(api, cfg).default_backoff().boxed();
             // Node per pod, kept incrementally so per-node counts never need
             // a full rescan of the cluster's pods.
             let mut pod_nodes: HashMap<String, String> = HashMap::new();
@@ -649,6 +659,8 @@ impl App {
                                 synced = true;
                                 dirty = true;
                             }
+                            // The stream self-heals, and the backoff above
+                            // paces the retries.
                             Err(_) => {}
                         }
                     }

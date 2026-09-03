@@ -25,7 +25,7 @@ use kube::api::{
 };
 use kube::core::{DynamicObject, TypeMeta};
 use kube::discovery::ApiResource;
-use kube::runtime::watcher;
+use kube::runtime::{WatchStreamExt, watcher};
 use ratatui::widgets::{ListState, TableState};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::Sender;

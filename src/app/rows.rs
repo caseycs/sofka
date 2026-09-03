@@ -376,13 +376,33 @@ impl App {
         // leaves far more cells than keys. Bounding against `keys` there
         // evicted the whole cache on every rebuild and re-rendered every
         // row's cells on the next one.
-        if cache.cells.len() > self.store.len().saturating_mul(2).max(64) {
+        //
+        // The two maps are filled by different paths — cells by the filter,
+        // sort keys by the sort — so they are checked independently rather
+        // than one standing in for the other.
+        let bound = self.store.len().saturating_mul(2).max(64);
+        if cache.cells.len() > bound {
             cache
                 .cells
                 .retain(|k, _| self.store.get(k.as_ref()).is_some());
+        }
+        if cache.sort_keys.len() > bound {
             cache
                 .sort_keys
                 .retain(|k, _| self.store.get(k.as_ref()).is_some());
+        }
+        // Emptying a map does not hand its table back, and `invalidate_row`
+        // already drops a deleted row's entries one at a time — so after a
+        // 20k-pod namespace is left for one holding 50, length says nothing
+        // and only capacity still shows the 20k-slot allocation. Shrink only
+        // when the table dwarfs the view (4x), and shrink to `bound` rather
+        // than to fit, so the next rebuild does not trip the same check and
+        // rehash again.
+        if cache.cells.capacity() > bound.saturating_mul(4) {
+            cache.cells.shrink_to(bound);
+        }
+        if cache.sort_keys.capacity() > bound.saturating_mul(4) {
+            cache.sort_keys.shrink_to(bound);
         }
     }
 
