@@ -5663,6 +5663,7 @@ async fn user_view_wins_over_printer_columns() {
                 wide: false,
                 width: None,
                 align: None,
+                condition_field: None,
             }],
             sort: None,
             replace: false,

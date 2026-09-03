@@ -2361,6 +2361,7 @@ mod tests {
             wide: false,
             width: None,
             align: None,
+            condition_field: None,
         }
     }
 
