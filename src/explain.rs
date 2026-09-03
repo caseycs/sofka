@@ -326,7 +326,9 @@ fn append_events(ev: &Evidence, out: &mut Vec<Finding>) {
     if warnings.is_empty() {
         return;
     }
-    // Newest first.
+    // Newest first. Deliberately a *stable* sort: events routinely share a
+    // timestamp, and preserving the API server's order for those reads better
+    // than an arbitrary shuffle.
     warnings.sort_by_key(|e| std::cmp::Reverse(event_time(e, ev.events_v1)));
     out.push(Finding::new(0, Level::Heading, "Recent evidence"));
     for e in warnings.into_iter().take(6) {

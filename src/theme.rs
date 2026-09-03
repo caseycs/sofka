@@ -25,8 +25,9 @@
 //! reads from it. Swatches not yet wired into a view are kept for completeness.
 #![allow(dead_code)]
 
+use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 use ratatui::style::{Color, Modifier, Style};
@@ -356,12 +357,34 @@ fn parse_hex(s: &str) -> Option<Color> {
 
 static ACTIVE: OnceLock<RwLock<Palette>> = OnceLock::new();
 
+/// Bumped whenever the active palette changes. Readers compare it against
+/// their thread-local copy; equal means the copy is current.
+///
+/// Starts at 1 so a thread-local cache initialized at epoch 0 always misses
+/// on first use and loads the real palette.
+static EPOCH: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// Per-thread copy of the active palette, tagged with the epoch it was
+    /// taken at.
+    ///
+    /// Every color accessor used to take the `RwLock` and copy the whole
+    /// 25-swatch palette to read one 4-byte `Color` — `ui.rs` alone has 334
+    /// call sites, several inside per-cell and per-log-line closures, so a
+    /// frame cost hundreds of uncontended atomic read-lock acquire/release
+    /// pairs for nothing. The palette only changes on `:skin` or a context
+    /// switch, so the steady state is now one relaxed atomic load and a
+    /// stack copy.
+    static CACHED: Cell<(u64, Palette)> = Cell::new((0, catppuccin_mocha()));
+}
+
 /// Install the active palette. If called after startup, replaces the active
 /// palette so `:skin` can update colors without restarting the TUI.
 pub fn init(p: Palette) {
     if ACTIVE.set(RwLock::new(p)).is_err() {
         set(p);
     }
+    EPOCH.fetch_add(1, Ordering::Release);
 }
 
 pub fn set(p: Palette) {
@@ -370,9 +393,33 @@ pub fn set(p: Palette) {
         Ok(mut active) => *active = p,
         Err(poisoned) => *poisoned.into_inner() = p,
     }
+    // After the write, so any thread that observes the new epoch also
+    // observes the new palette behind the lock.
+    EPOCH.fetch_add(1, Ordering::Release);
+}
+
+/// The active palette, as a snapshot. Prefer this over calling several
+/// individual swatch accessors in a row.
+pub fn snapshot() -> Palette {
+    palette()
 }
 
 fn palette() -> Palette {
+    let epoch = EPOCH.load(Ordering::Acquire);
+    CACHED.with(|c| {
+        let (cached_epoch, cached) = c.get();
+        if cached_epoch == epoch {
+            return cached;
+        }
+        let fresh = load_active();
+        c.set((epoch, fresh));
+        fresh
+    })
+}
+
+/// Read through the lock. Only on an epoch change — startup, `:skin`, or a
+/// context switch — never in the per-frame path.
+fn load_active() -> Palette {
     let lock = ACTIVE.get_or_init(|| RwLock::new(catppuccin_mocha()));
     match lock.read() {
         Ok(active) => *active,
@@ -528,6 +575,28 @@ mod tests {
         for name in BUILTIN_NAMES {
             assert!(builtin(name).is_some(), "missing built-in {name}");
         }
+    }
+
+    /// The per-thread palette cache must not outlive a `:skin` change. This is
+    /// the one hazard the caching introduces, so it gets a test: read a colour
+    /// (populating the cache), swap the palette, and read again.
+    #[test]
+    fn live_skin_change_invalidates_the_cached_palette() {
+        let mocha = builtin("catppuccin-mocha").unwrap();
+        let dawn = builtin("rose-pine-dawn").unwrap();
+        assert_ne!(mocha.base, dawn.base, "test needs two distinct palettes");
+
+        set(mocha);
+        assert_eq!(base(), mocha.base);
+        // Warm the cache on several swatches, not just one.
+        let _ = (text(), red(), green());
+
+        set(dawn);
+        assert_eq!(base(), dawn.base, "stale palette served after :skin");
+        assert_eq!(text(), dawn.text);
+
+        set(mocha);
+        assert_eq!(base(), mocha.base, "stale palette served on switch back");
     }
 
     #[test]

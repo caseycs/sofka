@@ -1103,14 +1103,6 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         )
     };
 
-    let shown: Vec<&String> = app
-        .logs
-        .view
-        .lines
-        .iter()
-        .filter(|l| app.logs.matches(l))
-        .collect();
-
     let filter = app.logs.filter.clone();
     let active = !filter.is_empty();
     let bad_regex = app.logs.matcher.is_error();
@@ -1121,18 +1113,13 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
         && !(filter.len() >= 2 && filter.starts_with('/') && filter.ends_with('/'));
     let highlight = if is_plain { filter.as_str() } else { "" };
 
-    // Exact display height of every shown line, so follow can anchor the
-    // newest line to the *bottom* of the viewport (not the top).
-    let heights: Vec<usize> = if app.logs.wrap {
-        shown.iter().map(|l| wrapped_height(l, inner_w)).collect()
-    } else {
-        Vec::new() // 1 row per line; skip the allocation walk
-    };
-    let total_rows: usize = if app.logs.wrap {
-        heights.iter().sum()
-    } else {
-        shown.len()
-    };
+    // Which lines pass the filter, and where each starts in display rows.
+    // Maintained incrementally across frames (see `LogIndex`) rather than
+    // rebuilt: the buffer runs to 100k lines while paused, and the viewport
+    // shows ~40.
+    let wrap = app.logs.wrap;
+    let wrap_width = if wrap { inner_w } else { 0 };
+    let total_rows = app.logs.refresh_index(wrap_width).total_rows();
 
     // Record viewport geometry (display rows) so key handlers clamp the scroll
     // in the same units, and the message handler can convert trimmed lines
@@ -1156,33 +1143,39 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Style + wrap only the lines that intersect [scroll, scroll + inner_h).
+    // The first one is found by binary search over the index's cumulative row
+    // ends, not by walking the buffer from the top.
     let mut rows: Vec<Line> = Vec::with_capacity(inner_h);
-    let mut row = 0usize; // display row where the current line starts
-    for (i, l) in shown.iter().enumerate() {
-        let h = if app.logs.wrap { heights[i] } else { 1 };
-        if row + h <= scroll {
-            row += h;
-            continue;
-        }
-        if row >= scroll + inner_h {
-            break;
-        }
-        let line = render_log_line(l, highlight);
-        if app.logs.wrap {
-            for (j, sub) in wrap_line(line, inner_w).into_iter().enumerate() {
-                let r = row + j;
-                if r < scroll {
-                    continue;
-                }
-                if r >= scroll + inner_h {
-                    break;
-                }
-                rows.push(sub);
+    {
+        let index = app.logs.index();
+        let first = index.first_at_row(scroll);
+        for i in first..index.shown_len() {
+            let row = index.start_row(i);
+            if row >= scroll + inner_h {
+                break;
             }
-        } else {
-            rows.push(line);
+            let Some(buf_idx) = index.line_at(i) else {
+                break;
+            };
+            let Some(l) = app.logs.view.lines.get(buf_idx) else {
+                break;
+            };
+            let line = render_log_line(l, highlight);
+            if wrap {
+                for (j, sub) in wrap_line(line, inner_w).into_iter().enumerate() {
+                    let r = row + j;
+                    if r < scroll {
+                        continue;
+                    }
+                    if r >= scroll + inner_h {
+                        break;
+                    }
+                    rows.push(sub);
+                }
+            } else {
+                rows.push(line);
+            }
         }
-        row += h;
     }
 
     let flags = format!(
@@ -1212,7 +1205,7 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
             " {} · /{} [{}]{} ",
             app.logs.view.title,
             filter,
-            shown.len(),
+            app.logs.index().shown_len(),
             flags
         )
     } else {
@@ -1242,7 +1235,10 @@ fn draw_logs(frame: &mut Frame, app: &mut App, area: Rect) {
 pub(crate) fn wrapped_height(raw: &str, width: usize) -> usize {
     let width = width.max(1);
     // Fast path: plain ASCII with no escapes wraps at exactly `width` chars.
-    if raw.is_ascii() && !raw.as_bytes().contains(&0x1b) {
+    // `memchr` vectorizes the escape scan (SSE2/AVX2 on x86-64, NEON on
+    // aarch64) where `<[u8]>::contains` is a scalar `iter().any()`; this runs
+    // over the whole log buffer, so the difference is not academic.
+    if raw.is_ascii() && memchr::memchr(0x1b, raw.as_bytes()).is_none() {
         return raw.len().div_ceil(width).max(1);
     }
     let mut rows = 1usize;
@@ -1310,7 +1306,7 @@ fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 fn render_log_line(line: &str, needle: &str) -> Line<'static> {
     // Severity is detected on the ANSI-stripped text so a color-wrapped level
     // token (e.g. "\x1b[33mwarn\x1b[0m") is still recognized.
-    let base = if line.as_bytes().contains(&0x1b) {
+    let base = if memchr::memchr(0x1b, line.as_bytes()).is_some() {
         log_level_color(&strip_ansi(line))
     } else {
         log_level_color(line)
@@ -1419,17 +1415,20 @@ fn source_prefix(line: &str) -> Option<(usize, Color)> {
 /// severity colors (red/peach) and the search-highlight yellow so a prefix is
 /// never mistaken for a level.
 fn source_color(label: &str) -> Color {
+    // One palette snapshot, not ten accessor calls: this runs per prefixed
+    // log line, and nine of the ten swatches are discarded every time.
+    let p = theme::snapshot();
     let palette: [Color; 10] = [
-        theme::mauve(),
-        theme::blue(),
-        theme::green(),
-        theme::teal(),
-        theme::pink(),
-        theme::sapphire(),
-        theme::lavender(),
-        theme::flamingo(),
-        theme::sky(),
-        theme::rosewater(),
+        p.mauve,
+        p.blue,
+        p.green,
+        p.teal,
+        p.pink,
+        p.sapphire,
+        p.lavender,
+        p.flamingo,
+        p.sky,
+        p.rosewater,
     ];
     let mut h: u32 = 0x811c_9dc5;
     for b in label.bytes() {

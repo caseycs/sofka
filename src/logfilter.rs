@@ -18,11 +18,68 @@ pub struct LogMatcher {
     kind: Kind,
 }
 
+/// A compiled case-insensitive substring test.
+///
+/// Built once per filter change and queried per line. Also used on its own by
+/// the document search (`/` in a YAML/describe/events view), which wants plain
+/// substring semantics without the `!`/`/re/` grammar [`LogMatcher`] adds.
+pub enum Substring {
+    /// ASCII pattern, matched by an Aho-Corasick automaton. For a single
+    /// pattern the crate picks its `memmem`/Teddy prefilter, which is
+    /// SSE2/AVX2 on x86-64 and NEON on aarch64 with a scalar fallback — chosen
+    /// at runtime, so one binary stays correct on every release target.
+    /// Replaces a hand-rolled sliding-window compare that re-scanned every
+    /// byte offset of every line, every frame.
+    Ascii(Box<aho_corasick::AhoCorasick>),
+    /// Pattern whose *lowercased* form is not ASCII, so matching needs full
+    /// Unicode case folding. Stored lowercased.
+    Unicode(String),
+}
+
+impl Substring {
+    /// Compile `pat` (which must not be empty).
+    pub fn new(pat: &str) -> Self {
+        // Lowercase first, then decide: Unicode lowercasing can land on ASCII
+        // (the Kelvin sign U+212A lowercases to plain `k`), so the test has to
+        // be on the folded form, not the input.
+        let folded = pat.to_lowercase();
+        if folded.is_ascii() {
+            match aho_corasick::AhoCorasick::builder()
+                .ascii_case_insensitive(true)
+                .build([folded.as_bytes()])
+            {
+                Ok(ac) => return Substring::Ascii(Box::new(ac)),
+                // Construction only fails on pathological pattern sets; a
+                // single literal can't hit that, but fall back rather than
+                // panic on a user-supplied filter.
+                Err(_) => return Substring::Unicode(folded),
+            }
+        }
+        Substring::Unicode(folded)
+    }
+
+    pub fn matches(&self, line: &str) -> bool {
+        match self {
+            // ASCII bytes can't occur inside a multi-byte UTF-8 sequence, so
+            // searching raw bytes is exact on any line — no allocation, and no
+            // UTF-8 boundary check needed.
+            Substring::Ascii(ac) => ac.is_match(line.as_bytes()),
+            Substring::Unicode(s) => {
+                // A folded pattern containing a non-ASCII character cannot
+                // occur in a pure-ASCII line (lowercasing ASCII yields ASCII).
+                // Rejecting those without folding keeps the common case
+                // allocation-free — this arm used to lowercase every line in
+                // the buffer on every frame.
+                !line.is_ascii() && line.to_lowercase().contains(s)
+            }
+        }
+    }
+}
+
 enum Kind {
     /// Empty filter — everything matches.
     All,
-    /// Case-insensitive substring (stored lowercased).
-    Substr(String),
+    Substr(Substring),
     Regex(regex::Regex),
     /// A `/…/` that failed to compile.
     BadRegex,
@@ -64,7 +121,7 @@ impl LogMatcher {
                 Err(_) => Kind::BadRegex,
             }
         } else {
-            Kind::Substr(rest.to_lowercase())
+            Kind::Substr(Substring::new(rest))
         };
         LogMatcher { negate, kind }
     }
@@ -78,17 +135,7 @@ impl LogMatcher {
         }
         let base = match &self.kind {
             Kind::All => true,
-            // The whole visible buffer is re-tested per frame, so the common
-            // (ASCII) case must not allocate. ASCII bytes can't appear inside
-            // a multi-byte UTF-8 sequence, so the byte-window compare is exact
-            // on any line; only a non-ASCII *pattern* needs Unicode folding.
-            Kind::Substr(s) if s.is_ascii() => {
-                let pat = s.as_bytes();
-                line.as_bytes()
-                    .windows(pat.len())
-                    .any(|w| w.eq_ignore_ascii_case(pat))
-            }
-            Kind::Substr(s) => line.to_lowercase().contains(s),
+            Kind::Substr(s) => s.matches(line),
             Kind::Regex(re) => re.is_match(line),
             Kind::BadRegex => false,
         };
@@ -156,5 +203,57 @@ mod tests {
         let m = LogMatcher::new("/api");
         assert!(m.matches("GET /api/v1"));
         assert!(!m.is_error());
+    }
+
+    #[test]
+    fn substring_matches_at_the_very_start_and_end_of_a_line() {
+        let m = LogMatcher::new("abc");
+        assert!(m.matches("abc trailing"));
+        assert!(m.matches("leading abc"));
+        assert!(m.matches("abc"));
+        assert!(!m.matches("ab"));
+    }
+
+    #[test]
+    fn pattern_longer_than_the_line_does_not_match() {
+        let m = LogMatcher::new("a-very-long-pattern");
+        assert!(!m.matches("short"));
+        assert!(!m.matches(""));
+    }
+
+    #[test]
+    fn ascii_pattern_is_exact_against_multibyte_lines() {
+        // An ASCII byte can never occur inside a multi-byte UTF-8 sequence,
+        // so a byte search must not produce a false positive mid-character.
+        let m = LogMatcher::new("temp");
+        assert!(m.matches("日本語 temp 測定"));
+        assert!(!m.matches("日本語のログ行"));
+    }
+
+    #[test]
+    fn non_ascii_pattern_folds_with_unicode_rules() {
+        let m = LogMatcher::new("ÜBER");
+        assert!(m.matches("etwas über den wolken"));
+        assert!(!m.matches("nothing relevant"));
+        // A non-ASCII pattern can never occur in a pure-ASCII line; the fast
+        // reject for that case must not change the answer.
+        assert!(!m.matches("plain ascii line"));
+    }
+
+    #[test]
+    fn non_ascii_pattern_inverted() {
+        let m = LogMatcher::new("!über");
+        assert!(!m.matches("etwas ÜBER den wolken"));
+        assert!(m.matches("plain ascii line"));
+    }
+
+    /// Unicode lowercasing can map a non-ASCII character onto ASCII — the
+    /// Kelvin sign (U+212A) folds to a plain `k`. The ASCII/Unicode split is
+    /// therefore decided on the *folded* pattern, not the raw input.
+    #[test]
+    fn pattern_that_folds_from_non_ascii_to_ascii_still_matches_ascii_lines() {
+        let m = LogMatcher::new("\u{212A}elvin");
+        assert!(m.matches("temperature in kelvin"));
+        assert!(m.matches("Temperature in KELVIN"));
     }
 }

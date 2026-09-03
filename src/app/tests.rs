@@ -6985,3 +6985,382 @@ async fn view_cache_evicts_least_recently_used() {
     app.switch_kind_ns("pods", Some(&format!("ns{}", VIEW_CACHE_MAX - 1)));
     assert_eq!(app.store.len(), 1);
 }
+
+/// A view-count cap is not a memory cap: two 2,000-pod views cost twice one.
+/// The object bound is what keeps a big cluster's cache from multiplying, so
+/// a large view must evict earlier than `VIEW_CACHE_MAX` would.
+#[tokio::test]
+async fn view_cache_evicts_on_total_objects_not_just_view_count() {
+    let (mut app, _rx) = test_app();
+    // Two views, each holding more than half the object budget, so the second
+    // one alone pushes the total over and evicts the first — well before the
+    // view-count cap of VIEW_CACHE_MAX would.
+    let big: Vec<String> = (0..(VIEW_CACHE_MAX_OBJECTS * 2 / 3))
+        .map(|i| format!("p{i}"))
+        .collect();
+    let big: Vec<&str> = big.iter().map(String::as_str).collect();
+
+    app.switch_kind_ns("pods", Some("first"));
+    sync_view(&mut app, &big);
+    app.switch_kind_ns("pods", Some("second"));
+    sync_view(&mut app, &big);
+
+    // Returning to the first view finds nothing: its snapshot was evicted to
+    // stay under the object budget, even though only two views were cached.
+    app.switch_kind_ns("pods", Some("first"));
+    assert_eq!(
+        app.store.len(),
+        0,
+        "a large snapshot must be evicted on the object bound, not held \
+         until the view-count cap"
+    );
+}
+
+/// The entry you just left is the one the cache exists for, so it survives
+/// even when it alone busts the object budget.
+#[tokio::test]
+async fn view_cache_keeps_the_most_recent_snapshot_however_large() {
+    let (mut app, _rx) = test_app();
+    let huge: Vec<String> = (0..(VIEW_CACHE_MAX_OBJECTS + 100))
+        .map(|i| format!("p{i}"))
+        .collect();
+    let huge: Vec<&str> = huge.iter().map(String::as_str).collect();
+
+    app.switch_kind_ns("pods", Some("huge"));
+    sync_view(&mut app, &huge);
+    app.switch_kind_ns("pods", Some("elsewhere"));
+    app.switch_kind_ns("pods", Some("huge"));
+
+    assert_eq!(
+        app.store.len(),
+        huge.len(),
+        "the most recent snapshot is kept even when it exceeds the budget"
+    );
+}
+
+/// `match_lines` is memoized because `doc_title` calls it every frame. The
+/// cache keys on `(filter, revision, line count)`; these pin each dimension.
+#[tokio::test]
+async fn doc_search_cache_follows_the_filter() {
+    let mut doc = Scrollable::doc(
+        "t".into(),
+        vec!["alpha".into(), "beta".into(), "alpha again".into()],
+    );
+
+    doc.filter = "alpha".into();
+    assert_eq!(doc.match_lines(), vec![0, 2]);
+    // Second call must come from the cache and still be right.
+    assert_eq!(doc.match_lines(), vec![0, 2]);
+
+    doc.filter = "beta".into();
+    assert_eq!(
+        doc.match_lines(),
+        vec![1],
+        "stale matches after filter change"
+    );
+
+    doc.filter.clear();
+    assert!(doc.match_lines().is_empty());
+}
+
+/// The hazard the `revision` counter exists for: a refreshed events list can
+/// replace the document with one of *identical* line count while a search is
+/// active, which a `(filter, line count)` key alone would not notice.
+#[tokio::test]
+async fn doc_search_cache_survives_a_same_length_document_swap() {
+    let mut doc = Scrollable::doc("t".into(), vec!["hit".into(), "miss".into()]);
+    doc.filter = "hit".into();
+    assert_eq!(doc.match_lines(), vec![0]);
+
+    doc.replace_lines(vec!["miss".into(), "hit".into()].into());
+    assert_eq!(
+        doc.match_lines(),
+        vec![1],
+        "stale cache served after a same-length document swap"
+    );
+}
+
+/// Document search is a plain substring, not the log view's grammar: `!` and
+/// `/re/` are literal characters here and must not invert or compile.
+#[tokio::test]
+async fn doc_search_is_a_plain_substring_not_the_log_filter_grammar() {
+    let mut doc = Scrollable::doc(
+        "t".into(),
+        vec![
+            "plain line".into(),
+            "has !bang in it".into(),
+            "has /slashes/ in it".into(),
+        ],
+    );
+
+    doc.filter = "!bang".into();
+    assert_eq!(
+        doc.match_lines(),
+        vec![1],
+        "`!` must be literal, not inverse"
+    );
+
+    doc.filter = "/slashes/".into();
+    assert_eq!(doc.match_lines(), vec![2], "`/re/` must be literal");
+}
+
+/// Search is case-insensitive and must stay exact across multi-byte lines.
+#[tokio::test]
+async fn doc_search_is_case_insensitive_and_multibyte_safe() {
+    let mut doc = Scrollable::doc(
+        "t".into(),
+        vec![
+            "Image: nginx".into(),
+            "日本語 image 測定".into(),
+            "none".into(),
+        ],
+    );
+    doc.filter = "IMAGE".into();
+    assert_eq!(doc.match_lines(), vec![0, 1]);
+}
+
+// ---- log view index (2.3) -------------------------------------------------
+//
+// The index is maintained incrementally across frames, so the property that
+// matters is that it never diverges from a from-scratch computation, through
+// appends, filter changes, wrap toggles, trims and clears.
+
+/// Recompute shown-line indices and total display rows the naive way.
+fn naive_log_index(logs: &LogsView, wrap_width: usize) -> (Vec<u32>, usize) {
+    let shown: Vec<u32> = logs
+        .view
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| logs.matches(l))
+        .map(|(i, _)| i as u32)
+        .collect();
+    let total = if wrap_width > 0 {
+        shown
+            .iter()
+            .map(|&i| crate::ui::wrapped_height(&logs.view.lines[i as usize], wrap_width))
+            .sum()
+    } else {
+        shown.len()
+    };
+    (shown, total)
+}
+
+fn assert_index_matches_naive(logs: &mut LogsView, wrap_width: usize, what: &str) {
+    let (want_shown, want_total) = naive_log_index(logs, wrap_width);
+    let idx = logs.refresh_index(wrap_width);
+    let got: Vec<u32> = (0..idx.shown_len())
+        .map(|i| idx.line_at(i).unwrap() as u32)
+        .collect();
+    assert_eq!(got, want_shown, "shown lines diverged after {what}");
+    assert_eq!(
+        idx.total_rows(),
+        want_total,
+        "total rows diverged after {what}"
+    );
+
+    // Row arithmetic must be self-consistent: starts ascend, and each line's
+    // start plus its height is the next line's start.
+    let mut expect_start = 0usize;
+    for i in 0..idx.shown_len() {
+        assert_eq!(
+            idx.start_row(i),
+            expect_start,
+            "start_row({i}) after {what}"
+        );
+        // The first line reaching this row must be this one.
+        assert_eq!(
+            idx.first_at_row(expect_start),
+            i,
+            "first_at_row after {what}"
+        );
+        expect_start += idx.height_at(i);
+    }
+    assert_eq!(expect_start, idx.total_rows(), "heights must sum to total");
+}
+
+#[tokio::test]
+async fn log_index_tracks_appends_incrementally() {
+    let mut logs = LogsView::default();
+    for w in [0usize, 20] {
+        logs.view.clear_lines();
+        logs.set_filter(String::new());
+        assert_index_matches_naive(&mut logs, w, "empty buffer");
+
+        for batch in 0..5 {
+            logs.view
+                .lines
+                .extend((0..20).map(|i| format!("batch {batch} line {i} some padding text here")));
+            assert_index_matches_naive(&mut logs, w, "append");
+        }
+    }
+}
+
+#[tokio::test]
+async fn log_index_rebuilds_on_filter_and_wrap_changes() {
+    let mut logs = LogsView::default();
+    logs.view
+        .lines
+        .extend((0..60).map(|i| format!("line {i} {}", if i % 3 == 0 { "keep" } else { "drop" })));
+
+    assert_index_matches_naive(&mut logs, 0, "no filter");
+
+    logs.set_filter("keep".into());
+    assert_index_matches_naive(&mut logs, 0, "filter applied");
+
+    // Wrap on, at a width that forces multi-row lines.
+    assert_index_matches_naive(&mut logs, 8, "wrap on");
+    // ...and back off.
+    assert_index_matches_naive(&mut logs, 0, "wrap off");
+
+    logs.set_filter("drop".into());
+    assert_index_matches_naive(&mut logs, 8, "filter changed while wrapped");
+
+    logs.set_filter(String::new());
+    assert_index_matches_naive(&mut logs, 8, "filter cleared");
+}
+
+#[tokio::test]
+async fn log_index_rebuilds_when_the_buffer_is_trimmed_or_cleared() {
+    let mut logs = LogsView::default();
+    logs.view
+        .lines
+        .extend((0..50).map(|i| format!("line {i} with enough text to wrap somewhere")));
+    logs.set_filter("line".into());
+    assert_index_matches_naive(&mut logs, 12, "initial");
+
+    // Trimming the front shifts every index — the index must not reuse stale
+    // positions.
+    logs.view.drain_front(20);
+    assert_index_matches_naive(&mut logs, 12, "drain_front");
+
+    logs.view
+        .lines
+        .extend((0..10).map(|i| format!("post-trim {i}")));
+    assert_index_matches_naive(&mut logs, 12, "append after trim");
+
+    logs.view.clear_lines();
+    assert_index_matches_naive(&mut logs, 12, "clear");
+    assert_eq!(logs.index().total_rows(), 0);
+}
+
+#[tokio::test]
+async fn log_index_first_at_row_finds_the_line_covering_a_row() {
+    let mut logs = LogsView::default();
+    // Deterministic heights: at width 10, a 25-char line is 3 rows.
+    logs.view
+        .lines
+        .extend((0..6).map(|i| format!("{i}bcdefghijklmnopqrstuvwx")));
+    let idx = logs.refresh_index(10);
+    assert_eq!(idx.shown_len(), 6);
+    let h0 = idx.height_at(0);
+    assert!(h0 > 1, "test needs wrapped lines, got height {h0}");
+
+    // Every row in a line's span must map back to that line.
+    for i in 0..idx.shown_len() {
+        let start = idx.start_row(i);
+        for r in start..start + idx.height_at(i) {
+            assert_eq!(idx.first_at_row(r), i, "row {r} should belong to line {i}");
+        }
+    }
+}
+
+// ---- fuzzy prefilter soundness (3.1) --------------------------------------
+
+/// The mask prefilter must only ever produce false *positives*. If a pattern
+/// really is a subsequence of a haystack, the mask test must let it through —
+/// otherwise rows silently vanish from a filtered list.
+#[test]
+fn subseq_mask_never_rejects_a_real_subsequence() {
+    let cases = [
+        ("nginx-deployment-7d9f8b6c5d-x4k2p", "nginx"),
+        ("nginx-deployment-7d9f8b6c5d-x4k2p", "ngxdep"),
+        ("NGINX-Deployment", "nginx"),
+        ("kube-system", "KUBE"),
+        ("10.96.0.1", "10.96"),
+        ("CrashLoopBackOff", "clbo"),
+        ("日本語 temp", "temp"),
+        ("日本語 temp", "日本"),
+        ("a", "a"),
+        ("abc", ""),
+    ];
+    for (hay, pat) in cases {
+        let hm = subseq_mask(hay);
+        let pm = subseq_mask(pat);
+        assert_eq!(
+            hm & pm,
+            pm,
+            "mask rejected {pat:?} which is a subsequence of {hay:?}"
+        );
+    }
+}
+
+/// End-to-end: the filtered row set must equal what an unfiltered fuzzy match
+/// over the same cells would produce. Guards the prefilter *and* the
+/// cache-through path together.
+#[tokio::test]
+async fn filtering_matches_a_naive_fuzzy_pass() {
+    for pat in ["web", "kube", "zzz", "run", "10.", "WEB", "nginx"] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("pods");
+        app.handle_msg(Msg::Reset {
+            generation: app.generation,
+        });
+        for i in 0..40 {
+            apply(
+                &mut app,
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": format!("web-{i}"),
+                        "namespace": if i % 2 == 0 { "default" } else { "kube-system" },
+                        "resourceVersion": format!("{i}"),
+                        "creationTimestamp": "2026-08-30T08:00:00Z",
+                    },
+                    "spec": { "nodeName": format!("node-{i}") },
+                    "status": {
+                        "phase": "Running",
+                        "podIP": format!("10.0.0.{i}"),
+                        "containerStatuses": [
+                            { "name": "app", "ready": true, "restartCount": 0,
+                              "state": { "running": { "startedAt": "2026-08-30T09:00:00Z" } } }
+                        ],
+                    },
+                }),
+            );
+        }
+        app.handle_msg(Msg::Synced {
+            generation: app.generation,
+        });
+
+        // Naive expectation: name haystack, else any rendered cell.
+        let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+        let spec = crate::columns::build_spec("pods", None, None, false);
+        let mut want: Vec<String> = Vec::new();
+        for (k, o) in app.store.iter() {
+            let hay = format!(
+                "{} {}",
+                o.metadata.namespace.as_deref().unwrap_or(""),
+                o.metadata.name.as_deref().unwrap_or("")
+            );
+            let hit = matcher.fuzzy_match(&hay, pat).is_some() || {
+                let (cells, _) = spec.cells(o);
+                cells.iter().any(|c| matcher.fuzzy_match(c, pat).is_some())
+            };
+            if hit {
+                want.push(k.clone());
+            }
+        }
+        want.sort();
+
+        app.filter = pat.to_string();
+        app.invalidate_rows();
+        let mut got: Vec<String> = (0..app.row_count())
+            .filter_map(|i| app.rows_window(i, 1).first().map(|o| row_key(o)))
+            .collect();
+        got.sort();
+
+        assert_eq!(got, want, "filter {pat:?} diverged from a naive fuzzy pass");
+    }
+}

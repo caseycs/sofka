@@ -375,6 +375,25 @@ pub struct Scrollable {
     /// Which match `n`/`N` last landed on (0-based into [`Self::match_lines`]),
     /// for the `[cur/total]` counter and relative stepping.
     pub match_idx: usize,
+    /// Bumped whenever [`Self::lines`] is replaced in place, so the match
+    /// cache below can tell "same document" from "same line count".
+    revision: u64,
+    /// Memoized [`Self::match_lines`], valid for one `(filter, revision,
+    /// line count)`.
+    ///
+    /// `doc_title` calls `match_lines` on every frame just to render the
+    /// `[2/5]` counter, and the old implementation lowercased *every line of
+    /// the document* into a fresh `String` each time. On a large describe or
+    /// YAML view with a `/` search active that was thousands of allocations
+    /// at up to 62 Hz.
+    match_cache: RefCell<Option<MatchCache>>,
+}
+
+struct MatchCache {
+    filter: String,
+    revision: u64,
+    line_count: usize,
+    matches: Vec<usize>,
 }
 
 /// One command-palette suggestion — a built-in command (`:ctx`, `:pulse`), a
@@ -589,19 +608,86 @@ impl Scrollable {
         self.wrap
     }
 
+    /// A fresh document view. The binary uses this because `Scrollable` has
+    /// private cache fields it can't name from outside the library.
+    pub fn doc(title: String, lines: Vec<String>) -> Self {
+        Scrollable {
+            title,
+            lines: lines.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Bumped whenever the existing lines are disturbed (replaced, trimmed
+    /// from the front, cleared) — anything that shifts or invalidates
+    /// previously-computed line indices. A pure append does *not* bump it, so
+    /// derived indices can be extended instead of rebuilt.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Drop `n` lines from the front (log-buffer trimming). Shifts every
+    /// index, so it bumps the revision.
+    pub fn drain_front(&mut self, n: usize) {
+        self.lines.drain(0..n);
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Drop every line.
+    pub fn clear_lines(&mut self) {
+        self.lines.clear();
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Replace the document, invalidating the search-match cache.
+    ///
+    /// Every other site builds a whole new `Scrollable` (which starts with an
+    /// empty cache); this is the one path that swaps the lines underneath a
+    /// live view — a refreshed events list — where the new document can have
+    /// the same line count as the old one.
+    pub fn replace_lines(&mut self, lines: VecDeque<String>) {
+        self.lines = lines;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     /// Line indices (0-based) containing the active search query, matched
     /// case-insensitively as a substring. Empty when no search is active.
+    ///
+    /// Memoized: this is called once per frame from `doc_title` and again per
+    /// keypress from `n`/`N`, always over the whole document.
     pub fn match_lines(&self) -> Vec<usize> {
         if self.filter.is_empty() {
             return Vec::new();
         }
-        let needle = self.filter.to_lowercase();
-        self.lines
+        let line_count = self.lines.len();
+        if let Some(c) = self.match_cache.borrow().as_ref()
+            && c.revision == self.revision
+            && c.line_count == line_count
+            && c.filter == self.filter
+        {
+            return c.matches.clone();
+        }
+
+        // Plain case-insensitive substring — deliberately *not* `LogMatcher`,
+        // which would give `!` and `/re/` special meaning that the document
+        // search has never had. Same SIMD-backed automaton underneath, without
+        // lowercasing every line into a throwaway `String`.
+        let matcher = crate::logfilter::Substring::new(&self.filter);
+        let matches: Vec<usize> = self
+            .lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.to_lowercase().contains(&needle))
+            .filter(|(_, l)| matcher.matches(l))
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+
+        *self.match_cache.borrow_mut() = Some(MatchCache {
+            filter: self.filter.clone(),
+            revision: self.revision,
+            line_count,
+            matches: matches.clone(),
+        });
+        matches
     }
 
     /// Finalize a search: scroll to the first match at or after the current
@@ -632,6 +718,90 @@ impl Scrollable {
             (cur + n - 1) % n
         };
         self.scroll = matches[self.match_idx];
+    }
+}
+
+/// Which buffer lines pass the filter, and where each lands in display rows.
+///
+/// `draw_logs` used to rebuild both of these from scratch on every frame: a
+/// `Vec<&String>` of every matching line, plus — with wrap on — a
+/// `wrapped_height` walk over every one of them. The buffer holds up to 5,000
+/// lines while following and 100,000 while paused, and the viewport shows ~40,
+/// so that was O(buffer) work at up to 62 Hz to render O(viewport).
+///
+/// This index is keyed on `(filter, wrap width, revision)` and, crucially,
+/// *extends* when lines are appended rather than rebuilding — a following log
+/// stream grows the buffer every batch, so a rebuild-on-length-change cache
+/// would never hit.
+#[derive(Default)]
+pub struct LogIndex {
+    filter: String,
+    /// Wrap width in columns, or 0 when wrapping is off.
+    wrap_width: usize,
+    revision: u64,
+    /// How many buffer lines have been folded in so far.
+    consumed: usize,
+    /// Buffer indices that pass the filter, ascending.
+    shown: Vec<u32>,
+    /// Cumulative display rows *through* `shown[i]`, so the first row of
+    /// `shown[i]` is `ends[i-1]` (0 for i == 0). Only maintained when
+    /// wrapping; without wrap every line is exactly one row.
+    ends: Vec<u32>,
+    total_rows: usize,
+}
+
+impl LogIndex {
+    pub fn total_rows(&self) -> usize {
+        self.total_rows
+    }
+
+    pub fn shown_len(&self) -> usize {
+        self.shown.len()
+    }
+
+    /// Buffer index of the `i`th shown line.
+    pub fn line_at(&self, i: usize) -> Option<usize> {
+        self.shown.get(i).map(|&x| x as usize)
+    }
+
+    /// Display row where the `i`th shown line starts.
+    pub fn start_row(&self, i: usize) -> usize {
+        if self.wrap_width == 0 {
+            return i;
+        }
+        match i.checked_sub(1) {
+            None => 0,
+            Some(prev) => self.ends.get(prev).copied().unwrap_or(0) as usize,
+        }
+    }
+
+    /// Display rows occupied by the `i`th shown line.
+    pub fn height_at(&self, i: usize) -> usize {
+        if self.wrap_width == 0 {
+            return 1;
+        }
+        self.ends.get(i).copied().unwrap_or(0) as usize - self.start_row(i)
+    }
+
+    /// Index of the first shown line that reaches display row `row` — a
+    /// binary search over the cumulative row ends, replacing a linear walk
+    /// from the top of the buffer.
+    pub fn first_at_row(&self, row: usize) -> usize {
+        if self.wrap_width == 0 {
+            return row.min(self.shown.len());
+        }
+        self.ends.partition_point(|&end| (end as usize) <= row)
+    }
+
+    fn reset(&mut self, filter: &str, wrap_width: usize, revision: u64) {
+        self.filter.clear();
+        self.filter.push_str(filter);
+        self.wrap_width = wrap_width;
+        self.revision = revision;
+        self.consumed = 0;
+        self.shown.clear();
+        self.ends.clear();
+        self.total_rows = 0;
     }
 }
 
@@ -668,6 +838,8 @@ pub struct LogsView {
     /// What is being streamed, so it can be re-streamed (e.g. toggling
     /// timestamps) without re-deriving the source.
     source: Option<LogSource>,
+    /// Filter/wrap index over [`Self::view`], maintained incrementally.
+    index: LogIndex,
 }
 
 impl Default for LogsView {
@@ -686,6 +858,7 @@ impl Default for LogsView {
             viewport_h: 0,
             last_wrap_width: 0,
             source: None,
+            index: LogIndex::default(),
         }
     }
 }
@@ -701,6 +874,58 @@ impl LogsView {
     /// Whether `line` passes the active filter (empty filter = everything).
     pub fn matches(&self, line: &str) -> bool {
         self.matcher.matches(line)
+    }
+
+    /// The index as it stands. Call [`Self::refresh_index`] first — this does
+    /// not update it. Split from the refresh so the renderer can hold the
+    /// index and the line buffer at the same time.
+    pub fn index(&self) -> &LogIndex {
+        &self.index
+    }
+
+    /// Bring the filter/wrap index up to date with the buffer.
+    ///
+    /// Rebuilds only when the filter, wrap width, or buffer revision changed;
+    /// otherwise folds in just the lines appended since the last call. Pass
+    /// `wrap_width = 0` when wrapping is off.
+    pub fn refresh_index(&mut self, wrap_width: usize) -> &LogIndex {
+        // Field-level destructuring: the loop needs `&mut index` while reading
+        // `view` and `matcher`, which a plain `&mut self` borrow would forbid.
+        let LogsView {
+            view,
+            filter,
+            matcher,
+            index,
+            ..
+        } = self;
+
+        let revision = view.revision();
+        let len = view.lines.len();
+        let reusable = index.revision == revision
+            && index.wrap_width == wrap_width
+            && index.filter == *filter
+            && index.consumed <= len;
+        if !reusable {
+            index.reset(filter, wrap_width, revision);
+        }
+
+        for i in index.consumed..len {
+            let Some(line) = view.lines.get(i) else {
+                break;
+            };
+            if !matcher.matches(line) {
+                continue;
+            }
+            index.shown.push(i as u32);
+            if wrap_width > 0 {
+                index.total_rows += crate::ui::wrapped_height(line, wrap_width);
+                index.ends.push(index.total_rows as u32);
+            } else {
+                index.total_rows += 1;
+            }
+        }
+        index.consumed = len;
+        index
     }
 
     /// Title label for the active `0`–`5` time anchor, if any.
@@ -757,12 +982,12 @@ const PREV_REVISIONS_MAX: usize = 256;
 /// drilling away and back keeps the baseline.
 #[derive(Default)]
 pub(super) struct PrevRevisions {
-    map: HashMap<(String, String), DynamicObject>,
+    map: HashMap<(String, String), Arc<DynamicObject>>,
     order: VecDeque<(String, String)>,
 }
 
 impl PrevRevisions {
-    pub(super) fn insert(&mut self, kind: &str, key: &str, obj: DynamicObject) {
+    pub(super) fn insert(&mut self, kind: &str, key: &str, obj: Arc<DynamicObject>) {
         let k = (kind.to_string(), key.to_string());
         if self.map.insert(k.clone(), obj).is_none() {
             self.order.push_back(k);
@@ -775,7 +1000,9 @@ impl PrevRevisions {
     }
 
     pub(super) fn get(&self, kind: &str, key: &str) -> Option<&DynamicObject> {
-        self.map.get(&(kind.to_string(), key.to_string()))
+        self.map
+            .get(&(kind.to_string(), key.to_string()))
+            .map(Arc::as_ref)
     }
 }
 
@@ -804,6 +1031,29 @@ struct CellCacheEntry {
     resource_version: Option<String>,
     cells: Vec<String>,
     status_idx: Option<usize>,
+    /// Per-cell character-presence masks, and their union across the row.
+    /// See [`subseq_mask`]: a cheap necessary condition for a fuzzy
+    /// subsequence match, used to skip cells (and whole rows) without paying
+    /// for a Skim match.
+    cell_masks: Vec<u64>,
+    row_mask: u64,
+}
+
+/// A 64-bit "which characters occur here" summary, used as a prefilter before
+/// the fuzzy matcher.
+///
+/// A fuzzy match is a subsequence match, so every character of the pattern
+/// must occur in the haystack. If any pattern character is missing, the match
+/// is impossible and Skim — which allocates and runs a DP over the pair — need
+/// never be called. Bytes are folded to lowercase and bucketed mod 64, so
+/// collisions only ever produce a *false positive* (the real matcher then
+/// decides); a false negative is impossible, which is what makes this safe.
+fn subseq_mask(s: &str) -> u64 {
+    let mut m = 0u64;
+    for b in s.as_bytes() {
+        m |= 1u64 << (b.to_ascii_lowercase() % 64);
+    }
+    m
 }
 
 struct SortKeyEntry {
@@ -831,6 +1081,13 @@ const HISTORY_MAX: usize = 50;
 /// Maximum view snapshots kept for instant redisplay when navigating back to
 /// a recently-watched view (least-recently-used beyond this).
 const VIEW_CACHE_MAX: usize = 8;
+
+/// Second, and in practice the binding, bound on the view cache: the total
+/// objects it may retain across all snapshots. A view-count cap is not a
+/// memory cap — on a large cluster eight snapshots of a 2,000-pod view cost
+/// roughly eight times one snapshot. Objects are `Arc`-shared with the live
+/// store, so the live view is nearly free; this bounds the *departed* ones.
+const VIEW_CACHE_MAX_OBJECTS: usize = 10_000;
 
 /// Identity of a watch scope, used to key cached view snapshots. Two visits
 /// with the same key list exactly the same server-side set, so the previous
@@ -889,7 +1146,7 @@ pub struct App {
     /// Snapshots of recently-left views: shown instantly (marked syncing) when
     /// the user navigates back, while the fresh watch relists in the
     /// background. Bounded by [`VIEW_CACHE_MAX`]; cleared on context switch.
-    view_cache: HashMap<ViewKey, HashMap<String, DynamicObject>>,
+    view_cache: HashMap<ViewKey, crate::store::Items>,
     /// LRU order for [`Self::view_cache`] (front = oldest).
     view_cache_order: VecDeque<ViewKey>,
     /// Browser-style history of root views for `[`/`]`: every root switch
@@ -1185,6 +1442,9 @@ pub struct App {
     pub should_quit: bool,
     matcher: SkimMatcherV2,
     rows_cache: RefCell<RowsCache>,
+    /// Scratch buffer for the fuzzy filter's "namespace name" haystack, reused
+    /// across rows so the filter pass doesn't allocate a `String` per object.
+    hay_buf: RefCell<String>,
 
     /// Compiled log provider from `[providers.logs]`, re-resolved on context
     /// switch and `:reload` so each cluster can point at its own backend.
@@ -1368,6 +1628,7 @@ impl App {
             return_selection: None,
             should_quit: false,
             matcher: SkimMatcherV2::default(),
+            hay_buf: RefCell::new(String::new()),
             rows_cache: RefCell::new(RowsCache {
                 dirty: true,
                 keys: Vec::new(),

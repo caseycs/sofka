@@ -1,0 +1,1023 @@
+# sofka optimization survey: memory, per-frame CPU, and where SIMD actually pays
+
+## STATUS / PROGRESS
+
+Execution constraints agreed with the user: **no `cargo clippy`, no `cargo fmt`,
+and no release builds during the execution phase.** Correctness is checked with
+`cargo test` (debug) and `cargo check` only. Formatting and lint run at the end,
+by the user.
+
+Full program approved. Approved deps: `criterion` + `dhat` (dev-only),
+`aho-corasick` + `memchr`, `mimalloc`, `simd-json`/`sonic-rs` (staged).
+`last-applied-configuration` is stripped from the store but re-fetched on demand
+so the YAML view is unchanged.
+
+Mark each item `[x]` when landed and verified. `[~]` = partially done.
+
+```
+Step  Item                                                        Status
+----  ----------------------------------------------------------  ------
+ 1    Tier 0   benches + dhat + baselines                          [x]
+ 2    1.1      view_cache: Arc-shared seed; bound by objects       [x]
+ 2    1.2      prev_revisions: stop deep-cloning per event         [x]
+ 2    1.3      strip last-applied-config + on-demand YAML re-GET   [ ]
+ 3    2.1      Rc<str> row keys + rebuild debounce + unstable sort [ ]
+ 3    2.2      OnceCell in CellContext (pod_summary, helm::decode) [x]
+ 4    2.3      log viewport: cached match index + height prefix-sum [x]
+ 4    2.5      Scrollable::match_lines cached                      [x]
+ 4    2.4      theme palette: thread_local snapshot, drop RwLock   [x]
+ 5    3.1      filter reads through cell cache + ASCII bitmask     [x]
+ 5    3.3      views::extract: typed ObjectMeta fields, no to_value [ ]
+ 6    4.1      logfilter -> aho-corasick (SIMD substring)          [x]
+ 6    4.2      memchr for ESC scans in wrapped_height/ansi_runs    [x]
+ 7    4.3.1    watcher streaming_lists() + ListWatch fallback      [ ]
+ 8    1.6      mimalloc global allocator                           [ ]
+ 8    Tier 6   codegen-units=1 + panic=abort (measure each)        [ ]
+ 9    4.3.2A   SIMD JSON at self-owned parse sites                 [ ]
+ 9    4.3.2B   SIMD JSON on list path (only if parse > ~300ms)     [ ]
+10    1.4      nodes view: stop re-listing all pods every 10s      [ ]
+10    1.5      Timeline + RowsCache retention bounds               [ ]
+10    2.6      per-frame small items (help, pickers, row_key, ...) [ ]
+10    2.7      parsed_filter hoist, resolve_ref, is_fleet_context  [~] hoist done
+10    3.2      eval_cmp: pre-fold `want`, no per-object lowercase  [ ]
+10    3.4      helm_latest_revision_keys cached                    [ ]
+10    3.5      sort_by -> sort_unstable_by (audit each site)       [x]
+10    Tier 7   async state writes; providers min_by_key            [~] min_by_key done
+11    Tier 5   sget -> &str, then CellFn -> Cow<str>               [ ]
+```
+
+### Measurement log
+
+Recorded as steps land, so a flat result can be reverted rather than kept on
+faith.
+
+**Harness:** `cargo bench --features bench --bench hot_paths -- --measurement-time 2
+--warm-up-time 1 --sample-size 20`, Apple M3 Max, bench profile (thin LTO).
+
+**Noise floor: ±5% typical, but single runs drift further.** Established
+empirically: control benches that share no code with a change moved −1% to
++4.8% across the Arc change, and in the 4.1/4.2 run several controls "regressed"
+6-12% — a re-measure put them back where they started (`cells/pods_256`:
+292 -> 313 -> 283 µs with no code change in between). **Never accept a
+regression on a control group from one run; re-measure it.** Numbers below are
+re-measured where a single run disagreed with the controls.
+
+#### Tier 0 baseline (pre-any-change)
+
+| Bench | Baseline |
+| ----- | -------- |
+| `rows_cache/event_then_rebuild/500` | 86.9 µs |
+| `rows_cache/event_then_rebuild/2000` | 442.6 µs |
+| `filter/name_hit/2000` | 1.575 ms |
+| `filter/no_match/2000` | 1.005 ms |
+| `filter/broad/2000` | 934 µs |
+| `cells/pods_256` | 759 µs (**3.0 µs/row**) |
+| `cells/helm_16` | 2.139 ms (**134 µs/row** — 45x a pod row) |
+| `log_filter/empty` | 15.5 µs |
+| `log_filter/substr_hit` | 618 µs |
+| `log_filter/substr_miss` | 615 µs |
+| `log_filter/substr_late` | 658 µs |
+| `log_filter/regex` | 325 µs |
+| `log_filter/inverse` | 667 µs |
+| `log_wrap/ascii` | 231 µs |
+| `log_wrap/wide` | 387 µs |
+
+Two things the baseline already settles:
+
+- **`cells/helm_16` at 134 µs/row confirms 2.2.** A helm row costs 45x a pod
+  row because `helm::decode` (base64 x2 + gunzip + full JSON parse) runs five
+  times per row.
+- **`filter/name_hit` (1.575 ms) is *slower* than `filter/no_match` (1.005 ms).**
+  Counterintuitive until you look at the matcher: `zzzznotpresent` is rejected
+  early because `z` appears in no row, while every character of
+  `workload-00042` *does* appear in every row name, so Skim runs its full DP
+  before failing. This means 3.1's ASCII-presence bitmask will **not** help the
+  common case — the win there has to come from 3.1.1 (read through the cell
+  cache), not the prefilter. Adjusted the plan accordingly.
+
+#### Results
+
+| Step | Bench / metric | Before | After | Kept? |
+| ---- | -------------- | ------ | ----- | ----- |
+| 1.1+1.2 `Arc` store | `rows_cache/2000` | 442.6 µs | 366.0 µs (**−8.7%**) | yes |
+| 1.1+1.2 `Arc` store | `filter/name_hit/2000` | 1.575 ms | 1.479 ms (−4.9%) | yes |
+| 1.1+1.2 `Arc` store | `rows_cache/500` | 86.9 µs | 89.5 µs (+6.3%) | yes — within noise |
+| 1.1+1.2 `Arc` store | control benches | — | −1% to +4.8% | noise reference |
+| 2.2 lazy `CellContext` | `cells/pods_256` | 759 µs | 292 µs (**−63.4%**) | yes |
+| 2.2 lazy `CellContext` | `cells/helm_16` | 2.139 ms | 391 µs (**−83.2%**) | yes |
+| 2.2 lazy `CellContext` | `filter/name_hit/2000` | 1.479 ms | 1.404 ms (−6.3%) | yes |
+| 2.2 lazy `CellContext` | control benches | — | −2% to +3% | flat, as expected |
+
+| 4.1 aho-corasick | `log_filter/substr_miss` | 615 µs | 178 µs (**−71.0%**) | yes |
+| 4.1 aho-corasick | `log_filter/substr_late` | 658 µs | 257 µs (**−60.9%**) | yes |
+| 4.1 aho-corasick | `log_filter/substr_hit` | 618 µs | 315 µs (**−49.0%**) | yes |
+| 4.1 aho-corasick | `log_filter/inverse` | 667 µs | 375 µs (**−43.8%**) | yes |
+| 4.2 memchr | `log_wrap/ascii` | 231 µs | 215 µs (−6.9%) | yes |
+| 4.2 memchr | `log_wrap/wide` | 387 µs | 365 µs (−5.7%) | yes |
+| 3.5 sort_unstable + min_by_key | `rows_cache/2000` | 368.8 µs | 357.0 µs (−3.2%) | yes — small but free |
+
+| 2.3 log index | `log_viewport/steady/wrap` | ~393 µs of O(buffer) work | **4.49 ns** | yes |
+| 2.3 log index | `log_viewport/steady/nowrap` | ~178 µs of O(buffer) work | **4.67 ns** | yes |
+| 2.3 log index | `log_viewport/streaming/wrap` | ~393 µs | 2.88 µs (50 new lines) | yes |
+| 2.4 palette / 2.5 doc search | not separately benched | — | verified by tests | yes |
+
+**2.3 is the single largest win in the program.** `draw_logs` rebuilt two
+`Vec`s spanning the whole buffer on every frame — the filter pass, and (with
+wrap on) a `wrapped_height` walk — to render a ~40-line viewport. The buffer is
+5,000 lines while following and 100,000 while paused. `LogIndex` now maintains
+those incrementally, keyed on `(filter, wrap width, revision)`, extending on
+append instead of rebuilding, and the first visible line is found by binary
+search over cumulative row ends instead of a walk from the top.
+
+The "before" column above is the O(buffer) portion only (measured as
+`log_filter/substr_hit` + `log_wrap/*` on a 10k buffer); the ~40 visible lines
+still get styled every frame, as they always did. Four tests assert the
+incremental index never diverges from a from-scratch computation across
+appends, filter changes, wrap toggles, front-trims and clears.
+
+| 3.1 cache-through filter | `filter/broad/2000` | 934 µs | 755 µs (−19.6%) | yes |
+| 3.1 cache-through filter | `filter/no_match/2000` | 1.005 ms | 824 µs (−15.2%) | yes |
+| 3.1 prefilter + hay buffer | `filter/no_match/2000` | 824 µs | 240 µs (**−68.7%**) | yes |
+| 3.1 prefilter + hay buffer | `filter/name_hit/2000` | 1.257 ms | 628 µs (**−49.2%**) | yes |
+| 3.1 prefilter + hay buffer | `filter/broad/2000` | 755 µs | 503 µs (**−32.1%**) | yes |
+| 3.1 + 2.7 loop restructure | `rows_cache/2000` | 357 µs | 314 µs (−12.1%) | yes |
+
+**3.1 came in three parts, and the baseline's surprise turned out to matter.**
+The Tier 0 note predicted the presence bitmask would not help `name_hit`,
+because every character of `workload-00042` occurs in every row name. That was
+right about the *name* haystack and wrong about the cells: most of a row's ~15
+cells are short and lack at least one pattern character, so the per-cell mask
+skips them and `name_hit` still halved. `no_match` benefits most (−68.7%),
+exactly as predicted, since `z` occurs nowhere.
+
+Soundness matters more than speed here — a false negative would silently hide
+rows. The mask folds bytes to lowercase and buckets them mod 64, so a collision
+can only ever cause a false *positive* (the real matcher then decides). Two
+tests pin it: `subseq_mask_never_rejects_a_real_subsequence`, and
+`filtering_matches_a_naive_fuzzy_pass`, which compares the whole filtered row
+set against an uncached, unprefiltered fuzzy pass.
+
+**Cumulative vs Tier 0 baseline:**
+
+| Bench | Baseline | Now | Change |
+| ----- | -------- | --- | ------ |
+| `cells/helm_16` | 2.139 ms (134 µs/row) | 388 µs (**24.3 µs/row**) | **−81.9%** |
+| `log_viewport/steady/wrap` | ~393 µs O(buffer) | **4.49 ns** | ~10^5x |
+| `filter/no_match/2000` | 1.005 ms | 240 µs | **−76.1%** |
+| `filter/broad/2000` | 934 µs | 503 µs | **−46.1%** |
+| `rows_cache/500` | 86.9 µs | 70.9 µs | **−18.4%** |
+| `log_filter/substr_miss` | 615 µs | 178 µs | **−71.0%** |
+| `cells/pods_256` | 759 µs (3.0 µs/row) | 283 µs (**1.11 µs/row**) | **−62.7%** |
+| `log_filter/substr_late` | 658 µs | 257 µs | **−60.9%** |
+| `log_filter/substr_hit` | 618 µs | 315 µs | **−49.0%** |
+| `log_filter/inverse` | 667 µs | 375 µs | **−43.8%** |
+| `rows_cache/2000` | 442.6 µs | 314 µs | **−29.1%** |
+| `filter/name_hit/2000` | 1.575 ms | 628 µs | **−60.1%** |
+| `log_wrap/ascii` | 231 µs | 215 µs | −6.9% |
+
+**On the SIMD question specifically:** 4.1 is where vectorization actually paid.
+The old code was a hand-rolled `windows(n).any(eq_ignore_ascii_case)` — a full
+pattern compare at every byte offset. Handing that to `aho-corasick` (which
+picks a memmem/Teddy prefilter, runtime-dispatched to SSE2/AVX2 or NEON) took
+the worst case from 615 µs to 178 µs over a 10,000-line buffer. The non-ASCII
+arm also stopped allocating a lowercased copy of every line: a pattern whose
+*folded* form is non-ASCII cannot occur in an ASCII line, so those reject
+without folding. Six new tests pin the semantics, including the Kelvin-sign
+case (U+212A folds to ASCII `k`), which is why the ASCII/Unicode split is
+decided on the folded pattern rather than the input.
+
+CPU is the *secondary* justification for the Arc change; the primary one is
+memory, which criterion cannot see.
+
+#### Memory (`cargo run --release --example memprobe --features "bench,dhat-heap"`)
+
+| Metric | Value |
+| ------ | ----- |
+| Store, 2,000 synthetic pods | 17.89 MiB (**9.16 KiB/pod**) |
+| Seeding a cached view — before 1.1/1.2 (deep clone) | 17.42 MiB |
+| Seeding a cached view — after (Arc clone) | 0.20 MiB (**89x cheaper**) |
+| View cache, 8 x 2,000 pods | 143.10 MiB |
+| One view's worth | 17.89 MiB |
+
+**Caveat, stated plainly:** the synthetic pod is ~9 KiB, smaller than a real
+one (fewer containers, conditions and annotations). These numbers demonstrate
+the *shape* of the problem — the 8x view-cache multiplier and the 89x seeding
+saving — not the absolute 497 MiB in `docs/benchmark-k9s.md`. Reproducing that
+figure needs the real-cluster run described under Verification.
+
+**What landed for 1.1/1.2:** objects now live behind `Arc` in the store
+(`src/store.rs`), so the live store, the view-cache snapshot and
+`prev_revisions` share one copy instead of three. `view_cache` gained a second
+bound, `VIEW_CACHE_MAX_OBJECTS = 10_000` (`src/app/mod.rs`), evicted in
+`App::evict_view_cache` (`src/app/lifecycle.rs`) — the most recent snapshot is
+always kept, however large. Two new tests cover the bound
+(`view_cache_evicts_on_total_objects_not_just_view_count`,
+`view_cache_keeps_the_most_recent_snapshot_however_large`). 492 tests green.
+
+---
+
+## Context
+
+`sofka` is a Kubernetes TUI (~39k lines in `src/`). The request was to survey the
+whole codebase for optimizations — SIMD/NEON/AVX/AVX-512, assembly, zero-copy,
+atomic counters, and anything else. This plan is that survey, with every finding
+verified against the source rather than inferred.
+
+The published benchmark (`docs/benchmark-k9s.md`, sofka 0.16.3, M3 Max, 1,825
+pods) gives the two numbers worth attacking:
+
+- **497.0 MiB RSS** — ~280 KiB of process memory per watched pod, one to two
+  orders of magnitude above a pod's wire size.
+- **2.032 s** to first full screen, **12.28 ms** to apply a pod filter.
+
+**The honest headline: the dominant costs here are not instruction-level.** They
+are (1) retaining up to eight deep-cloned copies of the object set, (2) rebuilding
+the full sort/filter order at up to 62 Hz, (3) re-filtering and re-measuring the
+entire log buffer on every frame, and (4) calling the same expensive extractor
+three to five times per row. Fixing those is worth far more than any
+vectorization.
+
+That said, there are two places where SIMD is the *correct* tool and not a
+gimmick — a hand-rolled O(n·m) substring scan in the log filter, and the startup
+list parse — and they are included below with everything else.
+
+**What is already right, and is not relitigated here:** the event loop is
+dirty-flag driven with a 16 ms frame gate and batched watch drains
+(`src/main.rs:630-725`); the table renders only the visible window
+(`src/ui.rs:585`) and borrows cached cells via `TableCellText::Borrowed`
+(`src/ui.rs:18-21`); cells and sort keys are cached by `resourceVersion`
+(`src/app/rows.rs:294-315`); filter parsing is cached (`src/app/rows.rs:26-37`);
+`managedFields` is stripped at the watch boundary (`src/k8s.rs:314`); and the
+concurrency model is sound — one owning thread, `RefCell` for interior
+mutability, `Arc<AtomicU64>` generation flags (`src/app/mod.rs:882,1174`), and a
+bounded `tokio::mpsc`. There is no lock contention to fix.
+
+---
+
+## Scope decision: what this plan recommends *against*
+
+- **Hand-written assembly.** No kernel in this program is compiled badly. Every
+  candidate is dominated by allocation and pointer chasing, or already served by
+  a maintained SIMD crate. Inline `asm!` would be unportable across the four
+  release targets for no measurable gain.
+- **Hand-written AVX-512 intrinsics.** The reference machine is Apple Silicon
+  (NEON only), and release binaries must run on baseline x86-64. Any AVX-512
+  path needs runtime dispatch plus a scalar fallback — exactly what `memchr`,
+  `aho-corasick`, and `simd-json` already implement and test. Depend on those.
+- **`-C target-cpu=native`.** Incompatible with shipping prebuilt binaries.
+- **Rayon / parallel row building.** Rows are rebuilt on a keystroke and rendered
+  from a `RefCell` in a single-threaded draw. A thread pool would restructure
+  `App` for a workload that is sub-millisecond after Tiers 1-3.
+- **Atomics rework.** Already correct. Downgrading `gen_flag`'s `SeqCst` to
+  `Release`/`Acquire` is defensible but unmeasurable — do it as a cleanup, not
+  an optimization. The one atomic-shaped *problem* is the theme palette lock
+  (2.4), and the fix there is to remove the lock, not tune it.
+- **Interning `serde_json::Value` map keys / a custom `Value` type.** Would cut
+  RSS substantially but requires replacing the type `kube` deserializes into.
+  Not worth it once Tier 1 removes the 8× multiplier.
+
+---
+
+## Tier 0 — Measure first (prerequisite)
+
+`benches/` does not exist and there is no allocation instrumentation. Everything
+below is verified *statically* — real call sites, real asymptotics — but none of
+it is a profile. Land this tier first so the rest is accepted or rejected on
+numbers.
+
+1. **`benches/` with Criterion**, on synthetic `DynamicObject` fixtures (the
+   suite already builds them: `src/views.rs:514`, `src/helm.rs:176`). Cover:
+   - `App::ensure_rows_cache` over 2,000 objects (`src/app/rows.rs:161`)
+   - `matches_filter` over 2,000 objects, matching and non-matching
+     (`src/app/rows.rs:39`)
+   - `ViewSpec::cells` for pods and for helm (`src/columns.rs:431`)
+   - `LogMatcher::matches` + `wrapped_height` over a 10,000-line buffer
+     (`src/logfilter.rs:70`, `src/ui.rs:1242`)
+2. **A `dhat-heap` cargo feature** gated in `src/main.rs`, so RSS is attributable
+   to a call site rather than guessed.
+3. **Record baselines.** Add `[profile.bench]` inheriting release settings so the
+   numbers reflect shipped codegen.
+
+---
+
+## Tier 1 — Memory: the 497 MiB
+
+### 1.1 `view_cache` retains up to 8 full object sets, and *deep-clones* to use one
+
+`src/app/mod.rs:892`, bounded by `VIEW_CACHE_MAX = 8` (`src/app/mod.rs:833`):
+
+```rust
+view_cache: HashMap<ViewKey, HashMap<String, DynamicObject>>,
+```
+
+Bounded by **view count, not bytes**. Each entry is a complete object set whose
+values each carry a full `serde_json::Value` (a 32-byte enum per node over a
+`BTreeMap<String, Value>`, with a separate heap `String` per key and per scalar —
+a 10-20× blowup over wire JSON is normal). Visit pods, deployments, nodes and a
+few namespaces and the cache alone accounts for the reported RSS.
+
+Worse, `src/app/lifecycle.rs:270` **deep-clones** it to use it:
+
+```rust
+if let Some(cached) = self.view_cache.get(&key) {
+    self.store.seed(cached.clone());   // deep clone of every DynamicObject
+}
+```
+
+**Two changes:**
+
+- Use `view_cache.remove(&key)` instead of `get(&key).clone()`. The entry is
+  moved into the store, and `Store::take_items` (`src/store.rs:308`, already a
+  `mem::take`) re-stashes it on the way out. This removes a full deep clone from
+  every back-navigation at zero behavioural cost.
+- Bound the cache by **retained object count** (evict LRU until under it), not by
+  view count. Somewhere in the 5,000-10,000-object range preserves "navigate
+  back and rows are instantly there" for realistic views while making one huge
+  view non-multiplicative. Touch points: the insert path calling
+  `Store::take_items`, `view_cache_order` (`src/app/mod.rs:894`), and
+  `clear_view_cache` (`src/app/pickers.rs:744`).
+
+### 1.2 `prev_revisions` deep-clones a whole object on every changed watch event
+
+`src/app/lifecycle.rs:625-630`:
+
+```rust
+if let Some(prev) = prev
+    && prev.metadata.resource_version != obj.metadata.resource_version
+{
+    self.prev_revisions.insert(&self.kind_plural, &key, prev.clone());
+}
+```
+
+A full `DynamicObject` deep clone **per event**, retained for up to
+`PREV_REVISIONS_MAX` entries, to serve `:diff` — a feature used rarely and only
+on the selected row.
+
+**Change:** store the previous revision lazily. Either keep it only for the
+currently-selected row, or store the *serialized* previous YAML/JSON
+(`Box<str>`, which `:diff` needs anyway) instead of a live `DynamicObject`. Also
+fix `PrevRevisions::get` (`src/app/mod.rs:777`), which allocates two `String`s
+per lookup to build `(kind.to_string(), key.to_string())` — use a nested
+`HashMap<String, HashMap<String, _>>` or a `Borrow`-compatible key.
+
+### 1.3 Strip `last-applied-configuration` at the watch boundary
+
+`src/k8s.rs:314` already does the right thing for one annotation-shaped problem:
+
+```rust
+.modify(|obj| obj.managed_fields_mut().clear())
+```
+
+but `kubectl.kubernetes.io/last-applied-configuration` is untouched. It is a full
+escaped JSON copy of the object; on an `apply`-managed cluster it can roughly
+double object size, and it is retained in the store, every `view_cache` entry,
+and every `prev_revisions` entry. `src/bundle.rs:47` already knows how to find
+and remove it — lift that into the `.modify` closure.
+
+**Behaviour must be preserved** (decided): the YAML view (`y`) still shows the
+full object. So this is a two-part change:
+
+1. Strip the annotation in the `.modify` closure so it never enters the store,
+   `view_cache`, or `prev_revisions`.
+2. Make the YAML view re-`GET` the object from the API when it opens, and render
+   *that* — so `y` is byte-identical to today. The open path is
+   `src/app/details.rs`; it already has the `Kind` and the row key, and other
+   details views already fetch (`src/app/details.rs:229`). Show the cached object
+   immediately and swap in the fetched one when it lands, matching the existing
+   "show stale, mark syncing" pattern used for `view_cache`.
+
+Add a test asserting the annotation is absent from the store but present in the
+YAML view's rendered output, and note the extra API call in `docs/features.md`.
+
+### 1.4 `nodes` view re-lists every pod in the cluster every 10 seconds
+
+`src/app/lifecycle.rs:559-590` — `spawn_node_pods_poll` lists **every
+non-terminated pod cluster-wide** as full `DynamicObject`s, deserializing all of
+it, purely to read `/spec/nodeName` and increment a counter. This is the largest
+periodic deserialization cost in the program and it repeats every 10 s while the
+nodes view is open.
+
+**Change:** replace the repeated full list with a single lightweight watch (the
+counts then update incrementally and cost one event each), or at minimum widen
+the interval and reuse the pods store when a pods watch is already running.
+Kubernetes has no server-side field projection, so the fix is to stop re-listing,
+not to ask for less per object.
+
+### 1.5 Two smaller retention bounds
+
+- **`Timeline`** (`src/timeline.rs:21-24`): `MAX_PER_OBJECT = 200` ×
+  `MAX_OBJECTS = 2000` = up to 400,000 `Entry` values, each holding `String`s.
+  Add a global entry cap, or shrink `MAX_PER_OBJECT` — the view reads one object
+  at a time and shows far fewer than 200.
+- **`RowsCache.cells`** (`src/app/rows.rs:294`): entries are inserted per visible
+  row and removed only by `clear_rows_cache` on a view change. Each stores its
+  own `plural: String` clone (`src/app/mod.rs:803`). Make `plural` an `Rc<str>`
+  compared by pointer, and evict keys no longer in the store once the cache
+  exceeds store size.
+
+### 1.6 A better global allocator
+
+There is no `#[global_allocator]`. For a workload dominated by hundreds of
+thousands of small `String`s from JSON, the macOS system allocator is a real tax.
+`mimalloc` is a one-line change, typically 10-25% wall-clock on JSON-heavy Rust
+programs, often with lower RSS from better size-class packing. Measure both
+before keeping it — it does add a build dependency to a deliberately lean set.
+
+---
+
+## Tier 2 — Per-frame CPU
+
+### 2.1 The rows cache rebuilds the whole store at up to 62 Hz
+
+This is the steady-state CPU sink and the biggest CPU item in the plan.
+`invalidate_row` (`src/app/rows.rs:17`) sets `dirty` on **every** watch event
+(`src/app/lifecycle.rs:632,637`), and `ensure_rows_cache`
+(`src/app/rows.rs:161-237`) then rebuilds the entire ordering — not the changed
+row — on the next frame. On a busy cluster that is a full-store pass up to 62
+times a second. Per rebuild, over N objects:
+
+- `self.display_headers()` (`:167`) — a fresh `Vec<String>` with every header
+  cloned (`src/columns.rs:425-427`).
+- an N-element `Vec<(SortKey, (&str,&str), &String)>` (`:181-225`);
+- **`e.key.clone()` (`:202`)** — a `String` clone per object even on a sort-key
+  cache *hit*;
+- `entries.sort_by(...)` (`:227`) — `sort_by` allocates a merge buffer;
+- **`cache.keys = entries.into_iter().map(|(_,_,k)| k.clone()).collect()`
+  (`:235`)** — N `String` clones rebuilding the key vector from scratch.
+
+At 1,800 pods and 62 Hz, `:202` and `:235` alone are ~220k `String`
+allocations/second.
+
+**Changes:**
+
+1. **Make keys shared, not cloned.** Change the store's key type to `Rc<str>`
+   (`src/store.rs:282`) and `SortKey::Text` to hold `Rc<str>`. Both clones above
+   become refcount bumps. This is the single highest-leverage change in the tier.
+2. **Debounce the rebuild.** The frame gate already caps redraws at 62 Hz, but a
+   rebuild is O(N log N) while a frame is O(viewport). Coalesce: if only row
+   *contents* changed and no row was added or removed, the existing order is
+   still valid — invalidate the cells for that key without setting the order
+   dirty. `invalidate_row` already removes the specific cell entry (`:20`); it
+   just also sets `dirty = true` unconditionally.
+3. `sort_by` → `sort_unstable_by` (ties are already broken explicitly at `:233`).
+
+### 2.2 `pod_summary` runs three times per pod row; `helm::decode` five times per helm row
+
+`src/columns.rs:600-610`:
+
+```rust
+fn col_pod_ready(ctx)    -> String { pod_summary(ctx.obj).0 }
+fn col_pod_status(ctx)   -> String { pod_summary(ctx.obj).1 }
+fn col_pod_restarts(ctx) -> String { pod_summary(ctx.obj).2 }
+```
+
+`pod_summary` (`src/columns.rs:1293-1339`) walks `containerStatuses` and
+allocates ~4 `String`s; it is called three times per row and two-thirds of each
+result is discarded — ~12 allocations per row, 8 of them wasted.
+
+`src/columns.rs:1036-1065` is worse: five helm columns each call
+`crate::helm::decode` independently, and `decode` (`src/helm.rs:94-123`) is
+**base64-decode ×2 + gunzip + `serde_json::from_slice` of the entire release
+payload including the rendered manifest**. Five full decodes per helm row.
+
+**Change:** give `CellContext` a lazily-populated `OnceCell` for each derived
+summary (`pod_summary`, `helm::decode`), computed at most once per `cells()`
+call. `CellContext` (`src/columns.rs:315-320`) is already the right place — it
+exists to hold precomputed per-row values. This is a small diff with a 3-5×
+effect on the two most expensive views, and it compounds with 3.1 below.
+
+While there: `helm::decode` deserializes `RawRelease` in full, including
+`manifest: String` (often hundreds of KB of rendered YAML) and `config: Value`,
+even when the caller wants only `status` or `app_version`. Add
+`#[serde(skip)]`-style narrowing or a second lightweight struct for the column
+path, and give the `read_to_end` at `src/helm.rs:99` a `with_capacity` so the
+gunzip output does not grow by doubling. `CellContext` should also stop eagerly
+cloning `name` and computing `age()` (`Timestamp::now()` + `humanize()`) for
+rows whose columns need neither (`src/columns.rs:432-434,476-482,508-514`) —
+make both lazy.
+
+### 2.3 The log view re-filters and re-measures the entire buffer every frame
+
+`src/ui.rs:1106-1130`, on **every** redraw:
+
+```rust
+let shown: Vec<&String> = app.logs.view.lines.iter()
+    .filter(|l| app.logs.matches(l))
+    .collect();
+...
+let heights: Vec<usize> = if app.logs.wrap {
+    shown.iter().map(|l| wrapped_height(l, inner_w)).collect()
+} else { Vec::new() };
+```
+
+The buffer is `logs_cfg.buffer` = **5,000** lines while following
+(`src/config.rs:396`) or **100,000** while paused (`src/app/mod.rs:41`). Both
+Vecs are rebuilt every frame at up to 62 Hz, *even with an empty filter* — the
+`Kind::All` arm still returns `true` per line and the pointer Vec is still built
+(40 KB-800 KB of heap per frame). With wrap on, `wrapped_height`
+(`src/ui.rs:1242`) additionally walks every char of every non-ASCII line in the
+whole buffer. The viewport is ~40 lines.
+
+**Change:** cache both in `app.logs`, keyed by `(filter epoch, wrap, inner_w,
+lines_len)`:
+
+- a `Vec<u32>` of matching line indices, extended incrementally by the append
+  path (`src/app/logs.rs:6-58`), which already knows when lines arrive;
+- a **prefix-sum** `Vec<u32>` of wrapped heights, making `total_rows` O(1) and
+  first-visible-line lookup a binary search instead of the linear walk at
+  `src/ui.rs:1160-1166`;
+- invalidated on resize or a `wrap` toggle. `last_wrap_width`
+  (`src/app/logs.rs:51`) already exists as the seed of this idea.
+
+After this the per-frame cost is O(viewport) and the scans move to the append
+path, where they belong.
+
+### 2.4 The theme palette takes an `RwLock` and copies 25 swatches per color read
+
+`src/theme.rs:375-381`:
+
+```rust
+fn palette() -> Palette {
+    let lock = ACTIVE.get_or_init(|| RwLock::new(catppuccin_mocha()));
+    match lock.read() { Ok(active) => *active, ... }
+}
+```
+
+Every one of the 25 generated accessors (`src/theme.rs:78-80`) calls it, and
+`src/ui.rs` has **334** theme call sites. Each is a `OnceLock` atomic load, an
+`RwLock` acquire/release pair (two atomic RMWs), and a by-value copy of the whole
+~100-byte `Palette`, to read one 4-byte `Color`. Order of magnitude: ~100-300
+acquisitions per table frame; **750+** per log frame, because `source_color`
+(`src/ui.rs:1421-1439`) eagerly builds a throwaway `[Color; 10]` — ten palette
+reads — for every prefixed log line.
+
+**Change:** the palette changes only on `:skin`/context switch. Keep a
+`thread_local!` cached `(epoch, Palette)`, refreshed when a global `AtomicU64`
+epoch (bumped in `theme::set`) differs. Steady state becomes one relaxed atomic
+load plus a field read — no lock, no copy — and the free-function API is
+unchanged, so there is no call-site churn. Separately, make `source_color`'s
+palette array a computed-once value rather than rebuilding it per line.
+
+### 2.5 Document search re-lowercases the whole document every frame
+
+`src/app/mod.rs:594-605`:
+
+```rust
+pub fn match_lines(&self) -> Vec<usize> {
+    if self.filter.is_empty() { return Vec::new(); }
+    let needle = self.filter.to_lowercase();
+    self.lines.iter().enumerate()
+        .filter(|(_, l)| l.to_lowercase().contains(&needle))   // String alloc per line
+        .map(|(i, _)| i).collect()
+}
+```
+
+Called from `doc_title` (`src/ui.rs:1768`), which `draw_scrollable`
+(`src/ui.rs:1048`) and `draw_diff` (`src/ui.rs:1723`) call every frame — so with
+a `/` search active in a YAML, describe, or events view, **every line of the
+whole document is lowercased into a fresh `String` on every frame**, purely to
+render `[2/5]` in the title. Large `describe`/YAML docs pay this at up to 62 Hz.
+
+**Change:** cache the match list on `Scrollable`, invalidated when `filter` or
+`lines` changes — the same shape as 2.3. The allocation itself also disappears
+under the `aho-corasick` change in 4.1.
+
+### 2.6 Smaller per-frame items
+
+- **`draw_help`** (`src/ui.rs:1882-2129`) rebuilds ~150 `String`s and ~75 `Line`s
+  from *static literals* every frame, doubled when filtering. Build once into a
+  `OnceLock<Vec<Line<'static>>>`.
+- **Pickers do fuzzy matching and sorting inside `draw`** —
+  `filtered_namespaces` (`src/app/pickers.rs:70`), `filtered_contexts` (`:506`),
+  `filtered_sort_entries` (`:181`), `filtered_copy_entries` (`:305`, which
+  `format!`s `"{h} {v}"` per entry). A full fuzzy pass + sort + `String` clones
+  per frame while a modal is open. Cache against the filter string.
+- **`row_key` is computed twice per visible row per frame** — once in
+  `ensure_table_cell_cache` (`src/app/rows.rs:297`, plus a
+  `resource_version.clone()` at `:298`, both even on a cache hit) and again at
+  `src/ui.rs:606`. Compute once and pass it down; `Rc<str>` keys (2.1) make the
+  remaining copies free.
+- **A second `format!("{ns}/{name}")` per row per frame** at `src/ui.rs:633-641`
+  just to look up metrics. Key `app.metrics` on the same `Rc<str>` row key.
+- **`cell_width` runs on horizontally-scrolled-out columns** — the `col_visible`
+  filter is applied at `src/ui.rs:750`, but the width scan at `:656-659` covers
+  every cell. Filter first.
+- **A duplicate layout solve** at `src/ui.rs:868`:
+  `Layout::horizontal(widths.clone()).split(...)` purely for mouse hit-testing,
+  in addition to the solve `Table` does internally. Compute the hit rects from
+  the widths directly.
+- **`render_name_cell`** (`src/ui.rs:1020`) does `name.to_string()` per row per
+  frame even with no filter active — borrow instead.
+- **`spec.volatile(obj, ...)`** (`src/ui.rs:620` → `src/columns.rs:453-464`) is
+  called per cell of every visible row; the AGE arm calls `Timestamp::now()` +
+  `humanize()` per row per frame. Hoist `Timestamp::now()` to once per frame.
+- **`theme::background()`** (`src/ui.rs:63-66`), when enabled, writes every cell
+  in the frame buffer before anything else — O(w×h) per frame. Acceptable, but
+  worth knowing it is not free.
+- **Idle floor:** `src/main.rs:717-720` sets `dirty = true` every second
+  unconditionally after `reap_port_forwards`, forcing a full redraw on a
+  completely idle screen. Set dirty only when the reap changed something *or*
+  when a visible AGE column would actually tick.
+
+### 2.7 Three loops that rebuild shared state per iteration
+
+- **`parsed_filter()` is called once per object, inside the filter loop.**
+  `matches_filter` (`src/app/rows.rs:44`) calls it per object, and each call does
+  two or three `RefCell` borrows *plus a full `String != String` comparison* of
+  the raw filter (`src/app/rows.rs:27`). The cache itself is correct — the
+  problem is where it is consulted. Hoist the `Ref` out of the loop in
+  `ensure_rows_cache` and pass `&ParsedFilter` down.
+- **`Cluster::resolve` clones a whole `Kind` and lowercases its key, twice per
+  catalog entry, per palette keystroke.** `src/k8s.rs:276-279`:
+
+  ```rust
+  pub fn resolve(&self, input: &str) -> Option<Kind> {
+      let key = input.trim().trim_start_matches(':').to_lowercase();
+      self.registry.get(&key).cloned()
+  }
+  ```
+
+  called at `src/app/input.rs:796` and again at `:808` inside the command-palette
+  filter loop, the second with `.title().to_lowercase()` on top. A `Kind` holds
+  an `ApiResource` with ~5 `String`s, so on a CRD-heavy cluster (400+ catalog
+  entries) that is thousands of allocations per keystroke in `:`. Add a
+  `resolve_ref(&self, &str) -> Option<&Kind>` and use it at both sites; the
+  ~20 other callers that genuinely need ownership can keep `resolve`.
+- **`is_fleet_context` rebuilds a `Vec<String>` per row per frame.**
+  `src/ui.rs:2182` calls it for every context row, and it calls `fleet_contexts()`
+  (`src/fleet.rs:17-30`), which allocates a fresh cloned `Vec<String>` each time —
+  O(contexts × fleet size) allocations per frame while the context picker is open.
+  Build the set once per draw, or cache it as a `HashSet` on `App`.
+
+---
+
+## Tier 3 — Filter latency (the 12.28 ms)
+
+### 3.1 Filtering re-renders every row's cells and throws them away
+
+`src/app/rows.rs:61-69`:
+
+```rust
+fn fuzzy_match_row(&self, o: &DynamicObject, pat: &str) -> bool {
+    if self.matcher.fuzzy_match(&self.fuzzy_hay(o), pat).is_some() { return true; }
+    let (cells, _) = self.spec.cells(o);          // FULL uncached row extraction
+    cells.iter().any(|c| self.matcher.fuzzy_match(c, pat).is_some())
+}
+```
+
+Every object that misses on name gets its **entire row re-extracted, bypassing
+the `rows_cache.cells` cache completely**, then one Skim fuzzy match per cell.
+With 1,800 pods and a selective filter that is ~1,800 full row renders per
+rebuild — and via 2.2, three redundant `pod_summary` passes each, or five
+gunzip+parse cycles each on helm views. `fuzzy_hay` (`:75`) adds a `format!`
+allocation per object on top.
+
+**Changes, in value order:**
+
+1. **Read through the cell cache.** `rows_cache.cells` (`src/app/mod.rs:796`)
+   already holds exactly these `Vec<String>`s keyed by `resourceVersion`. Warm
+   and read it here so a row is rendered once per `resourceVersion` instead of
+   once per keystroke.
+2. **Cheap reject before the fuzzy matcher.** `SkimMatcherV2::fuzzy_match`
+   allocates a DP buffer per call and runs once per haystack *and once per cell*.
+   Precompute a 64-bit case-folded ASCII presence bitmask per cached row and per
+   pattern; `row_mask & pat_mask != pat_mask` means the pattern cannot be a
+   subsequence — reject with two loads and an AND. This is the standard fzf-style
+   prefilter and typically eliminates 90%+ of matcher calls. Store the mask in
+   `CellCacheEntry` so it is built with the cells.
+3. **Drop `fuzzy_hay`'s `format!`.** Match namespace and name as two haystacks
+   (consistent with the existing per-cell matching), or cache the joined string
+   in `CellCacheEntry`.
+
+### 3.2 `eval_cmp` allocates two `String`s per object per rebuild
+
+`src/app/rows.rs:104`:
+
+```rust
+CmpValue::Str(want) => ... cmp.op.eval(cell.to_lowercase().cmp(&want.to_lowercase()))
+```
+
+`want` is loop-invariant — fold it once at parse time in `src/filter.rs` and
+store the folded form. For `cell`, compare with a case-folding iterator
+(`chars().flat_map(char::to_lowercase).cmp(...)`) so the per-object allocation
+disappears. `column_cell` (`src/app/rows.rs:114`) should return
+`Option<Cow<'_, str>>` rather than `Option<String>`.
+
+### 3.3 `views::extract` serializes the whole `ObjectMeta` to read one field
+
+`src/views.rs:214-225`:
+
+```rust
+if let Some(rest) = pointer.strip_prefix("/metadata") ... {
+    let meta = serde_json::to_value(&obj.metadata).ok()?;
+    return ... meta.pointer(rest).cloned();
+}
+```
+
+Any user column or sort key pointing at `/metadata/...` — including
+`/metadata/labels/...`, a common configuration — serializes the **entire**
+`ObjectMeta` (every label, every annotation, including
+`last-applied-configuration` until 1.3 lands) into a throwaway `Value`, then
+clones one node out. This runs per object per rebuild via `render_cell`
+(`src/views.rs:239`) and `sort_value` (`src/views.rs:298`).
+
+**Change:** match the leading `/metadata/<field>` segment against the typed
+`ObjectMeta` fields directly (`name`, `namespace`, `uid`, `labels`,
+`annotations`, `creationTimestamp`, `resourceVersion`, …) and fall back to the
+full `to_value` only for an unmatched tail. Return a borrowed `&Value` or
+`Cow<'_, Value>` where possible to drop the `.cloned()`.
+
+### 3.4 Helm views rebuild a dedup index per rebuild
+
+`helm_latest_revision_keys` (`src/app/rows.rs:242-257`) iterates the full store
+building a `HashMap<(String,String),(i64,String)>` — three `String` allocations
+per object — then collects into a `HashSet<String>`, once per rebuild. Cache it
+against the store's revision, or fold it into the same pass as 2.1.
+
+### 3.5 `sort_by` → `sort_unstable_by`
+
+There are 15 `sort_by`/`sort` call sites and **zero** `sort_unstable*` in the
+tree. `sort_by` allocates a merge buffer; `sort_unstable_by` does not. Ties are
+already broken explicitly at most sites (`src/app/pickers.rs:77,196,318,519` all
+chain `.then_with(...)`; `src/app/rows.rs:233` falls back to namespace/name).
+Apply at `src/app/rows.rs:227`, `src/app/pickers.rs`, `src/explain.rs:200,330`,
+`src/providers.rs:436,1064`, `src/k8s.rs:258`. **Check each — do not blanket
+replace**; leave any sort whose stability is load-bearing.
+
+`src/explain.rs:200` additionally clones a `String` per comparison
+(`sort_by_key(|p| p.metadata.name.clone()...)`) — use a borrowed comparator.
+
+---
+
+## Tier 4 — Where SIMD genuinely applies
+
+### 4.1 The log substring filter is a hand-rolled O(n·m) scan — the best SIMD target
+
+`src/logfilter.rs:80-89`:
+
+```rust
+Kind::Substr(s) if s.is_ascii() => {
+    let pat = s.as_bytes();
+    line.as_bytes().windows(pat.len()).any(|w| w.eq_ignore_ascii_case(pat))
+}
+Kind::Substr(s) => line.to_lowercase().contains(s),
+```
+
+The comment above it correctly notes "the whole visible buffer is re-tested per
+frame, so the common (ASCII) case must not allocate" — it solved *allocation* but
+left a naive sliding-window compare that does a full pattern comparison at every
+byte offset. On a 10,000-line × 200-byte buffer with an 8-byte pattern that is
+~16 M byte comparisons **per frame**. The non-ASCII arm is worse: a full
+lowercase `String` copy of every line, every frame.
+
+**Change:** build an `aho_corasick::AhoCorasick` once per filter with
+`.ascii_case_insensitive(true)` and call `is_match`. For a single pattern the
+crate selects its Teddy/memmem prefilter — SSE2/AVX2 on x86-64, NEON on aarch64,
+with runtime dispatch and a scalar fallback, correct on every release target and
+with no `unsafe` entering this codebase. Expect roughly an order of magnitude on
+this call, and it fixes the allocating non-ASCII arm at the same time.
+
+**`aho-corasick` 1.1.5 and `memchr` 2.8.3 are already in `Cargo.lock`** (pulled
+in by `regex`), so promoting them to direct dependencies adds no new compilation
+units and no binary size.
+
+`memchr::memmem::Finder` is the lighter alternative if case sensitivity were
+acceptable — it is not here, so `aho-corasick` is the right pick. The same
+substitution applies to `Scrollable::match_lines` (2.5).
+
+Sequence this **after** 2.3 and 2.5, which cut how often it is called. The two
+compose: 2.3 cuts call count, 4.1 cuts per-call cost, and what remains lands on
+the incremental append path.
+
+### 4.2 SIMD scanning in `wrapped_height` and `ansi_runs`
+
+`src/ui.rs:1245` opens with a good ASCII fast path but pays two full passes:
+
+```rust
+if raw.is_ascii() && !raw.as_bytes().contains(&0x1b) {
+```
+
+`<[u8]>::contains` is a scalar `iter().any()`. Use
+`memchr::memchr(0x1b, raw.as_bytes()).is_none()` for a vectorized single pass.
+Same substitution for the ESC scan in `ansi_runs` (`src/ui.rs:1520`) and at
+`src/ui.rs:1116-1121`. Small next to 2.3, but free.
+
+### 4.3 Startup: streaming lists first, SIMD JSON only if it measures
+
+The 2.03 s to first full screen is TLS handshake + API server list latency +
+`serde_json` parsing of ~1,825 objects. Only the last is sofka's to control.
+
+1. **Streaming initial list — try this first.** `src/k8s.rs:306` uses
+   `watcher::Config::default().any_semantic()`, which leaves
+   `initial_list_strategy: InitialListStrategy::ListWatch` (verified at
+   `kube-runtime-4.2.0/src/watcher.rs:277`) — the entire list is materialized
+   before anything is emitted. kube 4.2 ships
+   **`watcher::Config::streaming_lists()`** (`watcher.rs:386-388`), which uses
+   the Kubernetes `WatchList` API (1.27+) to deliver objects incrementally. That
+   improves time-to-first-row *and* removes the transient double-copy peak.
+   Requires `WatchListClient` enabled server-side, so keep a `ListWatch`
+   fallback. **This is likely a larger win than any parser swap.**
+2. **SIMD JSON parsing.** `simd-json` or `sonic-rs` (AVX2/SSE4.2 on x86-64, NEON
+   on aarch64, runtime-dispatched) typically parse 2-3× faster than
+   `serde_json`. Approved as a dependency, so this is in scope — but stage it,
+   because the obstacle is architectural, not licensing: `kube` owns
+   deserialization, so a global swap means bypassing `Api::list`/`watcher` and
+   handling raw response bytes.
+
+   - **Stage A (safe):** swap the parse sites sofka owns outright —
+     `src/helm.rs:94` (release payloads, and the single hottest self-owned parse
+     once 2.2's `OnceCell` stops calling it five times a row),
+     `src/providers.rs:879` (`parse_entry`, once per streamed log line), and
+     `src/bundle.rs`. No kube boundary involved.
+   - **Stage B (gated):** the watch/list path. Take the Tier 0 measurement of
+     the parse share of startup first — if it is under ~300 ms, Stage B is not
+     worth bypassing `Api::list`, and Stage A plus `streaming_lists()` is the
+     right stopping point. If it is above that, replace the list path with a raw
+     `request_text`-style call parsed with the SIMD crate, keeping `watcher` on
+     the normal path for incremental events.
+
+   Note `simd-json` requires a mutable input buffer (it parses in place), so
+   Stage A must hand it owned `Vec<u8>`s — which `src/helm.rs:99`'s gunzip
+   output and `src/providers.rs:865`'s `drain_lines` already produce.
+
+---
+
+## Tier 5 — Zero-copy and allocation hygiene
+
+Across `src/` (excluding tests) there are ~765 `format!`, ~300 `to_string()`, and
+~596 `.clone()` sites. Most are cold; leave them. The ones that matter beyond
+those already listed:
+
+- **`sget` returns an owned `String` for every field read**
+  (`src/columns.rs:1156-1162`), including inside `timestamp_secs` where it is
+  parsed and immediately dropped. It is used pervasively by the column
+  extractors. Change it to return `Option<&str>` borrowed from the object —
+  mechanical, and it removes an allocation from nearly every cell extraction.
+- **`crate::text::ellipsize`** (`src/text.rs:7-20`) walks the string once with
+  `chars().count()`, then again with `chars().take().collect()`, and allocates a
+  `String` unconditionally — even in the pass-through case (`s.to_string()` at
+  `:9`). Return `Cow<'_, str>` with a `if s.len() <= max { Cow::Borrowed(s) }`
+  byte-length fast path (byte length ≤ max implies char count ≤ max) and find the
+  cut in a single `char_indices` pass.
+  **Also a latent correctness bug:** it is aliased `truncate_cols` at
+  `src/ui.rs:2535` and used to fit padded `{:<26}` slots, but it counts *chars*,
+  not display columns, and never touches `unicode_width` — CJK and emoji content
+  will overflow those slots. Worth fixing while the function is open.
+- **`CellContext.name`** (`src/columns.rs:313,432`) is built with
+  `obj.metadata.name.clone()` per object per `cells()` call; the field is a
+  `&str` away. Make it a borrow.
+- **`CellFn` returns `String`**, forcing an owned allocation per cell even for
+  values copied verbatim out of the object (NAME, NAMESPACE, IMAGE, NODE).
+  Changing the signature to `Cow<'a, str>` lets the common case borrow, and
+  composes with the `TableCellText::Borrowed` machinery at `src/ui.rs:18-21`,
+  which was clearly built with this in mind. **Sequence this last** — it is the
+  widest diff in the plan and its value depends on 2.2 and 3.1 having already cut
+  how often cells are built.
+- **Log line ingest** (`src/providers.rs:865-877`): `drain_lines` does
+  `buf.drain(..=last_nl).collect::<Vec<u8>>()` + `String::from_utf8_lossy` +
+  `to_string` per line, and `parse_entry` (`:879-905`) allocates 4 `String`s per
+  record. Only hot while a provider log tail is open, but it is the one place
+  `bytes::Bytes`-style zero-copy would pay.
+- **`Msg`** (`src/store.rs:9-222`) is a 40-variant enum holding `HashMap`s and
+  `Vec`s inline, so `size_of::<Msg>()` is ~100+ bytes and the 4,096-slot channel
+  (`src/main.rs:45`) reserves a few hundred KB. Boxing the large variants (as
+  `Applied` already does) shrinks the ring.
+- **`Timeline::observe`** (`src/timeline.rs:88,91`) does a `tkey()` `format!` and
+  a `key.clone()` on **every watch event**, and `str_at`/`condition`
+  (`:221,313-318`) return owned `String`s even when nothing changed. Compare
+  borrowed and allocate only on an actual transition.
+
+---
+
+## Tier 6 — Build configuration
+
+`Cargo.toml`'s release profile is `lto = "thin"` + `strip = true`, with a comment
+explaining thin LTO as a deliberate build-time trade-off. Respect that; do not
+switch to fat LTO.
+
+```toml
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1   # measure — costs build time, typically 5-15% runtime
+panic = "abort"     # safe here: no catch_unwind anywhere in the tree
+```
+
+- `codegen-units = 1` is the one in tension with the stated build-time concern.
+  Benchmark it; if it costs too much on the 8 cold release builds, leave it out
+  and record why in the existing comment.
+- `panic = "abort"` is safe: the only panic machinery is the hook at
+  `src/main.rs:361` that restores the terminal, and hooks still run under
+  `abort`. There is no `catch_unwind` in the tree. It shrinks the binary and
+  removes landing pads. **Caveat:** it breaks `cargo test --release`; keep tests
+  on the default `test` profile and note this in `.just/rust.just`.
+
+---
+
+## Tier 7 — Input latency (not throughput, but felt)
+
+Three synchronous `std::fs::write` calls run **on the UI thread inside keypress
+handlers**, so a slow or networked state directory stalls the frame:
+
+- `src/sortmem.rs:45` via `remember_sort` (`src/app/rows.rs:587`, reached from
+  `toggle_sort_dir` and from a header click at `src/app/mouse.rs:108`)
+- `src/nsmem.rs:47` via `src/app/pickers.rs:155`
+- `src/fleet.rs:49` via `src/app/fleet.rs:58`
+
+Each is a tiny TOML file, so this is a tail-latency issue rather than a
+throughput one. Move them to a `tokio::spawn` (they are already fallible and
+already ignore errors), or coalesce to a write on quit.
+
+Also in this tier, two one-shot cleanups the survey turned up:
+`src/providers.rs:436-441` and `:1064-1069` `sort_by_key` clone two `String`s per
+comparison and then use only `first()` — these should be `min_by_key`. And
+`src/bundle.rs:116-127` makes three full copies of the object
+(`serde_json::to_value` → `serde_yaml::to_string` → `String` per line); it is
+off-thread and on-demand, so it is fine to leave, but `write!` into `self.out`
+would remove the intermediate `String` in `Doc::field`/`heading`/`bullets`/`code`
+(`src/bundle.rs:145-177`).
+
+---
+
+## What the survey found already clean
+
+Recorded so a future pass does not re-audit them: `src/filter.rs` is a pure
+parser with correct reparse caching; `src/logfilter.rs` compiles its regex once
+per filter change and there is **no `Regex::new` on any hot path anywhere in the
+tree** (only two regex sites total); `src/app/find.rs` is one-shot, off-thread,
+and result-capped; `src/explain.rs`, `src/diagnostics.rs`, `src/rightsize.rs`,
+and `src/thresholds.rs` are all on-demand with no per-frame cost; the row
+comparator itself is allocation-free (`src/app/rows.rs:227-234`, keys
+precomputed outside the closure); no lock is ever held across an `.await`; and
+**no O(n²) scan was found anywhere in the codebase**.
+
+---
+
+## Suggested sequencing
+
+The full program is in scope. Each step is independently landable, independently
+revertible, and measured against the Tier 0 baseline — so the sequence is
+ordered by value, and any step whose measurement comes back flat gets reverted
+rather than kept on faith. One commit per numbered step.
+
+**Approved dependencies:** `criterion` + `dhat` (dev-only), `aho-corasick` +
+`memchr` (already in `Cargo.lock` via `regex` — no new compilation units),
+`mimalloc` (new runtime dep), and `simd-json`/`sonic-rs` (staged, see 4.3.2).
+
+1. **Tier 0** — benches + `dhat`, record baselines. Nothing else lands first.
+2. **1.1, 1.2, 1.3** — the memory wins, largest first. Re-measure RSS.
+3. **2.1 (`Rc<str>` keys + rebuild debounce)** and **2.2 (`OnceCell` in
+   `CellContext`)** — the steady-state CPU wins. Re-measure the rows-cache bench.
+4. **2.3, 2.5, 2.4** — the per-frame log, doc-search, and palette wins.
+   Re-measure frame time.
+5. **3.1, 3.3** — filter rebuild. Re-measure filter latency against the 12.28 ms.
+6. **4.1, 4.2** — the SIMD substitutions, now that call counts are honest.
+7. **4.3.1** — `streaming_lists()`, with a `ListWatch` fallback. Re-measure
+   startup, and take the parse-share number that gates 4.3.2 Stage B.
+8. **1.6, Tier 6** — `mimalloc`, then `codegen-units = 1` and `panic = "abort"`,
+   with numbers for each.
+9. **4.3.2 Stage A** — SIMD JSON at the self-owned parse sites. **Stage B** only
+   if step 7's measurement puts the list parse above ~300 ms.
+10. **1.4, 1.5, 2.6, 2.7, 3.2, 3.4, 3.5, Tier 7** — small independent cleanups.
+    2.7's `resolve_ref` and Tier 7's async state writes are the most
+    user-visible (command-palette and sort-key latency), so pull those forward
+    if they are cheap.
+11. **Tier 5: `sget` → `&str`, then `CellFn` → `Cow`** — last. Largest diffs,
+    smallest remaining margin, and their value depends on every earlier step
+    having already cut how often cells are built.
+
+---
+
+## Verification
+
+**Correctness — must stay green at every step:**
+
+- `just check` (`cargo fmt --check`, `cargo clippy --all-targets -D warnings`,
+  `cargo test`). The suite is substantial — `src/app/tests.rs` alone is ~7,000
+  lines — and already covers the filter, sort, wrap, and cell paths this plan
+  edits.
+- `just snapshot pods` renders one headless UI frame. Diff it before and after
+  each step. **2.4 (palette), 5 (`Cow` cells), and 4.1 (`aho-corasick`) must
+  produce byte-identical output.**
+- `src/ui.rs:3647` (`wrapped_height_matches_wrap_line`) is the guard for 2.3 and
+  4.2 — extend it with the prefix-sum invariant rather than replacing it.
+- `src/logfilter.rs:130-155` covers the four filter forms; the `aho-corasick`
+  swap must pass them unchanged, **plus new cases for a non-ASCII pattern against
+  a non-ASCII line** (the arm being replaced at `src/logfilter.rs:88`).
+- 1.3 must **not** change what the YAML view shows. Add a test asserting
+  `last-applied-configuration` is absent from the store but still present in the
+  YAML view's rendered output via the on-demand re-`GET`, and note the extra API
+  call in `docs/features.md`.
+
+**Performance — the point of the exercise:**
+
+- `cargo bench` against the Tier 0 baselines, per step.
+- **RSS:** run against a real or `kwok`-simulated ~2,000-pod cluster, navigate
+  through eight distinct views to fill `view_cache`, sample RSS. This is exactly
+  the scenario 1.1 targets and the one `docs/benchmark-k9s.md` measured.
+- **Startup and filter latency:** reuse the tmux harness described in
+  `docs/benchmark-k9s.md` so new numbers are comparable to the published ones,
+  and update that document if the results move.
+- **Frame time:** the cleanest signal for 2.3 is a log view on a chatty pod with
+  a 10,000-line buffer, wrap on, filter active — compare idle CPU before/after.
+  For 2.1, compare idle CPU on a 2,000-pod view during a rollout.

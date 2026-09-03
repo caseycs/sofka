@@ -2,34 +2,6 @@
 //!
 //! A from-scratch reimagining of k9s built on kube-rs + ratatui, async-first.
 
-mod altscroll;
-mod app;
-mod bundle;
-mod columns;
-mod config;
-mod diagnostics;
-mod explain;
-mod filter;
-mod fleet;
-mod gitops;
-mod helm;
-mod journal;
-mod k8s;
-mod keys;
-mod logfilter;
-mod nsmem;
-mod providers;
-mod rightsize;
-mod snapshot;
-mod sortmem;
-mod store;
-mod text;
-mod theme;
-mod thresholds;
-mod timeline;
-mod ui;
-mod views;
-
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -39,8 +11,12 @@ use crossterm::event::{Event, KeyEventKind};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::app::App;
-use crate::k8s::Cluster;
+use sofka::app::App;
+use sofka::k8s::Cluster;
+use sofka::{
+    altscroll, app, config, diagnostics, fleet, k8s, nsmem, providers, snapshot, sortmem, store,
+    theme, thresholds, ui, views,
+};
 
 const EVENT_CHANNEL_CAP: usize = 4096;
 
@@ -97,7 +73,19 @@ struct Args {
     info: bool,
 }
 
+/// Heap profiling build (`--features dhat-heap`). dhat replaces the global
+/// allocator and writes `dhat-heap.json` when `_profiler` drops, so the guard
+/// has to outlive the whole run — hence the binding in `main` rather than a
+/// helper. Attributes RSS to a call site, which is the only way to check the
+/// memory claims in `plan.txt` against reality rather than arithmetic.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 fn main() -> Result<()> {
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     let args = Args::parse();
     // `--kubeconfig`: export for the whole process so every kubeconfig read
     // (kube-rs config inference, context listing/switching, `--info`) and
@@ -430,9 +418,9 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
             app.table_state.select(Some(0));
             app.open_diff();
             if app.mode != app::Mode::Diff {
-                app.detail = app::Scrollable {
-                    title: "web — diff (last-applied → live)".into(),
-                    lines: vec![
+                app.detail = app::Scrollable::doc(
+                    "web — diff (last-applied → live)".into(),
+                    vec![
                         " spec:".into(),
                         "   replicas: 3".into(),
                         "-  image: web:v1.2.0".into(),
@@ -440,10 +428,8 @@ async fn snapshot(app: &mut App, rx: &mut mpsc::Receiver<store::Msg>) -> Result<
                         "   ports:".into(),
                         "-  - containerPort: 8080".into(),
                         "+  - containerPort: 9090".into(),
-                    ]
-                    .into(),
-                    ..Default::default()
-                };
+                    ],
+                );
                 app.mode = app::Mode::Diff;
             }
         }

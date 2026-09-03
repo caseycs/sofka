@@ -255,6 +255,9 @@ impl Cluster {
         }
         // Lowest priority first; later inserts overwrite, so the highest
         // priority group ends up owning each bare plural/kind key.
+        // Deliberately a *stable* sort: groups tie on priority constantly, and
+        // insertion order is what decides which kind wins a shared key. An
+        // unstable sort would make `:` resolution vary between runs.
         entries.sort_by_key(|(k, _, _)| group_priority(&k.ar.group));
         for (kind, plural, kind_lc) in entries {
             self.registry.insert(plural, kind.clone());
@@ -477,12 +480,15 @@ pub const ALIASES: &[(&str, &str)] = &[
     ("hr", "helmreleases"),
 ];
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 impl Cluster {
     /// A connectionless cluster for unit tests: the client points at a dummy
     /// URL (no I/O happens until a request is actually made) and the registry
     /// is a small hand-built set of common kinds.
-    pub(crate) fn fake() -> Self {
+    ///
+    /// Also compiled under the `bench` feature, because `benches/` links the
+    /// library without `cfg(test)` and needs the same offline fixture.
+    pub fn fake() -> Self {
         let config = Config::new("https://127.0.0.1:6443".parse().unwrap());
         let client = Client::try_from(config).expect("build test client");
         let mk = |group: &str, kind: &str, plural: &str, namespaced: bool| Kind {

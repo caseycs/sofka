@@ -316,15 +316,37 @@ impl App {
         let Some(key) = self.watch_key.take() else {
             return;
         };
-        if !self.store.synced || self.store.len() == 0 {
+        if !self.store.synced || self.store.is_empty() {
             return;
         }
         self.view_cache_order.retain(|k| *k != key);
         self.view_cache_order.push_back(key.clone());
         self.view_cache.insert(key, self.store.take_items());
-        while self.view_cache_order.len() > VIEW_CACHE_MAX {
-            if let Some(oldest) = self.view_cache_order.pop_front() {
-                self.view_cache.remove(&oldest);
+        self.evict_view_cache();
+    }
+
+    /// Drop least-recently-used snapshots until the cache is under both of its
+    /// bounds.
+    ///
+    /// The view count alone is not a memory bound: eight snapshots of a
+    /// 2,000-pod view cost ~143 MiB where one costs ~18 MiB (see
+    /// `examples/memprobe.rs`), because the cap counts *views*, not objects.
+    /// So a second bound caps the total retained objects. The most recent
+    /// entry is always kept even if it alone exceeds the object bound —
+    /// dropping it would defeat the one case the cache exists for, which is
+    /// stepping straight back into the view you just left.
+    fn evict_view_cache(&mut self) {
+        let too_many_objects = |cache: &HashMap<ViewKey, crate::store::Items>| {
+            cache.values().map(HashMap::len).sum::<usize>() > VIEW_CACHE_MAX_OBJECTS
+        };
+        while self.view_cache_order.len() > VIEW_CACHE_MAX
+            || (self.view_cache_order.len() > 1 && too_many_objects(&self.view_cache))
+        {
+            match self.view_cache_order.pop_front() {
+                Some(oldest) => {
+                    self.view_cache.remove(&oldest);
+                }
+                None => break,
             }
         }
     }
@@ -621,12 +643,15 @@ impl App {
                 // for the session diff (`:diff` on objects with no
                 // last-applied annotation).
                 let prev = self.store.latest(&key);
-                self.timeline.observe(&self.kind_plural, &key, prev, &obj);
+                self.timeline
+                    .observe(&self.kind_plural, &key, prev.map(Arc::as_ref), &obj);
                 if let Some(prev) = prev
                     && prev.metadata.resource_version != obj.metadata.resource_version
                 {
+                    // An `Arc` bump, not a deep copy of the object's whole
+                    // JSON body — this runs on every changed watch event.
                     self.prev_revisions
-                        .insert(&self.kind_plural, &key, prev.clone());
+                        .insert(&self.kind_plural, &key, Arc::clone(prev));
                 }
                 self.store.apply(key.clone(), *obj);
                 self.invalidate_row(&key);
@@ -940,7 +965,11 @@ impl App {
                 lines,
             } if generation == self.event_gen => {
                 self.detail.title = title;
-                self.detail.lines = lines.into();
+                // Through `replace_lines`, not a direct assignment: a
+                // refreshed events list can have the same line count as the
+                // one it replaces, which would otherwise leave a stale
+                // search-match cache behind.
+                self.detail.replace_lines(lines.into());
                 self.detail.scroll = self
                     .detail
                     .scroll

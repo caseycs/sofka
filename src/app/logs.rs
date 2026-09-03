@@ -55,7 +55,7 @@ impl App {
                 .sum();
             self.logs.view.scroll = self.logs.view.scroll.saturating_sub(rows);
         }
-        self.logs.view.lines.drain(0..overflow);
+        self.logs.view.drain_front(overflow);
     }
 
     // ----- containers / logs --------------------------------------------
@@ -276,7 +276,7 @@ impl App {
         if self.logs.source.is_none() {
             return;
         }
-        self.logs.view.lines.clear();
+        self.logs.view.clear_lines();
         self.logs.view.scroll = 0;
         self.restart_log_stream();
     }
