@@ -55,7 +55,7 @@ impl App {
                 .sum();
             self.logs.view.scroll = self.logs.view.scroll.saturating_sub(rows);
         }
-        self.logs.view.lines.drain(0..overflow);
+        self.logs.view.drain_front(overflow);
     }
 
     // ----- containers / logs --------------------------------------------
@@ -263,6 +263,10 @@ impl App {
             lines: VecDeque::new(),
             ..Default::default()
         };
+        // A new Scrollable starts at revision 0, which can match the previous
+        // buffer's revision. Do not let refresh_index mistake the replacement
+        // for an append and retain stale line positions or wrapped heights.
+        self.logs.index = LogIndex::default();
         self.logs.follow = true;
         self.logs.set_filter(String::new());
         self.logs.stopped = false;
@@ -276,7 +280,7 @@ impl App {
         if self.logs.source.is_none() {
             return;
         }
-        self.logs.view.lines.clear();
+        self.logs.view.clear_lines();
         self.logs.view.scroll = 0;
         self.restart_log_stream();
     }

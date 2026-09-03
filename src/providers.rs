@@ -421,7 +421,7 @@ pub async fn discover(client: kube::Client, base: &LogProvider) -> Result<LogPro
 /// `http` win, then literal 9428 (the VictoriaLogs default), then the first
 /// declared port.
 fn pick_service(services: &[Service]) -> Option<(String, String, i32)> {
-    let mut candidates: Vec<(&Service, i32)> = services
+    let candidates: Vec<(&Service, i32)> = services
         .iter()
         .filter_map(|s| {
             let ports = s.spec.as_ref()?.ports.as_ref()?;
@@ -433,13 +433,15 @@ fn pick_service(services: &[Service]) -> Option<(String, String, i32)> {
             Some((s, port.port))
         })
         .collect();
-    candidates.sort_by_key(|(s, _)| {
+    // Only the first candidate is used, so pick the minimum directly rather
+    // than sorting the whole list — and compare borrowed, instead of cloning
+    // two `String`s per comparison.
+    let (svc, port) = candidates.iter().min_by_key(|(s, _)| {
         (
-            s.metadata.namespace.clone().unwrap_or_default(),
-            s.metadata.name.clone().unwrap_or_default(),
+            s.metadata.namespace.as_deref().unwrap_or_default(),
+            s.metadata.name.as_deref().unwrap_or_default(),
         )
-    });
-    let (svc, port) = candidates.first()?;
+    })?;
     Some((
         svc.metadata.namespace.clone().unwrap_or_default(),
         svc.metadata.name.clone().unwrap_or_default(),
@@ -1049,7 +1051,7 @@ pub async fn discover_metrics(
 /// First (by namespace/name) service with a usable port, preferring `http`,
 /// then the well-known query ports (Prometheus 9090, VM single 8428/8429).
 fn pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
-    let mut candidates: Vec<(&Service, i32)> = services
+    let candidates: Vec<(&Service, i32)> = services
         .iter()
         .filter_map(|s| {
             let ports = s.spec.as_ref()?.ports.as_ref()?;
@@ -1061,13 +1063,15 @@ fn pick_metrics_service(services: &[Service]) -> Option<(String, String, i32)> {
             Some((s, port.port))
         })
         .collect();
-    candidates.sort_by_key(|(s, _)| {
+    // Only the first candidate is used, so pick the minimum directly rather
+    // than sorting the whole list — and compare borrowed, instead of cloning
+    // two `String`s per comparison.
+    let (svc, port) = candidates.iter().min_by_key(|(s, _)| {
         (
-            s.metadata.namespace.clone().unwrap_or_default(),
-            s.metadata.name.clone().unwrap_or_default(),
+            s.metadata.namespace.as_deref().unwrap_or_default(),
+            s.metadata.name.as_deref().unwrap_or_default(),
         )
-    });
-    let (svc, port) = candidates.first()?;
+    })?;
     Some((
         svc.metadata.namespace.clone().unwrap_or_default(),
         svc.metadata.name.clone().unwrap_or_default(),

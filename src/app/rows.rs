@@ -21,6 +21,18 @@ impl App {
         cache.sort_keys.remove(key);
     }
 
+    /// Drop derived data for an updated row. Its position and membership are
+    /// unchanged when neither filtering nor sorting is active, so keep the
+    /// already-built key order in that common watch-event path.
+    pub(super) fn invalidate_row_contents(&self, key: &str) {
+        let mut cache = self.rows_cache.borrow_mut();
+        cache.cells.remove(key);
+        cache.sort_keys.remove(key);
+        if !self.filter.is_empty() || self.sort_column.is_some() || self.kind_plural == "helm" {
+            cache.dirty = true;
+        }
+    }
+
     /// The parsed form of the active filter, reparsed only when the string
     /// has changed (never per frame — see [`FilterCache`]).
     pub(super) fn parsed_filter(&self) -> Ref<'_, crate::filter::ParsedFilter> {
@@ -36,17 +48,36 @@ impl App {
     /// or every local term of a structured expression? `-l`/`-f` selectors
     /// are not evaluated here: the Kubernetes API already applied them to
     /// the watch (see [`Self::sync_filter_selectors`]).
-    pub(super) fn matches_filter(&self, o: &DynamicObject) -> bool {
-        use crate::filter::{ParsedFilter, Term};
+    ///
+    /// Takes the cell cache and the parsed filter from its caller
+    /// (`ensure_rows_cache`), which already holds both and evaluates this for
+    /// every object in the store.
+    fn matches_filter_cached(
+        &self,
+        o: &DynamicObject,
+        key: &RowKey,
+        parsed: &crate::filter::ParsedFilter,
+        cells: &mut HashMap<RowKey, CellCacheEntry>,
+    ) -> bool {
         if self.filter.is_empty() {
             return true;
         }
-        let parsed = self.parsed_filter();
-        match &*parsed {
-            ParsedFilter::Fuzzy(pat) => pat.is_empty() || self.fuzzy_match_row(o, pat),
+        self.eval_filter(o, key, parsed, cells)
+    }
+
+    fn eval_filter(
+        &self,
+        o: &DynamicObject,
+        key: &RowKey,
+        parsed: &crate::filter::ParsedFilter,
+        cells: &mut HashMap<RowKey, CellCacheEntry>,
+    ) -> bool {
+        use crate::filter::{ParsedFilter, Term};
+        match parsed {
+            ParsedFilter::Fuzzy(pat) => pat.is_empty() || self.fuzzy_match_row(o, pat, key, cells),
             ParsedFilter::Structured(s) => s.terms.iter().all(|t| match t {
-                Term::Fuzzy(pat) => self.fuzzy_match_row(o, pat),
-                Term::NotFuzzy(pat) => !self.fuzzy_match_row(o, pat),
+                Term::Fuzzy(pat) => self.fuzzy_match_row(o, pat, key, cells),
+                Term::NotFuzzy(pat) => !self.fuzzy_match_row(o, pat, key, cells),
                 Term::Cmp(cmp) => self.eval_cmp(o, cmp),
             }),
         }
@@ -58,27 +89,88 @@ impl App {
     /// CLUSTER-IP. Cells are matched one at a time rather than joined so a
     /// pattern can't match across cell boundaries; the full row is only
     /// rendered when the name haystack missed.
-    fn fuzzy_match_row(&self, o: &DynamicObject, pat: &str) -> bool {
-        if self.matcher.fuzzy_match(&self.fuzzy_hay(o), pat).is_some() {
-            return true;
+    ///
+    /// The cell fallback reads *through the cell cache*. It used to call
+    /// `self.spec.cells(o)` directly, re-rendering every column of every
+    /// non-matching object on every keystroke and discarding the result — on
+    /// a helm view that meant five gunzip+JSON-parse rounds per row per
+    /// keypress. Cached by `resourceVersion`, a row is now rendered once per
+    /// change instead of once per keystroke.
+    fn fuzzy_match_row(
+        &self,
+        o: &DynamicObject,
+        pat: &str,
+        key: &RowKey,
+        cells: &mut HashMap<RowKey, CellCacheEntry>,
+    ) -> bool {
+        let pat_mask = subseq_mask(pat);
+        {
+            // Built into a reused buffer: this used to `format!` a fresh
+            // `String` for every object on every keystroke.
+            let mut hay = self.hay_buf.borrow_mut();
+            self.write_fuzzy_hay(o, &mut hay);
+            if subseq_mask(&hay) & pat_mask == pat_mask
+                && self.matcher.fuzzy_match(&hay, pat).is_some()
+            {
+                return true;
+            }
         }
-        let (cells, _) = self.spec.cells(o);
-        cells
+        let entry = self.cell_entry(key, o, cells);
+        // No cell can contain every pattern character, so none can match.
+        if entry.row_mask & pat_mask != pat_mask {
+            return false;
+        }
+        entry
+            .cells
             .iter()
-            .any(|c| self.matcher.fuzzy_match(c, pat).is_some())
+            .zip(&entry.cell_masks)
+            .any(|(c, &m)| m & pat_mask == pat_mask && self.matcher.fuzzy_match(c, pat).is_some())
+    }
+
+    /// The cached cells for `key`, rendering them if absent or stale.
+    fn cell_entry<'c>(
+        &self,
+        key: &RowKey,
+        o: &DynamicObject,
+        cells: &'c mut HashMap<RowKey, CellCacheEntry>,
+    ) -> &'c CellCacheEntry {
+        let resource_version = o.metadata.resource_version.clone();
+        let stale = cells
+            .get(key)
+            .is_none_or(|e| e.plural != self.kind_plural || e.resource_version != resource_version);
+        if stale {
+            let (rendered, status_idx) = self.spec.cells(o);
+            let cell_masks: Vec<u64> = rendered.iter().map(|c| subseq_mask(c)).collect();
+            let row_mask = cell_masks.iter().fold(0u64, |a, m| a | m);
+            cells.insert(
+                key.clone(),
+                CellCacheEntry {
+                    plural: self.kind_plural.clone(),
+                    resource_version,
+                    cells: rendered,
+                    status_idx,
+                    cell_masks,
+                    row_mask,
+                },
+            );
+        }
+        cells.get(key).expect("just inserted")
     }
 
     /// What fuzzy terms match against: "namespace name". Helm rows are backed
     /// by the storage Secret, whose own name (`sh.helm.release.v1.<release>.
     /// v<n>`) isn't what a user typing a filter means — match the release
     /// name instead.
-    fn fuzzy_hay(&self, o: &DynamicObject) -> String {
+    fn write_fuzzy_hay(&self, o: &DynamicObject, out: &mut String) {
         let name = if matches!(self.kind_plural.as_str(), "helm" | "helmhistory") {
             crate::helm::release_name(o).unwrap_or_default()
         } else {
             o.metadata.name.as_deref().unwrap_or("")
         };
-        format!("{} {}", o.metadata.namespace.as_deref().unwrap_or(""), name)
+        out.clear();
+        out.push_str(o.metadata.namespace.as_deref().unwrap_or(""));
+        out.push(' ');
+        out.push_str(name);
     }
 
     /// Evaluate one typed column comparison against an object. `cpu`/`mem`
@@ -147,7 +239,7 @@ impl App {
     /// Char indices in `name` that matched the active row filter's fuzzy
     /// pattern, for highlighting them in the table. `None` when there's no
     /// active filter or no fuzzy term (every visible row already passed
-    /// [`matches_filter`], so this is purely a rendering aid, not a second
+    /// the filter pass, so this is purely a rendering aid, not a second
     /// filter decision).
     pub fn filter_match_indices(&self, name: &str) -> Option<Vec<usize>> {
         if self.filter.is_empty() {
@@ -176,55 +268,68 @@ impl App {
         // the latest revision per release; `helmhistory` (one release's full
         // history) shows every revision, so it skips this.
         let helm_latest = (self.kind_plural == "helm").then(|| self.helm_latest_revision_keys());
-        let sort_keys = &mut cache.sort_keys;
+        // Parsed once, not once per object: the filter check used to re-borrow
+        // the filter cache and re-compare the raw filter string for every row.
+        let parsed = self.parsed_filter();
+        // Disjoint field borrows so the filter can warm the cell cache while
+        // the sort-key cache is also held.
+        let RowsCache {
+            cells, sort_keys, ..
+        } = &mut *cache;
+
         // (primary sort key, (ns, name) tiebreak, store key)
-        let mut entries: Vec<(SortKey, (&str, &str), &String)> = self
-            .store
-            .iter()
-            .filter(|(_, o)| self.matches_filter(o))
-            .filter(|(k, _)| match &helm_latest {
-                Some(keep) => keep.contains(*k),
-                None => true,
-            })
-            .map(|(k, o)| {
-                // One watch event marks the whole ordering dirty, so the
-                // rebuild touches every object — computed sort keys are
-                // cached per resourceVersion so the N-1 unchanged rows reuse
-                // theirs instead of re-extracting (and, for helm, re-gunzipping)
-                // their cells.
-                let primary = match sort_header {
-                    None => SortKey::Text(String::new()),
-                    Some(h) if volatile_sort => self.column_sort_key(o, h),
-                    Some(h) => {
-                        let rv = o.metadata.resource_version.as_deref();
-                        match sort_keys.get(k) {
-                            Some(e) if e.header == h && e.resource_version.as_deref() == rv => {
-                                e.key.clone()
-                            }
-                            _ => {
-                                let key = self.column_sort_key(o, h);
-                                sort_keys.insert(
-                                    k.clone(),
-                                    SortKeyEntry {
-                                        header: h.to_string(),
-                                        resource_version: o.metadata.resource_version.clone(),
-                                        key: key.clone(),
-                                    },
-                                );
-                                key
-                            }
+        let empty_sort: Rc<str> = Rc::from("");
+        let mut entries: Vec<(SortKey, (&str, &str), &RowKey)> =
+            Vec::with_capacity(self.store.len());
+        for (k, o) in self.store.iter() {
+            if let Some(keep) = &helm_latest
+                && !keep.contains(k)
+            {
+                continue;
+            }
+            if !self.matches_filter_cached(o, k, &parsed, cells) {
+                continue;
+            }
+            // One watch event marks the whole ordering dirty, so the
+            // rebuild touches every object — computed sort keys are
+            // cached per resourceVersion so the N-1 unchanged rows reuse
+            // theirs instead of re-extracting (and, for helm, re-gunzipping)
+            // their cells.
+            let primary = match sort_header {
+                None => SortKey::Text(empty_sort.clone()),
+                Some(h) if volatile_sort => self.column_sort_key(o, h),
+                Some(h) => {
+                    let rv = o.metadata.resource_version.as_deref();
+                    match sort_keys.get(k) {
+                        Some(e) if e.header == h && e.resource_version.as_deref() == rv => {
+                            e.key.clone()
+                        }
+                        _ => {
+                            let key = self.column_sort_key(o, h);
+                            sort_keys.insert(
+                                k.clone(),
+                                SortKeyEntry {
+                                    header: h.to_string(),
+                                    resource_version: o.metadata.resource_version.clone(),
+                                    key: key.clone(),
+                                },
+                            );
+                            key
                         }
                     }
-                };
-                let tie = (
-                    o.metadata.namespace.as_deref().unwrap_or(""),
-                    o.metadata.name.as_deref().unwrap_or(""),
-                );
-                (primary, tie, k)
-            })
-            .collect();
+                }
+            };
+            let tie = (
+                o.metadata.namespace.as_deref().unwrap_or(""),
+                o.metadata.name.as_deref().unwrap_or(""),
+            );
+            entries.push((primary, tie, k));
+        }
         let desc = self.sort_desc && sort_header.is_some();
-        entries.sort_by(|a, b| {
+        // Unstable: the `(namespace, name)` fallback below is a total order
+        // for a Kubernetes object set, so stability buys nothing here — and a
+        // stable sort allocates an n/2 scratch buffer on every rebuild.
+        entries.sort_unstable_by(|a, b| {
             let mut ord = a.0.cmp_to(&b.0);
             if desc {
                 ord = ord.reverse();
@@ -239,8 +344,8 @@ impl App {
     /// Store keys of the highest-revision secret per (namespace, release) —
     /// label-based (no gunzip/decode needed), used to dedup the aggregated
     /// Helm release list down to one row per release, like `helm list`.
-    fn helm_latest_revision_keys(&self) -> HashSet<String> {
-        let mut latest: HashMap<(String, String), (i64, String)> = HashMap::new();
+    fn helm_latest_revision_keys(&self) -> HashSet<RowKey> {
+        let mut latest: HashMap<(String, String), (i64, RowKey)> = HashMap::new();
         for (k, o) in self.store.iter() {
             let Some(name) = crate::helm::release_name(o) else {
                 continue;
@@ -272,7 +377,7 @@ impl App {
             .borrow()
             .keys
             .iter()
-            .filter_map(|k| self.store.get(k))
+            .filter_map(|k| self.store.get(k.as_ref()))
             .collect()
     }
 
@@ -287,30 +392,23 @@ impl App {
             .iter()
             .skip(offset)
             .take(n)
-            .filter_map(|k| self.store.get(k))
+            .filter_map(|k| self.store.get(k.as_ref()))
             .collect()
     }
 
     pub(crate) fn ensure_table_cell_cache(&self, rows: &[&DynamicObject]) {
         let mut cache = self.rows_cache.borrow_mut();
         for obj in rows {
+            // Shares `cell_entry` with the filter pass, so a row rendered for
+            // filtering is already warm for the renderer (and vice versa) and
+            // there is one place that decides what "stale" means.
             let key = row_key(obj);
-            let resource_version = obj.metadata.resource_version.clone();
-            let stale = cache.cells.get(&key).is_none_or(|entry| {
-                entry.plural != self.kind_plural || entry.resource_version != resource_version
-            });
-            if stale {
-                let (cells, status_idx) = self.spec.cells(obj);
-                cache.cells.insert(
-                    key,
-                    CellCacheEntry {
-                        plural: self.kind_plural.clone(),
-                        resource_version,
-                        cells,
-                        status_idx,
-                    },
-                );
-            }
+            let key = self
+                .store
+                .key(&key)
+                .cloned()
+                .unwrap_or_else(|| Rc::from(key));
+            self.cell_entry(&key, obj, &mut cache.cells);
         }
     }
 
@@ -505,7 +603,8 @@ impl App {
                     .namespace
                     .clone()
                     .unwrap_or_default()
-                    .to_lowercase(),
+                    .to_lowercase()
+                    .into(),
             ),
             // Unknown timestamps sort last (oldest-unknown) in ascending order.
             "AGE" => SortKey::Num(crate::columns::age_secs(o).unwrap_or(i64::MAX) as f64),
@@ -556,7 +655,7 @@ impl App {
             }
             _ => match self.spec.sort_value(o, header) {
                 Some(v) => SortKey::from(v),
-                None => SortKey::Text(String::new()),
+                None => SortKey::Text(Rc::from("")),
             },
         }
     }
@@ -636,7 +735,7 @@ impl App {
         let idx = self.table_state.selected()?;
         self.ensure_rows_cache();
         let cache = self.rows_cache.borrow();
-        self.store.get(cache.keys.get(idx)?)
+        self.store.get(cache.keys.get(idx)?.as_ref())
     }
 
     pub fn selected(&self) -> Option<DynamicObject> {

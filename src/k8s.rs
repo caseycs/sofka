@@ -2,6 +2,8 @@
 //! resolution, and async watch streams that feed the in-memory store.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -69,7 +71,15 @@ pub struct Cluster {
     /// current context is unreachable at launch — the app then starts in the
     /// context picker instead of a resource view.
     pub connected: bool,
+    /// Per-cluster support for Kubernetes streaming-list watch startup:
+    /// unknown, supported, or unsupported. Shared by all view watches so one
+    /// negotiation failure avoids retrying the extension on every switch.
+    streaming_lists: Arc<AtomicU8>,
 }
+
+const STREAMING_UNKNOWN: u8 = 0;
+const STREAMING_SUPPORTED: u8 = 1;
+const STREAMING_UNSUPPORTED: u8 = 2;
 
 impl Cluster {
     pub async fn connect() -> Result<Self> {
@@ -117,6 +127,7 @@ impl Cluster {
             registry: HashMap::new(),
             catalog: Vec::new(),
             connected: true,
+            streaming_lists: Arc::new(AtomicU8::new(STREAMING_UNKNOWN)),
         };
         cluster.discover().await?;
         Ok(cluster)
@@ -173,6 +184,7 @@ impl Cluster {
             registry: HashMap::new(),
             catalog: Vec::new(),
             connected: false,
+            streaming_lists: Arc::new(AtomicU8::new(STREAMING_UNKNOWN)),
         }
     }
 
@@ -255,6 +267,9 @@ impl Cluster {
         }
         // Lowest priority first; later inserts overwrite, so the highest
         // priority group ends up owning each bare plural/kind key.
+        // Deliberately a *stable* sort: groups tie on priority constantly, and
+        // insertion order is what decides which kind wins a shared key. An
+        // unstable sort would make `:` resolution vary between runs.
         entries.sort_by_key(|(k, _, _)| group_priority(&k.ar.group));
         for (kind, plural, kind_lc) in entries {
             self.registry.insert(plural, kind.clone());
@@ -295,6 +310,7 @@ impl Cluster {
         let ar = kind.ar.clone();
         let namespaced = kind.namespaced;
         let ns = namespace.to_string();
+        let streaming_lists = Arc::clone(&self.streaming_lists);
 
         tokio::spawn(async move {
             let api: Api<DynamicObject> = if namespaced && !ns.is_empty() {
@@ -310,14 +326,35 @@ impl Cluster {
             if let Some(f) = fields {
                 cfg = cfg.fields(&f);
             }
-            let mut stream = watcher(api, cfg)
-                .modify(|obj| obj.managed_fields_mut().clear())
-                .boxed();
+            let mut using_streaming =
+                streaming_lists.load(Ordering::Acquire) != STREAMING_UNSUPPORTED;
+            let mut initializing = true;
+            let mut stream = watcher(
+                api.clone(),
+                if using_streaming {
+                    cfg.clone().streaming_lists()
+                } else {
+                    cfg.clone()
+                },
+            )
+            .modify(|obj| obj.managed_fields_mut().clear())
+            .boxed();
             if tx.send(Msg::Reset { generation }).await.is_err() {
                 return;
             }
 
             while let Some(event) = stream.next().await {
+                if using_streaming
+                    && initializing
+                    && event.as_ref().is_err_and(streaming_lists_unsupported)
+                {
+                    streaming_lists.store(STREAMING_UNSUPPORTED, Ordering::Release);
+                    using_streaming = false;
+                    stream = watcher(api.clone(), cfg.clone())
+                        .modify(|obj| obj.managed_fields_mut().clear())
+                        .boxed();
+                    continue;
+                }
                 let msg = match event {
                     Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
                         Msg::Applied {
@@ -331,7 +368,21 @@ impl Cluster {
                         key: row_key(&obj),
                     },
                     Ok(watcher::Event::Init) => Msg::Reset { generation },
-                    Ok(watcher::Event::InitDone) => Msg::Synced { generation },
+                    Ok(watcher::Event::InitDone) => {
+                        initializing = false;
+                        if using_streaming {
+                            // Unsupported is sticky if two startup watches
+                            // negotiate concurrently and only one endpoint
+                            // rejects the extension.
+                            let _ = streaming_lists.compare_exchange(
+                                STREAMING_UNKNOWN,
+                                STREAMING_SUPPORTED,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            );
+                        }
+                        Msg::Synced { generation }
+                    }
                     // The watcher heals a desync by re-listing on its own
                     // (the stream continues with Init/…/InitDone), so the
                     // "too old resource version: Expired" error is routine —
@@ -374,6 +425,20 @@ impl Cluster {
 pub fn watch_error_is_benign(e: &watcher::Error) -> bool {
     matches!(e, watcher::Error::WatchError(status)
         if status.code == 410 || status.reason == "Expired")
+}
+
+/// Errors that specifically mean the API server rejected streaming-list
+/// watch parameters. Authentication, throttling, transport, and server errors
+/// remain visible to the user instead of being disguised by a fallback.
+fn streaming_lists_unsupported(e: &watcher::Error) -> bool {
+    let unsupported_status =
+        |status: &kube::core::Status| matches!(status.code, 400 | 404 | 405 | 422);
+    match e {
+        watcher::Error::WatchStartFailed(kube::Error::Api(status)) => unsupported_status(status),
+        watcher::Error::WatchFailed(kube::Error::Api(status)) => unsupported_status(status),
+        watcher::Error::WatchError(status) => unsupported_status(status),
+        _ => false,
+    }
 }
 
 /// Higher wins when two API groups expose the same bare plural/kind (e.g.
@@ -477,12 +542,15 @@ pub const ALIASES: &[(&str, &str)] = &[
     ("hr", "helmreleases"),
 ];
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 impl Cluster {
     /// A connectionless cluster for unit tests: the client points at a dummy
     /// URL (no I/O happens until a request is actually made) and the registry
     /// is a small hand-built set of common kinds.
-    pub(crate) fn fake() -> Self {
+    ///
+    /// Also compiled under the `bench` feature, because `benches/` links the
+    /// library without `cfg(test)` and needs the same offline fixture.
+    pub fn fake() -> Self {
         let config = Config::new("https://127.0.0.1:6443".parse().unwrap());
         let client = Client::try_from(config).expect("build test client");
         let mk = |group: &str, kind: &str, plural: &str, namespaced: bool| Kind {
@@ -609,6 +677,7 @@ impl Cluster {
             connected: true,
             registry,
             catalog,
+            streaming_lists: Arc::new(AtomicU8::new(STREAMING_UNKNOWN)),
         }
     }
 }
@@ -633,6 +702,167 @@ mod tests {
         }));
         assert!(!watch_error_is_benign(&forbidden));
         assert!(!watch_error_is_benign(&watcher::Error::NoResourceVersion));
+    }
+
+    #[test]
+    fn streaming_fallback_only_accepts_capability_errors() {
+        let api_error = |code| {
+            watcher::Error::WatchStartFailed(kube::Error::Api(Box::new(kube::core::Status {
+                code,
+                reason: "test".into(),
+                ..Default::default()
+            })))
+        };
+        assert!(streaming_lists_unsupported(&api_error(400)));
+        assert!(streaming_lists_unsupported(&api_error(422)));
+        assert!(!streaming_lists_unsupported(&api_error(401)));
+        assert!(!streaming_lists_unsupported(&api_error(403)));
+        assert!(!streaming_lists_unsupported(&api_error(429)));
+        assert!(!streaming_lists_unsupported(&api_error(500)));
+        assert!(!streaming_lists_unsupported(
+            &watcher::Error::NoResourceVersion
+        ));
+    }
+
+    async fn mock_watch_server(
+        responses: Vec<(&'static str, String)>,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::collections::VecDeque;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock watch server");
+        let addr = listener.local_addr().expect("local addr");
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        tokio::spawn(async move {
+            let mut responses: VecDeque<_> = responses.into();
+            while let Some((status, body)) = responses.pop_front() {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let (r, mut w) = sock.split();
+                let mut reader = BufReader::new(r);
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                seen.lock()
+                    .unwrap()
+                    .push(request_line.split_whitespace().nth(1).unwrap_or("").into());
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).await.unwrap_or(0) == 0 || header == "\r\n" {
+                        break;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                w.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (format!("http://{addr}"), requests)
+    }
+
+    fn watch_cluster(url: &str) -> Cluster {
+        let mut config = Config::new(url.parse().expect("mock URL"));
+        config.default_retry = false;
+        let mut cluster = Cluster::fake();
+        cluster.client = Client::try_from(config).expect("mock client");
+        cluster.cluster_url = url.into();
+        cluster
+    }
+
+    async fn receive_watch_result(mut rx: tokio::sync::mpsc::Receiver<Msg>) -> (usize, bool) {
+        let mut applied = 0;
+        for _ in 0..8 {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("watch message timeout")
+                .expect("watch channel closed");
+            match msg {
+                Msg::Applied { .. } => applied += 1,
+                Msg::Synced { .. } => return (applied, true),
+                Msg::Error { .. } => return (applied, false),
+                _ => {}
+            }
+        }
+        (applied, false)
+    }
+
+    #[tokio::test]
+    async fn streaming_watch_initializes_from_initial_events() {
+        let body = concat!(
+            "{\"type\":\"ADDED\",\"object\":{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"a\",\"namespace\":\"default\",\"resourceVersion\":\"10\"}}}\n",
+            "{\"type\":\"BOOKMARK\",\"object\":{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"resourceVersion\":\"10\",\"annotations\":{\"k8s.io/initial-events-end\":\"true\"}}}}\n"
+        )
+        .to_string();
+        let (url, requests) = mock_watch_server(vec![("200 OK", body)]).await;
+        let cluster = watch_cluster(&url);
+        let kind = cluster.resolve("pods").unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let task = cluster.spawn_watch(&kind, "default", None, None, 1, tx);
+        assert_eq!(receive_watch_result(rx).await, (1, true));
+        task.abort();
+        assert_eq!(
+            cluster.streaming_lists.load(Ordering::Acquire),
+            STREAMING_SUPPORTED
+        );
+        assert!(requests.lock().unwrap()[0].contains("sendInitialEvents=true"));
+    }
+
+    #[tokio::test]
+    async fn unsupported_streaming_watch_falls_back_to_list_watch() {
+        let rejected = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"sendInitialEvents is not supported","reason":"BadRequest","code":400}"#.to_string();
+        let listed = r#"{"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":[{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"10"}}]}"#.to_string();
+        let (url, requests) =
+            mock_watch_server(vec![("400 Bad Request", rejected), ("200 OK", listed)]).await;
+        let cluster = watch_cluster(&url);
+        let kind = cluster.resolve("pods").unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let task = cluster.spawn_watch(&kind, "default", None, None, 1, tx);
+        assert_eq!(receive_watch_result(rx).await, (1, true));
+        task.abort();
+        assert_eq!(
+            cluster.streaming_lists.load(Ordering::Acquire),
+            STREAMING_UNSUPPORTED
+        );
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].contains("sendInitialEvents=true"));
+        assert!(!requests[1].contains("sendInitialEvents=true"));
+        assert!(!requests[1].contains("watch=true"));
+    }
+
+    #[tokio::test]
+    async fn authorization_error_does_not_trigger_streaming_fallback() {
+        let forbidden = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"forbidden","reason":"Forbidden","code":403}"#.to_string();
+        let (url, requests) = mock_watch_server(vec![("403 Forbidden", forbidden)]).await;
+        let cluster = watch_cluster(&url);
+        let kind = cluster.resolve("pods").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let task = cluster.spawn_watch(&kind, "default", None, None, 1, tx);
+        let mut saw_error = false;
+        for _ in 0..4 {
+            if let Msg::Error { .. } =
+                tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("watch message timeout")
+                    .expect("watch channel closed")
+            {
+                saw_error = true;
+                break;
+            }
+        }
+        task.abort();
+        assert!(saw_error);
+        assert_eq!(
+            cluster.streaming_lists.load(Ordering::Acquire),
+            STREAMING_UNKNOWN
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
     #[test]

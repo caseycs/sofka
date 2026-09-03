@@ -7,10 +7,12 @@ description = "A Kubernetes TUI, reimagined in Rust"
 repository = "https://github.com/nklmilojevic/sofka"
 
 [dependencies]
+aho-corasick = "1.1.5"
 anyhow = "1.0.102"
 base64 = "0.23.0"
 clap = { version = "4.6.1", features = ["derive"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
+dhat = { version = "0.3.3", optional = true }
 flate2 = "1.1.5"
 form_urlencoded = "1.2.2"
 futures-util = "0.3.32"
@@ -22,6 +24,7 @@ hyper-rustls = { version = "0.27.9", default-features = false, features = ["http
 hyper-util = { version = "0.1.20", features = ["client-legacy", "http1", "tokio"] }
 k8s-openapi = { version = "0.28", features = ["latest"] }
 kube = { version = "4.0.0", features = ["runtime", "client", "derive", "ws"] }
+memchr = "2.8.3"
 ratatui = "0.30.1"
 regex = "1"
 serde = "1.0.228"
@@ -39,3 +42,33 @@ unicode-width = "0.2.2"
 # builds), so compile time matters more than the last percent.
 lto = "thin"
 strip = true
+
+# Benchmarks must measure shipped codegen, so this mirrors `release` — but
+# keeps symbols, because a stripped binary profiles as a wall of hex.
+[profile.bench]
+lto = "thin"
+strip = false
+debug = true
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[features]
+# Widens a couple of test-only constructors (`Cluster::fake`) and exposes
+# `benchsupport` so `benches/` can build fixtures against the real types.
+# Never enabled for a release build.
+bench = []
+# Heap profiling: `cargo run --features dhat-heap` writes dhat-heap.json.
+dhat-heap = ["dep:dhat"]
+
+[[bench]]
+name = "hot_paths"
+harness = false
+required-features = ["bench"]
+
+# Memory counterpart to the benches: criterion measures time, and the Tier 1
+# items are justified by heap. Needs `bench` for the fixtures and `dhat-heap`
+# for the allocator that can report live bytes.
+[[example]]
+name = "memprobe"
+required-features = ["bench", "dhat-heap"]

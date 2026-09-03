@@ -1,0 +1,269 @@
+//! Fixtures and thin wrappers so `benches/` can drive the real hot paths.
+//!
+//! Compiled only under the `bench` feature. It lives inside the crate (rather
+//! than in `benches/`) for one reason: several of the paths worth measuring are
+//! `pub(crate)` or `pub(super)`, and a benchmark is an external crate. Rather
+//! than widening those permanently for the shipped binary, this module reaches
+//! them from the inside and re-exports exactly what the benchmarks need.
+//!
+//! The fixtures deliberately mirror the shape of real API objects — a pod here
+//! carries `containerStatuses` with `state`/`restartCount`, because
+//! `pod_summary` walks that array and a fixture without it would measure an
+//! empty loop.
+
+use kube::core::DynamicObject;
+use serde_json::json;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+
+use crate::app::App;
+use crate::k8s::Cluster;
+use crate::store::{Msg, row_key};
+
+/// `ui::wrapped_height` is `pub(crate)`; benches measure it through here.
+pub fn wrapped_height(raw: &str, width: usize) -> usize {
+    crate::ui::wrapped_height(raw, width)
+}
+
+/// One synthetic pod. `i` varies the namespace, node, phase and restart count
+/// so a filter or sort sees a realistic spread rather than N identical rows.
+pub fn pod(i: usize) -> DynamicObject {
+    let ns = format!("ns-{}", i % 24);
+    let phase = match i % 7 {
+        0 => "Pending",
+        1 => "Succeeded",
+        _ => "Running",
+    };
+    let ready = !i.is_multiple_of(5);
+    let restarts = (i % 11) as i64;
+    let waiting = if i.is_multiple_of(13) {
+        json!({ "waiting": { "reason": "CrashLoopBackOff" } })
+    } else {
+        json!({ "running": { "startedAt": "2026-08-30T09:00:00Z" } })
+    };
+
+    serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": format!("workload-{i:05}-7d9f8b6c5d-{:04x}", i * 7919 % 65536),
+            "namespace": ns,
+            "uid": format!("00000000-0000-0000-0000-{i:012}"),
+            "resourceVersion": format!("{}", 100_000 + i),
+            "creationTimestamp": "2026-08-30T08:00:00Z",
+            "labels": {
+                "app.kubernetes.io/name": format!("svc-{}", i % 40),
+                "app.kubernetes.io/instance": format!("svc-{}-prod", i % 40),
+                "pod-template-hash": format!("{:x}", i * 104_729 % 1_048_576),
+            },
+            "annotations": {
+                "prometheus.io/scrape": "true",
+                "prometheus.io/port": "9090",
+            },
+        },
+        "spec": {
+            "nodeName": format!("node-{:03}", i % 79),
+            "containers": [
+                { "name": "app", "image": format!("registry.example.com/svc-{}:v1.4.2", i % 40) },
+                { "name": "sidecar", "image": "registry.example.com/envoy:v1.31.0" },
+            ],
+        },
+        "status": {
+            "phase": phase,
+            "podIP": format!("10.{}.{}.{}", i / 65536 % 256, i / 256 % 256, i % 256),
+            "containerStatuses": [
+                {
+                    "name": "app",
+                    "ready": ready,
+                    "restartCount": restarts,
+                    "state": waiting,
+                },
+                {
+                    "name": "sidecar",
+                    "ready": true,
+                    "restartCount": 0,
+                    "state": { "running": { "startedAt": "2026-08-30T09:00:00Z" } },
+                },
+            ],
+        },
+    }))
+    .expect("bench pod fixture is valid")
+}
+
+/// A Helm release storage Secret, encoded exactly like the real thing
+/// (base64 -> base64 -> gzip -> JSON), so `helm::decode` does its real work.
+pub fn helm_secret(i: usize) -> DynamicObject {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write as _;
+
+    let name = format!("release-{}", i % 60);
+    let ns = format!("ns-{}", i % 24);
+    let revision = (i % 5 + 1) as i64;
+    // A realistic release carries its rendered manifest — that payload is the
+    // reason `decode` is expensive, so the fixture must include one.
+    let manifest = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: x\n".repeat(200);
+    let release_json = json!({
+        "name": name,
+        "namespace": ns,
+        "version": revision,
+        "info": {
+            "status": "deployed",
+            "description": format!("Upgrade complete (revision {revision})"),
+            "last_deployed": "2026-08-30T10:30:00Z",
+            "notes": "thanks for installing",
+        },
+        "chart": {
+            "metadata": { "name": "mychart", "version": "1.0.0", "appVersion": "2.0.0" },
+        },
+        "config": { "replicaCount": revision },
+        "manifest": manifest,
+    })
+    .to_string();
+
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(release_json.as_bytes()).expect("gzip fixture");
+    let gzipped = gz.finish().expect("gzip fixture");
+    let wire = BASE64.encode(BASE64.encode(gzipped));
+
+    serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": format!("sh.helm.release.v1.{name}.v{revision}"),
+            "namespace": ns,
+            "resourceVersion": format!("{}", 200_000 + i),
+            "creationTimestamp": "2026-08-30T08:00:00Z",
+            "labels": { "owner": "helm", "name": name, "version": revision.to_string() },
+        },
+        "type": "helm.sh/release.v1",
+        "data": { "release": wire },
+    }))
+    .expect("bench helm fixture is valid")
+}
+
+/// Criterion runs benchmarks on a bare thread, but building a kube `Client`
+/// spawns a tower buffer worker and panics without a reactor. One process-wide
+/// runtime, kept alive for the whole run, is enough: the offline client never
+/// actually issues a request.
+pub fn runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("bench runtime")
+    })
+}
+
+/// An offline `App` plus the receiver its messages land in. The receiver must
+/// be held: dropping it closes the channel and later sends start failing.
+pub fn app() -> (App, Receiver<Msg>) {
+    let _guard = runtime().enter();
+    let (tx, rx) = mpsc::channel(4096);
+    (App::new(Cluster::fake(), tx), rx)
+}
+
+/// Feed `objs` through the real watch-event path, exactly as a live stream
+/// would — so the store, timeline and caches all end up in their normal state.
+pub fn seed(app: &mut App, objs: impl IntoIterator<Item = DynamicObject>) {
+    for o in objs {
+        let key = row_key(&o);
+        app.handle_msg(Msg::Applied {
+            generation: app.generation,
+            key,
+            obj: Box::new(o),
+        });
+    }
+}
+
+/// An app holding `n` synthetic pods, already listed as the pods view.
+pub fn pods_app(n: usize) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.kind_plural = "pods".to_string();
+    seed(&mut a, (0..n).map(pod));
+    (a, rx)
+}
+
+/// A store-shaped object map of `n` pods — what one entry of the view cache
+/// holds. Used by the memory probe to price a view snapshot directly, without
+/// driving navigation (which would spawn watches).
+pub fn items(n: usize) -> crate::store::Items {
+    (0..n)
+        .map(pod)
+        .map(|o| (row_key(&o).into(), std::sync::Arc::new(o)))
+        .collect()
+}
+
+/// What seeding a cached view used to cost: a full deep copy of every object's
+/// `serde_json::Value` body. Kept so the memory probe can price the old path
+/// against the new one in the same process.
+pub fn deep_clone_items(items: &crate::store::Items) -> Vec<DynamicObject> {
+    items.values().map(|o| (**o).clone()).collect()
+}
+
+/// What it costs now: a refcount bump per object.
+pub fn arc_clone_items(items: &crate::store::Items) -> crate::store::Items {
+    items.clone()
+}
+
+/// An app holding `n` synthetic Helm release Secrets.
+pub fn helm_app(n: usize) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.kind_plural = "helm".to_string();
+    seed(&mut a, (0..n).map(helm_secret));
+    (a, rx)
+}
+
+/// Mark the row ordering stale the way one watch event does, so a bench
+/// iteration measures a real rebuild rather than a cache hit.
+pub fn touch_one(app: &mut App, i: usize) {
+    let o = pod(i);
+    let key = row_key(&o);
+    app.handle_msg(Msg::Applied {
+        generation: app.generation,
+        key,
+        obj: Box::new(o),
+    });
+}
+
+/// A synthetic log buffer: mostly plain ASCII, with the JSON, klog and
+/// ANSI-coloured lines a real stream mixes in.
+pub fn log_lines(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| match i % 8 {
+            0 => format!(
+                r#"{{"level":"info","ts":"2026-08-30T10:00:{:02}Z","msg":"reconcile complete","controller":"deployment","attempt":{i}}}"#,
+                i % 60
+            ),
+            1 => format!("E0830 10:00:{:02}.123456       1 controller.go:214] failed to sync {i}", i % 60),
+            2 => format!("\x1b[32mINFO\x1b[0m  request served path=/healthz status=200 duration={i}ms"),
+            3 => format!("W0830 10:00:{:02}.000000       1 warnings.go:70] deprecated field in use ({i})", i % 60),
+            _ => format!(
+                "2026-08-30T10:00:{:02}Z  serving request id={i} peer=10.0.{}.{} bytes={}",
+                i % 60,
+                i / 256 % 256,
+                i % 256,
+                i * 13 % 8192
+            ),
+        })
+        .collect()
+}
+
+/// The same buffer with a wide-character line every so often, so the
+/// `wrapped_height` benchmark exercises the non-ASCII path too.
+pub fn log_lines_wide(n: usize) -> Vec<String> {
+    let mut v = log_lines(n);
+    for (i, l) in v.iter_mut().enumerate() {
+        if i % 10 == 0 {
+            l.push_str(" — 日本語のログ行、幅の計算が必要");
+        }
+    }
+    v
+}
+
+/// Sender factory for benches that need to construct messages directly.
+pub fn channel() -> (Sender<Msg>, Receiver<Msg>) {
+    mpsc::channel(4096)
+}

@@ -1,6 +1,8 @@
 //! In-memory store of the currently-watched resource set.
 
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use kube::core::DynamicObject;
 
@@ -277,14 +279,33 @@ pub fn row_key(obj: &DynamicObject) -> String {
     }
 }
 
+/// The store's object map. Objects are behind an `Arc` because they are
+/// genuinely shared: the live store, the view-cache snapshot for the same
+/// scope, and `prev_revisions` all want the same bytes. Cloning used to mean
+/// deep-copying a whole `serde_json::Value` per object — the single largest
+/// contributor to RSS and to per-event cost. Nothing mutates an object once
+/// stored (`apply` replaces wholesale), so sharing is safe.
+pub type RowKey = Rc<str>;
+pub type Items = HashMap<RowKey, Arc<DynamicObject>>;
+
+/// How a store operation affected the rows currently visible to the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreMutation {
+    Buffered,
+    Inserted,
+    Updated,
+    Removed,
+    Unchanged,
+}
+
 #[derive(Default)]
 pub struct Store {
-    items: HashMap<String, DynamicObject>,
+    items: Items,
     /// Fresh rows accumulating during a (re)list while `items` still shows the
     /// previous set — a cached view snapshot or the pre-relist state. Swapped
     /// in wholesale on `Synced`, so stale rows are replaced atomically instead
     /// of the table blanking out while the initial list streams in.
-    pending: Option<HashMap<String, DynamicObject>>,
+    pending: Option<Items>,
     pub synced: bool,
 }
 
@@ -297,7 +318,7 @@ impl Store {
 
     /// Replace the contents with a cached snapshot from a previous visit to
     /// this view — shown (unsynced) until the new watch's initial list lands.
-    pub fn seed(&mut self, items: HashMap<String, DynamicObject>) {
+    pub fn seed(&mut self, items: Items) {
         self.items = items;
         self.pending = None;
         self.synced = false;
@@ -305,7 +326,7 @@ impl Store {
 
     /// Move the items out (for stashing in the view cache), leaving the store
     /// empty.
-    pub fn take_items(&mut self) -> HashMap<String, DynamicObject> {
+    pub fn take_items(&mut self) -> Items {
         self.pending = None;
         self.synced = false;
         std::mem::take(&mut self.items)
@@ -340,25 +361,39 @@ impl Store {
         }
     }
 
-    pub fn apply(&mut self, key: String, obj: DynamicObject) {
+    pub fn apply(&mut self, key: String, obj: DynamicObject) -> StoreMutation {
+        let key: RowKey = key.into();
+        let obj = Arc::new(obj);
         match &mut self.pending {
-            Some(pending) => pending.insert(key, obj),
-            None => self.items.insert(key, obj),
-        };
+            Some(pending) => {
+                pending.insert(key, obj);
+                StoreMutation::Buffered
+            }
+            None => match self.items.insert(key, obj) {
+                Some(_) => StoreMutation::Updated,
+                None => StoreMutation::Inserted,
+            },
+        }
     }
 
-    pub fn remove(&mut self, key: &str) {
+    pub fn remove(&mut self, key: &str) -> StoreMutation {
         match &mut self.pending {
-            Some(pending) => pending.remove(key),
-            None => self.items.remove(key),
-        };
+            Some(pending) => {
+                pending.remove(key);
+                StoreMutation::Buffered
+            }
+            None => match self.items.remove(key) {
+                Some(_) => StoreMutation::Removed,
+                None => StoreMutation::Unchanged,
+            },
+        }
     }
 
     /// The newest known version of `key`: the in-flight buffered one during a
     /// reset, else the visible one. Used as the "previous version" for
     /// timeline diffs, where [`Self::get`]'s stale visible copy would be wrong
     /// if the same object came through the buffer twice.
-    pub fn latest(&self, key: &str) -> Option<&DynamicObject> {
+    pub fn latest(&self, key: &str) -> Option<&Arc<DynamicObject>> {
         self.pending
             .as_ref()
             .and_then(|p| p.get(key))
@@ -369,11 +404,19 @@ impl Store {
         self.items.len()
     }
 
-    pub fn get(&self, key: &str) -> Option<&DynamicObject> {
-        self.items.get(key)
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &DynamicObject)> {
-        self.items.iter()
+    pub fn get(&self, key: &str) -> Option<&DynamicObject> {
+        self.items.get(key).map(AsRef::as_ref)
+    }
+
+    pub fn key(&self, key: &str) -> Option<&RowKey> {
+        self.items.get_key_value(key).map(|(key, _)| key)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&RowKey, &DynamicObject)> {
+        self.items.iter().map(|(k, v)| (k, v.as_ref()))
     }
 }

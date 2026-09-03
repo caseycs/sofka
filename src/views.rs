@@ -226,12 +226,7 @@ pub fn extract(obj: &DynamicObject, pointer: &str) -> Option<Value> {
     if let Some(rest) = pointer.strip_prefix("/metadata")
         && (rest.is_empty() || rest.starts_with('/'))
     {
-        let meta = serde_json::to_value(&obj.metadata).ok()?;
-        return if rest.is_empty() {
-            Some(meta)
-        } else {
-            meta.pointer(rest).cloned()
-        };
+        return extract_metadata(&obj.metadata, rest);
     }
     match pointer {
         "/apiVersion" => {
@@ -244,6 +239,69 @@ pub fn extract(obj: &DynamicObject, pointer: &str) -> Option<Value> {
         _ => {}
     }
     obj.data.pointer(pointer).cloned()
+}
+
+/// Resolve metadata without serializing the entire `ObjectMeta` for every
+/// custom-column cell. Complex or whole-metadata requests still serialize the
+/// selected value, preserving the exact JSON Pointer behavior and output.
+fn extract_metadata(meta: &kube::core::ObjectMeta, rest: &str) -> Option<Value> {
+    if rest.is_empty() {
+        return serde_json::to_value(meta).ok();
+    }
+    let path = rest.strip_prefix('/')?;
+    let field = path.split_once('/').map_or(path, |(field, _)| field);
+    let tail = &path[field.len()..];
+
+    macro_rules! selected {
+        ($value:expr) => {{
+            let value = serde_json::to_value($value).ok()?;
+            if tail.is_empty() {
+                Some(value)
+            } else {
+                value.pointer(tail).cloned()
+            }
+        }};
+    }
+
+    match field {
+        "name" => selected!(meta.name.as_ref()?),
+        "namespace" => selected!(meta.namespace.as_ref()?),
+        "uid" => selected!(meta.uid.as_ref()?),
+        "resourceVersion" => selected!(meta.resource_version.as_ref()?),
+        "generateName" => selected!(meta.generate_name.as_ref()?),
+        "selfLink" => selected!(meta.self_link.as_ref()?),
+        "generation" => selected!(meta.generation?),
+        "deletionGracePeriodSeconds" => selected!(meta.deletion_grace_period_seconds?),
+        "creationTimestamp" => selected!(meta.creation_timestamp.as_ref()?),
+        "deletionTimestamp" => selected!(meta.deletion_timestamp.as_ref()?),
+        "labels" => extract_string_map(meta.labels.as_ref()?, tail),
+        "annotations" => extract_string_map(meta.annotations.as_ref()?, tail),
+        "finalizers" => selected!(meta.finalizers.as_ref()?),
+        "ownerReferences" => selected!(meta.owner_references.as_ref()?),
+        "managedFields" => selected!(meta.managed_fields.as_ref()?),
+        _ => None,
+    }
+}
+
+fn extract_string_map(
+    map: &std::collections::BTreeMap<String, String>,
+    tail: &str,
+) -> Option<Value> {
+    if tail.is_empty() {
+        return serde_json::to_value(map).ok();
+    }
+    let token = tail.strip_prefix('/')?;
+    if token.contains('/') {
+        return None;
+    }
+    // JSON Pointer unescapes `~1` before `~0`; doing so in this order also
+    // preserves the RFC-defined meaning of tokens such as `~01`.
+    if token.contains('~') {
+        let key = token.replace("~1", "/").replace("~0", "~");
+        map.get(&key).cloned().map(Value::String)
+    } else {
+        map.get(token).cloned().map(Value::String)
+    }
 }
 
 /// Render one custom column's cell. Missing values read as `<none>`.
@@ -780,6 +838,67 @@ mod tests {
         assert_eq!(extract(&o, "/spec/missing"), None);
         // `/metadataX` must not be mistaken for a metadata pointer.
         assert_eq!(extract(&o, "/metadataX"), None);
+    }
+
+    #[test]
+    fn typed_metadata_paths_match_objectmeta_serialization() {
+        let o = obj(json!({
+            "apiVersion": "example.com/v1",
+            "kind": "Widget",
+            "metadata": {
+                "name": "w1",
+                "namespace": "team-a",
+                "uid": "uid-1",
+                "resourceVersion": "42",
+                "generateName": "widget-",
+                "generation": 7,
+                "creationTimestamp": "2024-01-02T03:04:05Z",
+                "deletionTimestamp": "2024-02-03T04:05:06Z",
+                "deletionGracePeriodSeconds": 30,
+                "labels": {
+                    "app.kubernetes.io/name": "web",
+                    "plain": "value"
+                },
+                "annotations": {"til~de/key": "kept"},
+                "finalizers": ["example.com/cleanup"],
+                "ownerReferences": [{
+                    "apiVersion": "apps/v1",
+                    "kind": "Deployment",
+                    "name": "owner",
+                    "uid": "owner-uid"
+                }],
+                "managedFields": [{"manager": "controller", "operation": "Apply"}]
+            }
+        }));
+        let serialized = serde_json::to_value(&o.metadata).unwrap();
+        for pointer in [
+            "/metadata",
+            "/metadata/name",
+            "/metadata/namespace",
+            "/metadata/uid",
+            "/metadata/resourceVersion",
+            "/metadata/generateName",
+            "/metadata/generation",
+            "/metadata/creationTimestamp",
+            "/metadata/deletionTimestamp",
+            "/metadata/deletionGracePeriodSeconds",
+            "/metadata/labels",
+            "/metadata/labels/app.kubernetes.io~1name",
+            "/metadata/annotations/til~0de~1key",
+            "/metadata/finalizers/0",
+            "/metadata/ownerReferences/0/name",
+            "/metadata/managedFields/0/manager",
+            "/metadata/missing",
+            "/metadata/labels/missing",
+        ] {
+            let rest = pointer.strip_prefix("/metadata").unwrap();
+            let expected = if rest.is_empty() {
+                Some(serialized.clone())
+            } else {
+                serialized.pointer(rest).cloned()
+            };
+            assert_eq!(extract(&o, pointer), expected, "pointer {pointer}");
+        }
     }
 
     #[test]

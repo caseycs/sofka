@@ -74,7 +74,7 @@ impl App {
             let mut scored: Vec<(i64, &String)> = rest
                 .filter_map(|n| self.matcher.fuzzy_match(n, &self.ns_filter).map(|s| (s, n)))
                 .collect();
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+            scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
             out.extend(scored.into_iter().map(|(_, n)| n.clone()));
             return out;
         }
@@ -193,7 +193,7 @@ impl App {
                     .map(|s| (s, h))
             })
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         out.extend(scored.into_iter().map(|(_, h)| h));
         out
     }
@@ -315,7 +315,7 @@ impl App {
                     .map(|s| (s, (h.clone(), v.clone())))
             })
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.0.cmp(&b.1.0)));
+        scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.0.cmp(&b.1.0)));
         scored.into_iter().map(|(_, e)| e).collect()
     }
 
@@ -516,7 +516,7 @@ impl App {
                     .map(|s| (s, c))
             })
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
         scored.into_iter().map(|(_, c)| c.clone()).collect()
     }
 

@@ -4,6 +4,8 @@
 //! hand-written renderer per resource, known kinds get curated columns and
 //! everything else falls back to NAME/AGE pulled from metadata.
 
+use std::cell::OnceCell;
+
 use k8s_openapi::jiff::Timestamp;
 use kube::core::DynamicObject;
 use serde_json::Value;
@@ -18,11 +20,55 @@ struct Column {
     wide: bool,
 }
 
+/// Per-row scratch space shared by every column extractor for that row.
+///
+/// The derived values are lazy and computed at most once per row, because
+/// several columns are backed by the *same* expensive derivation: READY,
+/// STATUS and RESTARTS all come from `pod_summary`, and five Helm columns all
+/// come from `helm::decode` (base64 x2 + gunzip + a full JSON parse). Eagerly
+/// per column, a Helm row cost ~134 us against ~3 us for a pod row; the whole
+/// difference was decoding the same Secret five times and discarding four.
+///
+/// `age` is lazy for the same reason in reverse — most rows are rendered by
+/// column sets that never read it, and it costs a `Timestamp::now()` plus a
+/// formatted `String`.
 struct CellContext<'a> {
     obj: &'a DynamicObject,
     data: &'a Value,
     name: &'a str,
-    age: &'a str,
+    age: OnceCell<String>,
+    pod: OnceCell<(String, String, String)>,
+    helm: OnceCell<Option<crate::helm::Release>>,
+}
+
+impl<'a> CellContext<'a> {
+    fn new(obj: &'a DynamicObject) -> Self {
+        CellContext {
+            obj,
+            data: &obj.data,
+            name: obj.metadata.name.as_deref().unwrap_or_default(),
+            age: OnceCell::new(),
+            pod: OnceCell::new(),
+            helm: OnceCell::new(),
+        }
+    }
+
+    fn age(&self) -> &str {
+        self.age.get_or_init(|| age(self.obj))
+    }
+
+    /// `(READY, STATUS, RESTARTS)` — one walk of `containerStatuses` for all
+    /// three columns.
+    fn pod(&self) -> &(String, String, String) {
+        self.pod.get_or_init(|| pod_summary(self.obj))
+    }
+
+    /// The decoded Helm release backing this row's Secret, decoded once.
+    fn helm(&self) -> Option<&crate::helm::Release> {
+        self.helm
+            .get_or_init(|| crate::helm::decode(self.obj))
+            .as_ref()
+    }
 }
 
 const fn column(header: &'static str, extract: CellFn) -> Column {
@@ -310,14 +356,7 @@ pub fn headers(plural: &str) -> Vec<&'static str> {
 /// index of the column that should be colorized as a status (or None).
 #[cfg(test)]
 pub fn cells(obj: &DynamicObject, plural: &str) -> (Vec<String>, Option<usize>) {
-    let name = obj.metadata.name.clone().unwrap_or_default();
-    let age = age(obj);
-    let ctx = CellContext {
-        obj,
-        data: &obj.data,
-        name: &name,
-        age: &age,
-    };
+    let ctx = CellContext::new(obj);
     let columns = columns_for(plural);
     let values = columns.iter().map(|c| (c.extract)(&ctx)).collect();
     let status_idx = columns.iter().position(|c| c.is_status);
@@ -429,14 +468,7 @@ impl ViewSpec {
     /// Cells for one object, aligned with [`Self::headers`], plus the index
     /// of the status column (if any).
     pub fn cells(&self, obj: &DynamicObject) -> (Vec<String>, Option<usize>) {
-        let name = obj.metadata.name.clone().unwrap_or_default();
-        let age = age(obj);
-        let ctx = CellContext {
-            obj,
-            data: &obj.data,
-            name: &name,
-            age: &age,
-        };
+        let ctx = CellContext::new(obj);
         let values = self
             .columns
             .iter()
@@ -477,14 +509,7 @@ impl ViewSpec {
         Some(match &col.source {
             SpecSource::User(uc) => crate::views::render_cell(obj, uc),
             SpecSource::Curated(extract) => {
-                let name = obj.metadata.name.clone().unwrap_or_default();
-                let age = age(obj);
-                let ctx = CellContext {
-                    obj,
-                    data: &obj.data,
-                    name: &name,
-                    age: &age,
-                };
+                let ctx = CellContext::new(obj);
                 extract(&ctx)
             }
         })
@@ -505,14 +530,7 @@ impl ViewSpec {
         Some(match &col.source {
             SpecSource::User(uc) => crate::views::sort_value(obj, uc),
             SpecSource::Curated(extract) => {
-                let name = obj.metadata.name.clone().unwrap_or_default();
-                let age = age(obj);
-                let ctx = CellContext {
-                    obj,
-                    data: &obj.data,
-                    name: &name,
-                    age: &age,
-                };
+                let ctx = CellContext::new(obj);
                 let v = extract(&ctx);
                 if is_numeric_header(&self.plural, header) {
                     crate::views::SortValue::Num(parse_leading_num(&v))
@@ -594,19 +612,19 @@ fn col_name(ctx: &CellContext<'_>) -> String {
 }
 
 fn col_age(ctx: &CellContext<'_>) -> String {
-    ctx.age.to_string()
+    ctx.age().to_string()
 }
 
 fn col_pod_ready(ctx: &CellContext<'_>) -> String {
-    pod_summary(ctx.obj).0
+    ctx.pod().0.clone()
 }
 
 fn col_pod_status(ctx: &CellContext<'_>) -> String {
-    pod_summary(ctx.obj).1
+    ctx.pod().1.clone()
 }
 
 fn col_pod_restarts(ctx: &CellContext<'_>) -> String {
-    pod_summary(ctx.obj).2
+    ctx.pod().2.clone()
 }
 
 fn col_pod_ip(ctx: &CellContext<'_>) -> String {
@@ -1034,32 +1052,32 @@ fn col_helm_revision(ctx: &CellContext<'_>) -> String {
 }
 
 fn col_helm_status(ctx: &CellContext<'_>) -> String {
-    crate::helm::decode(ctx.obj)
-        .map(|r| r.status)
+    ctx.helm()
+        .map(|r| r.status.clone())
         .unwrap_or_else(|| "<invalid>".into())
 }
 
 fn col_helm_chart(ctx: &CellContext<'_>) -> String {
-    match crate::helm::decode(ctx.obj) {
+    match ctx.helm() {
         Some(r) if !r.chart_name.is_empty() => format!("{}-{}", r.chart_name, r.chart_version),
         _ => "<unknown>".into(),
     }
 }
 
 fn col_helm_app_version(ctx: &CellContext<'_>) -> String {
-    crate::helm::decode(ctx.obj)
-        .map(|r| r.app_version)
+    ctx.helm()
+        .map(|r| r.app_version.clone())
         .unwrap_or_default()
 }
 
 fn col_helm_description(ctx: &CellContext<'_>) -> String {
-    crate::helm::decode(ctx.obj)
-        .map(|r| r.description)
+    ctx.helm()
+        .map(|r| r.description.clone())
         .unwrap_or_default()
 }
 
 fn col_helm_updated(ctx: &CellContext<'_>) -> String {
-    match crate::helm::decode(ctx.obj).and_then(|r| r.last_deployed_secs) {
+    match ctx.helm().and_then(|r| r.last_deployed_secs) {
         Some(secs) => humanize((Timestamp::now().as_second() - secs).max(0)),
         None => "<unknown>".into(),
     }
