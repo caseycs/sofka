@@ -1256,7 +1256,7 @@ async fn o_on_pod_scopes_to_its_host_node() {
     app.handle_key(press(KeyCode::Char('o'))).unwrap();
     assert_eq!(app.kind_plural, "nodes");
     assert_eq!(app.fields.as_deref(), Some("metadata.name=node-1"));
-    assert_eq!(app.scope_label.as_deref(), Some("host of web"));
+    assert_eq!(app.scope_label.as_deref(), Some("node of pod/web"));
 
     app.handle_key(press(KeyCode::Esc)).unwrap();
     assert_eq!(app.kind_plural, "pods");
@@ -1283,7 +1283,10 @@ async fn enter_on_nodeclaim_scopes_to_its_node() {
         app.handle_key(press(key)).unwrap();
         assert_eq!(app.kind_plural, "nodes");
         assert_eq!(app.fields.as_deref(), Some("metadata.name=ip-10-0-1-2"));
-        assert_eq!(app.scope_label.as_deref(), Some("node of default-sfpsl"));
+        assert_eq!(
+            app.scope_label.as_deref(),
+            Some("node of nodeclaim/default-sfpsl")
+        );
         assert_eq!(app.stack.len(), 1);
         assert!(!app.flash_err);
 
@@ -1313,25 +1316,61 @@ async fn unregistered_nodeclaim_warns_instead_of_navigating() {
     assert_eq!(app.kind_plural, "nodeclaims");
     assert!(app.stack.is_empty());
     assert!(app.flash_err);
-    assert!(app.flash.contains("no registered node"), "{}", app.flash);
+    assert!(app.flash.contains("has no node assigned"), "{}", app.flash);
 }
 
 #[tokio::test]
-async fn o_on_an_unrelated_kind_warns() {
+async fn o_on_a_kind_that_names_no_node_warns() {
     let (mut app, _rx) = test_app();
-    app.switch_kind("services");
+    app.switch_kind("secrets");
     apply(
         &mut app,
-        json!({"apiVersion": "v1", "kind": "Service",
-               "metadata": {"name": "api", "namespace": "default"},
-               "spec": {}}),
+        json!({"apiVersion": "v1", "kind": "Secret",
+               "metadata": {"name": "tls", "namespace": "default"}}),
     );
     app.table_state.select(Some(0));
 
     app.handle_key(press(KeyCode::Char('o'))).unwrap();
-    assert_eq!(app.kind_plural, "services");
+    assert_eq!(app.kind_plural, "secrets");
     assert!(app.flash_err);
-    assert!(app.flash.contains("pod or nodeclaim"), "{}", app.flash);
+    assert!(app.flash.contains("names no node"), "{}", app.flash);
+
+    // `enter` still falls through to the detail view.
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Detail);
+    assert_eq!(app.kind_plural, "secrets");
+}
+
+/// A kind the built-in table has never heard of jumps to its node once
+/// `[views."…"].node` says where the name lives.
+#[tokio::test]
+async fn configured_node_pointer_makes_any_kind_jump() {
+    let (mut app, _rx) = test_app();
+    let (views, warnings) = crate::views::compile(&HashMap::from([(
+        "certificates".to_string(),
+        crate::config::ViewConfig {
+            node: Some("/status/assignedNode".to_string()),
+            ..Default::default()
+        },
+    )]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    app.user_views = views;
+
+    app.switch_kind("certificates");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+            "metadata": {"name": "tls", "namespace": "default"},
+            "status": {"assignedNode": "node-7"}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "nodes");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=node-7"));
+    assert_eq!(app.scope_label.as_deref(), Some("node of certificate/tls"));
 }
 
 #[tokio::test]
@@ -5758,8 +5797,7 @@ async fn user_view_wins_over_printer_columns() {
                 align: None,
                 condition_field: None,
             }],
-            sort: None,
-            replace: false,
+            ..Default::default()
         })),
     });
     assert_eq!(app.display_headers(), ["NAME", "MINE", "AGE"]);

@@ -340,38 +340,31 @@ impl App {
         self.pending = Some(Suspend::Shell(argv));
     }
 
-    /// Navigate to the node hosting the selected pod (k9s `o`), or to the node
-    /// a Karpenter `NodeClaim` is bound to. A pod names its node in the spec;
-    /// Karpenter's lifecycle controller writes the same name onto the
-    /// NodeClaim's status once the instance registers with the cluster.
+    /// Navigate to the node the selected row names (k9s `o`). Which field
+    /// holds the name comes from the node-reference table — pods name theirs
+    /// in the spec, a Karpenter NodeClaim in its status, and
+    /// `[views."…"].node` covers anything else — so this stays one jump
+    /// rather than a branch per kind.
     pub(super) fn show_node(&mut self) {
-        let (pointer, scope, unbound) = match self.kind_plural.as_str() {
-            "pods" => ("/spec/nodeName", "host of", "pod has no node assigned"),
-            "nodeclaims" => (
-                "/status/nodeName",
-                "node of",
-                "nodeclaim has no registered node yet",
-            ),
-            _ => {
-                self.flash_warn("'o' shows the node for a pod or nodeclaim");
-                return;
-            }
+        let Some(pointer) = self.node_pointer() else {
+            self.flash_warn("this kind names no node (see views.\"…\".node)");
+            return;
         };
         let Some(obj) = self.selected_ref() else {
             return;
         };
-        let node = obj
-            .data
-            .pointer(pointer)
+        let node = crate::views::extract(obj, &pointer)
+            .as_ref()
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let owner = obj.metadata.name.clone().unwrap_or_default();
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        let target = format!("{}/{name}", trim_s(&self.kind_plural));
         if node.is_empty() {
-            self.flash_warn(unbound);
+            self.flash_warn(&format!("{target} has no node assigned"));
             return;
         }
-        self.goto_node(&node, format!("{scope} {owner}"));
+        self.goto_node(&node, format!("node of {target}"));
     }
 
     /// Jump to the selected object's controller/owner (k9s Shift-J).

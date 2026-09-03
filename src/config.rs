@@ -670,6 +670,9 @@ pub struct ViewConfig {
     pub sort: Option<String>,
     /// Replace the curated columns instead of overlaying them.
     pub replace: bool,
+    /// JSON Pointer to the name of the node this kind's objects name
+    /// (e.g. `/status/nodeName`), making `enter`/`o` jump to that node.
+    pub node: Option<String>,
     pub columns: Vec<ViewColumnConfig>,
 }
 

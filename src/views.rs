@@ -78,6 +78,34 @@ pub struct View {
     pub sort: Option<(String, bool)>,
     /// Replace the curated columns entirely instead of overlaying them.
     pub replace: bool,
+    /// JSON Pointer to the name of the node this kind's objects name — see
+    /// [`node_pointer`].
+    pub node: Option<String>,
+}
+
+/// Kinds whose objects name a node, and the JSON Pointer that holds the name.
+/// A row that names a node can jump to it (`o`, and `enter` where the kind has
+/// no drill-down of its own), so this is one table rather than a branch per
+/// kind: `[views."…"].node` adds a row for anything not listed here.
+const NODE_REFS: &[(&str, &str)] = &[
+    // Karpenter writes the node's name onto a NodeClaim at registration; the
+    // pair is otherwise linked by providerID, which nodes can't be
+    // field-selected by.
+    ("nodeclaims", "/status/nodeName"),
+    ("pods", "/spec/nodeName"),
+];
+
+/// The pointer to a kind's node name: an explicit `[views."…"].node` wins over
+/// the built-in table, resolved by the same key precedence as [`lookup`].
+pub fn node_pointer<'a>(views: &'a HashMap<String, View>, ar: &ApiResource) -> Option<&'a str> {
+    if let Some(pointer) = lookup(views, ar).and_then(|v| v.node.as_deref()) {
+        return Some(pointer);
+    }
+    let plural = ar.plural.to_lowercase();
+    NODE_REFS
+        .iter()
+        .find(|(kind, _)| *kind == plural)
+        .map(|(_, pointer)| *pointer)
 }
 
 /// A comparable cell value for typed sorting, mirrored into the app's private
@@ -170,12 +198,24 @@ pub fn compile(
             .sort
             .as_deref()
             .and_then(|s| parse_sort(key, s, &mut warnings));
+        let node = match cfg.node.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            Some(pointer) if pointer.starts_with('/') => Some(pointer.to_string()),
+            Some(pointer) => {
+                warnings.push(format!(
+                    "views.\"{key}\": node '{pointer}' is not a JSON Pointer \
+                     (must start with '/', e.g. /status/nodeName); ignored"
+                ));
+                None
+            }
+            None => None,
+        };
         views.insert(
             key.to_lowercase(),
             View {
                 columns,
                 sort,
                 replace,
+                node,
             },
         );
     }
@@ -522,6 +562,7 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
             columns,
             sort: None,
             replace: false,
+            node: None,
         })
     }
 }
@@ -818,6 +859,67 @@ mod tests {
             lookup(&views, &ar).unwrap().sort,
             Some(("BY-GVR".into(), false))
         );
+    }
+
+    #[test]
+    fn node_pointer_falls_back_to_the_builtin_table() {
+        let ar = |group: &str, kind: &str, plural: &str| ApiResource {
+            group: group.into(),
+            version: "v1".into(),
+            api_version: if group.is_empty() {
+                "v1".into()
+            } else {
+                format!("{group}/v1")
+            },
+            kind: kind.into(),
+            plural: plural.into(),
+        };
+        let views = HashMap::new();
+        assert_eq!(
+            node_pointer(&views, &ar("", "Pod", "pods")),
+            Some("/spec/nodeName")
+        );
+        assert_eq!(
+            node_pointer(&views, &ar("karpenter.sh", "NodeClaim", "nodeclaims")),
+            Some("/status/nodeName")
+        );
+        // A kind the table doesn't know names no node until config says so.
+        let widgets = ar("example.com", "Widget", "widgets");
+        assert_eq!(node_pointer(&views, &widgets), None);
+
+        let (configured, warnings) = compile_toml(
+            r#"
+            [views."example.com/v1/widgets"]
+            node = "/status/host"
+            "#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(node_pointer(&configured, &widgets), Some("/status/host"));
+    }
+
+    #[test]
+    fn configured_node_overrides_the_table_and_validates() {
+        let pods = ApiResource {
+            group: String::new(),
+            version: "v1".into(),
+            api_version: "v1".into(),
+            kind: "Pod".into(),
+            plural: "pods".into(),
+        };
+        let (views, warnings) = compile_toml(
+            r#"
+            [views.pods]
+            node = "/status/hostName"
+
+            [views.widgets]
+            node = "status.host"
+            "#,
+        );
+        assert_eq!(node_pointer(&views, &pods), Some("/status/hostName"));
+        // A path that isn't a pointer is dropped with a warning, like columns.
+        assert_eq!(views["widgets"].node, None);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("JSON Pointer"), "{}", warnings[0]);
     }
 
     #[test]
