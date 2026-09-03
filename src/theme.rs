@@ -128,6 +128,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "tokyo-night",
     "one-dark",
     "rose-pine",
+    "rose-pine-dawn",
     "monokai",
     "flexoki-dark",
     "flexoki-light",
@@ -217,6 +218,12 @@ pub fn builtin(name: &str) -> Option<Palette> {
             "#31748f", "#31748f", "#9ccfd8", "#9ccfd8", "#9ccfd8", "#c4a7e7", "#e0def4", "#908caa",
             "#6e6a86", "#6e6a86", "#524f67", "#524f67", "#403d52", "#26233a", "#191724", "#191724",
             "#14121d",
+        ],
+        "rose-pine-dawn" | "rosepinedawn" => [
+            "#d7827e", "#d7827e", "#d7827e", "#907aa9", "#b4637a", "#b4637a", "#ea9d34", "#ea9d34",
+            "#286983", "#286983", "#56949f", "#56949f", "#56949f", "#907aa9", "#575279", "#797593",
+            "#9893a5", "#9893a5", "#cecacd", "#cecacd", "#dfdad9", "#f2e9e1", "#faf4ed", "#faf4ed",
+            "#f4ede8",
         ],
         // Flexoki (https://stephango.com/flexoki): dark uses the 400 accents
         // on the black/base-950..800 surface ramp, light the 600 accents on
@@ -527,6 +534,15 @@ mod tests {
     fn mocha_base_matches_golden_swatch() {
         let p = builtin("catppuccin-mocha").unwrap();
         assert_eq!(p.base, Color::Rgb(30, 30, 46));
+    }
+
+    #[test]
+    fn rose_pine_dawn_swatches_match_palette_spec() {
+        let dawn = builtin("rose-pine-dawn").unwrap();
+        assert_eq!(dawn.base, Color::Rgb(0xFA, 0xF4, 0xED));
+        assert_eq!(dawn.text, Color::Rgb(0x57, 0x52, 0x79));
+        assert_eq!(dawn.red, Color::Rgb(0xB4, 0x63, 0x7A));
+        assert_eq!(builtin("rosepinedawn").unwrap().base, dawn.base);
     }
 
     #[test]

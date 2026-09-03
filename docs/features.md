@@ -177,8 +177,8 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
 - **Bookmarks** - saved navigation commands on a chord and in the palette.
 - **Workspaces** - a named set of views for one task, cycled with `Tab`.
 - **Skins** - built-in Catppuccin, Gruvbox, Solarized, Nord, Dracula, Tokyo
-  Night, One Dark, Rosé Pine, Monokai, and Flexoki palettes, auto dark/light
-  detection,
+  Night, One Dark, Rosé Pine, Rosé Pine Dawn, Monokai, and Flexoki palettes,
+  auto dark/light detection,
   and per-swatch hex overrides. Every semantic color (row status, severity
   badges, headers, borders) is derived from the active palette, so one skin
   change lands everywhere at once.
