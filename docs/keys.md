@@ -11,7 +11,7 @@ plugin, bookmark, and workspace chords.
 | `:<resource> <ns>`                            | switch kind and namespace at once (`:deploy social`; `all`/`*` = all namespaces; the namespace tab-completes)                         |
 | `[` / `]`                                     | view history - back / forward through visited kind+namespace views                                                                    |
 | `Tab` / `shift-Tab`                           | cycle views of the active workspace (when one is open)                                                                                |
-| `enter`                                       | drill down (workload/svc → pods, node → its pods, pod → containers, ns → re-scope, CRD → its resources)                               |
+| `enter`                                       | drill down (workload/svc → pods, node → its pods, pod → containers, ns → re-scope, CRD → its resources, kind with a `node` view → its node) |
 | `esc`                                         | go back / pop the view stack / clear filter / clear marks                                                                             |
 | `j`/`k`, `↓`/`↑`, `g`/`G`                     | navigate                                                                                                                              |
 | `S` / `I`                                     | sort-column picker (fuzzy; ⏎ on the active column inverts) / invert sort direction — remembered per kind across views and restarts    |
@@ -20,7 +20,7 @@ plugin, bookmark, and workspace chords.
 | `/`                                           | filter: fuzzy text · `!inverse` · `-l`/`-f` selectors (server-side on ⏎) · `status=X` `cpu>500m` `age<2h`                             |
 | `n` / `0`                                     | namespace switcher / all namespaces                                                                                                   |
 | `shift-j`                                     | jump to owner/controller                                                                                                              |
-| `o`                                           | show the node hosting the selected pod                                                                                                |
+| `o`                                           | show the node the selected row names (pods built in; other kinds via `[views."…"].node`)                                              |
 | `ctrl-r`                                      | refresh the watch                                                                                                                     |
 | `y` / `d` / `E`                               | view YAML / describe (`kubectl`) / live events                                                                                        |
 | `x`                                           | secrets: show `data` base64-decoded (as `stringData`)                                                                                 |

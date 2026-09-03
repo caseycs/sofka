@@ -1262,11 +1262,11 @@ async fn o_on_pod_scopes_to_its_host_node() {
     assert_eq!(app.kind_plural, "pods");
 }
 
-/// The `[views."…"].node` a Karpenter user writes to teach sofka where a
-/// NodeClaim keeps its node name — nothing about the CRD is built in.
-fn nodeclaim_views(pointer: &str) -> HashMap<String, crate::views::View> {
+/// The `[views."<key>"].node` a user writes to teach sofka where a kind keeps
+/// its node name — nothing about the kind itself is built in.
+fn views_with_node(key: &str, pointer: &str) -> HashMap<String, crate::views::View> {
     let (views, warnings) = crate::views::compile(&HashMap::from([(
-        "karpenter.sh/v1/nodeclaims".to_string(),
+        key.to_string(),
         crate::config::ViewConfig {
             node: Some(pointer.to_string()),
             ..Default::default()
@@ -1292,7 +1292,7 @@ async fn enter_on_nodeclaim_scopes_to_its_node() {
         let (mut app, _rx) = test_app();
         app.cluster
             .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
-        app.user_views = nodeclaim_views("/status/nodeName");
+        app.user_views = views_with_node("karpenter.sh/v1/nodeclaims", "/status/nodeName");
         app.switch_kind("nodeclaims");
         apply(&mut app, claim.clone());
         app.table_state.select(Some(0));
@@ -1319,7 +1319,7 @@ async fn unregistered_nodeclaim_warns_instead_of_navigating() {
     let (mut app, _rx) = test_app();
     app.cluster
         .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
-    app.user_views = nodeclaim_views("/status/nodeName");
+    app.user_views = views_with_node("karpenter.sh/v1/nodeclaims", "/status/nodeName");
     app.switch_kind("nodeclaims");
     // Launched but not yet registered: no status.nodeName to jump to.
     apply(
@@ -1364,16 +1364,9 @@ async fn o_on_a_kind_that_names_no_node_warns() {
 #[tokio::test]
 async fn a_node_pointer_that_lands_on_a_non_name_says_so() {
     let (mut app, _rx) = test_app();
-    let (views, _) = crate::views::compile(&HashMap::from([(
-        "certificates".to_string(),
-        crate::config::ViewConfig {
-            // Points at an object, not a name — a config mistake, distinct
-            // from a row whose node isn't assigned yet.
-            node: Some("/status".to_string()),
-            ..Default::default()
-        },
-    )]));
-    app.user_views = views;
+    // Points at an object, not a name — a config mistake, distinct from a
+    // row whose node isn't assigned yet.
+    app.user_views = views_with_node("certificates", "/status");
 
     app.switch_kind("certificates");
     apply(
@@ -1397,15 +1390,7 @@ async fn a_node_pointer_that_lands_on_a_non_name_says_so() {
 #[tokio::test]
 async fn configured_node_pointer_makes_any_kind_jump() {
     let (mut app, _rx) = test_app();
-    let (views, warnings) = crate::views::compile(&HashMap::from([(
-        "certificates".to_string(),
-        crate::config::ViewConfig {
-            node: Some("/status/assignedNode".to_string()),
-            ..Default::default()
-        },
-    )]));
-    assert!(warnings.is_empty(), "{warnings:?}");
-    app.user_views = views;
+    app.user_views = views_with_node("certificates", "/status/assignedNode");
 
     app.switch_kind("certificates");
     apply(

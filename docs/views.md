@@ -47,6 +47,27 @@ the layout. By default columns overlay the curated ones: a matching header
 replaces it in place, new columns go before AGE. Invalid entries are skipped with
 a warning in the app - they never take down the TUI.
 
+### Jumping to a node
+
+A kind whose objects name a node can jump to it: `o` opens the nodes list scoped
+to that node, and so does `enter` for a kind with no drill-down of its own. Pods
+are built in (`/spec/nodeName`). For anything else, `node` says where the name
+lives:
+
+```toml
+[views."karpenter.sh/v1/nodeclaims"]
+node = "/status/nodeName"   # Karpenter writes the node's name onto the claim
+                            # once it registers; before that, `o` warns
+```
+
+`node` is a JSON Pointer, like `path`. A row whose pointer is empty warns instead
+of opening an empty list; one whose pointer lands on something other than a name
+warns that the pointer is wrong.
+
+Unlike `columns` and `sort`, which come from the single most specific view,
+`node` is resolved key by key: a `[views."karpenter.sh/v1/nodeclaims"]` that
+only sets columns doesn't hide a `node` set under `[views.nodeclaims]`.
+
 ### CRD printer columns
 
 A custom resource with no explicit view picks up its CRD
