@@ -40,9 +40,9 @@ impl App {
             // A Flux HelmRelease bridges into the same native inspector:
             // enter opens the history of the Helm release it manages.
             "helmreleases" => self.drill_into_helmrelease(&obj),
-            // Anything that names a node drills into it (a Karpenter
-            // NodeClaim, or whatever `[views."…"].node` points at). Pods name
-            // one too, but they drill into containers above.
+            // Anything that names a node drills into it — whatever
+            // `[views."…"].node` points at. Pods name one too, but they drill
+            // into containers above.
             _ => match self.node_pointer() {
                 Some(pointer) => self.show_node_at(&pointer),
                 None => self.open_detail(),
@@ -232,8 +232,8 @@ impl App {
     /// Scope the nodes list to one node by name — the shared tail of every
     /// jump to a node. The name is what we scope the watch by because
     /// `metadata.name` is the only field selector the apiserver indexes for
-    /// nodes (Karpenter, for one, pairs a NodeClaim with its node by
-    /// `status.providerID` → `spec.providerID`, which isn't selectable).
+    /// nodes — a resource that pairs with its node by some other identifier
+    /// (Karpenter's `status.providerID`, say) can't be selected on that.
     pub(super) fn goto_node(&mut self, node: &str, scope: String) {
         let Some(nodes) = self.cluster.resolve("nodes") else {
             self.flash_warn("nodes kind unavailable");

@@ -85,15 +85,10 @@ pub struct View {
 
 /// Kinds whose objects name a node, and the JSON Pointer that holds the name.
 /// A row that names a node can jump to it (`o`, and `enter` where the kind has
-/// no drill-down of its own), so this is one table rather than a branch per
-/// kind: `[views."…"].node` adds a row for anything not listed here.
-const NODE_REFS: &[(&str, &str)] = &[
-    // Karpenter writes the node's name onto a NodeClaim at registration; the
-    // pair is otherwise linked by providerID, which nodes can't be
-    // field-selected by.
-    ("nodeclaims", "/status/nodeName"),
-    ("pods", "/spec/nodeName"),
-];
+/// no drill-down of its own). Only pods are built in — every other kind,
+/// custom resources included, says where its node name lives via
+/// `[views."…"].node` rather than being enumerated here.
+const NODE_REFS: &[(&str, &str)] = &[("pods", "/spec/nodeName")];
 
 /// The pointer to a kind's node name: an explicit `[views."…"].node` wins over
 /// the built-in table, resolved by the same key precedence as [`lookup`].
@@ -890,22 +885,19 @@ mod tests {
             node_pointer(&views, &ar("", "Pod", "pods")),
             Some("/spec/nodeName")
         );
-        assert_eq!(
-            node_pointer(&views, &ar("karpenter.sh", "NodeClaim", "nodeclaims")),
-            Some("/status/nodeName")
-        );
-        // A kind the table doesn't know names no node until config says so.
-        let widgets = ar("example.com", "Widget", "widgets");
-        assert_eq!(node_pointer(&views, &widgets), None);
+        // Everything else names no node until config says where: a custom
+        // resource is not something to enumerate here.
+        let claims = ar("karpenter.sh", "NodeClaim", "nodeclaims");
+        assert_eq!(node_pointer(&views, &claims), None);
 
         let (configured, warnings) = compile_toml(
             r#"
-            [views."example.com/v1/widgets"]
-            node = "/status/host"
+            [views."karpenter.sh/v1/nodeclaims"]
+            node = "/status/nodeName"
             "#,
         );
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(node_pointer(&configured, &widgets), Some("/status/host"));
+        assert_eq!(node_pointer(&configured, &claims), Some("/status/nodeName"));
     }
 
     #[test]

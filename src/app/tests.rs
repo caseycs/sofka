@@ -1262,6 +1262,20 @@ async fn o_on_pod_scopes_to_its_host_node() {
     assert_eq!(app.kind_plural, "pods");
 }
 
+/// The `[views."…"].node` a Karpenter user writes to teach sofka where a
+/// NodeClaim keeps its node name — nothing about the CRD is built in.
+fn nodeclaim_views(pointer: &str) -> HashMap<String, crate::views::View> {
+    let (views, warnings) = crate::views::compile(&HashMap::from([(
+        "karpenter.sh/v1/nodeclaims".to_string(),
+        crate::config::ViewConfig {
+            node: Some(pointer.to_string()),
+            ..Default::default()
+        },
+    )]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    views
+}
+
 #[tokio::test]
 async fn enter_on_nodeclaim_scopes_to_its_node() {
     // Karpenter writes the node's name onto the claim at registration; the
@@ -1278,6 +1292,7 @@ async fn enter_on_nodeclaim_scopes_to_its_node() {
         let (mut app, _rx) = test_app();
         app.cluster
             .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
+        app.user_views = nodeclaim_views("/status/nodeName");
         app.switch_kind("nodeclaims");
         apply(&mut app, claim.clone());
         app.table_state.select(Some(0));
@@ -1304,6 +1319,7 @@ async fn unregistered_nodeclaim_warns_instead_of_navigating() {
     let (mut app, _rx) = test_app();
     app.cluster
         .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
+    app.user_views = nodeclaim_views("/status/nodeName");
     app.switch_kind("nodeclaims");
     // Launched but not yet registered: no status.nodeName to jump to.
     apply(

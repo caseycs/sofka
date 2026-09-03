@@ -342,9 +342,8 @@ impl App {
 
     /// Navigate to the node the selected row names (k9s `o`). Which field
     /// holds the name comes from the node-reference table — pods name theirs
-    /// in the spec, a Karpenter NodeClaim in its status, and
-    /// `[views."…"].node` covers anything else — so this stays one jump
-    /// rather than a branch per kind.
+    /// in the spec, and `[views."…"].node` says where for any other kind — so
+    /// this stays one jump rather than a branch per kind.
     pub(super) fn show_node(&mut self) {
         let Some(pointer) = self.node_pointer() else {
             self.flash_warn("this kind names no node (see views.\"…\".node)");
