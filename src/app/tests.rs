@@ -30,11 +30,17 @@ fn alt(code: KeyCode) -> KeyEvent {
 async fn mock_pods_api() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    const POD_LIST: &str = concat!(
+    const POD_LIST_INITIAL: &str = concat!(
         r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"7"},"items":["#,
         r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"1"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
         r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"b","namespace":"default","resourceVersion":"2"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
         r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"c","namespace":"default","resourceVersion":"3"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}}"#,
+        r#"]}"#
+    );
+    const POD_LIST_UPDATED: &str = concat!(
+        r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"8"},"items":["#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"c","namespace":"default","resourceVersion":"4"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"d","namespace":"default","resourceVersion":"5"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}}"#,
         r#"]}"#
     );
     const FORBIDDEN: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"pods is forbidden: cannot watch at the cluster scope","reason":"Forbidden","code":403}"#;
@@ -69,12 +75,21 @@ async fn mock_pods_api() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
                     .nth(1)
                     .unwrap_or("")
                     .to_string();
+                let list_number = {
+                    let mut requests = seen.lock().unwrap();
+                    requests.push(path.clone());
+                    requests
+                        .iter()
+                        .filter(|p| !p.contains("watch=true"))
+                        .count()
+                };
                 let (status, body) = if path.contains("watch=true") {
                     ("403 Forbidden", FORBIDDEN)
+                } else if list_number == 1 {
+                    ("200 OK", POD_LIST_INITIAL)
                 } else {
-                    ("200 OK", POD_LIST)
+                    ("200 OK", POD_LIST_UPDATED)
                 };
-                seen.lock().unwrap().push(path);
                 let response = format!(
                     "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
@@ -98,9 +113,10 @@ fn mock_cluster(url: &str) -> Cluster {
     cluster
 }
 
-/// RBAC granting `list` but not `watch`. `watcher` serves the initial list
-/// itself, so the counts still arrive; the risk is the refused watch spinning
-/// the list-watch cycle as fast as the API server can answer it.
+/// RBAC granting `list` but not `watch`. The first list seeds counts, then the
+/// refused watch must switch to periodic lists: kube's watcher retries only
+/// the watch from the same resourceVersion, so it cannot provide that fallback
+/// itself. The mock changes its list response to prove counts remain fresh.
 #[tokio::test]
 async fn node_pods_survives_a_forbidden_watch_without_hammering_the_api() {
     let (url, seen) = mock_pods_api().await;
@@ -109,34 +125,29 @@ async fn node_pods_survives_a_forbidden_watch_without_hammering_the_api() {
 
     app.spawn_node_pods_poll();
 
-    let counts = loop {
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv())
-            .await
-            .expect("no NodePods message before the timeout")
-            .expect("channel closed");
-        if let Msg::NodePods { counts, .. } = msg {
-            break counts;
+    let counts = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let msg = rx.recv().await.expect("channel closed");
+            if let Msg::NodePods { counts, .. } = msg
+                && !counts.contains_key("node-a")
+                && counts.get("node-b") == Some(&2)
+            {
+                break counts;
+            }
         }
-    };
-    assert_eq!(counts.get("node-a"), Some(&2), "counts: {counts:?}");
-    assert_eq!(counts.get("node-b"), Some(&1), "counts: {counts:?}");
+    })
+    .await
+    .expect("periodic-list fallback did not publish refreshed counts");
+    assert_eq!(counts.len(), 1, "counts: {counts:?}");
 
-    // Now let the refused watch keep failing for a while. Unbackoffed, the
-    // cycle re-lists as fast as the server answers.
+    // Now let the fallback hold for a while. It must neither retry the refused
+    // watch nor start polling faster than its 10-second interval.
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    let watch_attempts = seen
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|p| p.contains("watch=true"))
-        .count();
-    // Backoff holds this to a couple of attempts; without it the same second
-    // measured ~9,800 — a hot retry loop against the API server for as long as
-    // the nodes view stays open.
-    assert!(
-        watch_attempts <= 10,
-        "the refused watch must be paced by backoff, saw {watch_attempts} attempts in ~1s"
-    );
+    let requests = seen.lock().unwrap();
+    let watch_attempts = requests.iter().filter(|p| p.contains("watch=true")).count();
+    let list_attempts = requests.len() - watch_attempts;
+    assert_eq!(watch_attempts, 1, "fallback must stop retrying the watch");
+    assert_eq!(list_attempts, 2, "fallback should wait 10s between lists");
 }
 
 /// The row cache's cleanup pass runs at the end of a rebuild; it must both

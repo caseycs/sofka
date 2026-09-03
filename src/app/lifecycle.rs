@@ -1,5 +1,15 @@
 use super::*;
 
+fn node_pods_watch_forbidden(error: &watcher::Error) -> bool {
+    match error {
+        watcher::Error::InitialListFailed(kube::Error::Api(status))
+        | watcher::Error::WatchStartFailed(kube::Error::Api(status))
+        | watcher::Error::WatchFailed(kube::Error::Api(status)) => status.is_forbidden(),
+        watcher::Error::WatchError(status) => status.is_forbidden(),
+        _ => false,
+    }
+}
+
 impl App {
     // ----- navigation ----------------------------------------------------
 
@@ -570,10 +580,9 @@ impl App {
     /// cluster-wide pod re-list every 10s with one watch, kept incrementally
     /// up to date and coalesced to at most one `Msg::NodePods` per second.
     ///
-    /// RBAC granting `list` but not `watch` still works: `watcher` serves the
-    /// initial list itself, so counts publish from that, and a refused watch
-    /// just sends it round again for a fresh list. Backoff is what keeps that
-    /// loop from becoming a hot retry against the API server.
+    /// RBAC granting `list` but not `watch` still works: a refused watch falls
+    /// back to the old 10-second list poll. Other transient watcher failures
+    /// use client-go's backoff while the stream heals itself.
     pub(super) fn spawn_node_pods_poll(&mut self) {
         let Some(pkind) = self.cluster.resolve("pods") else {
             return;
@@ -594,7 +603,7 @@ impl App {
             // server — measured at ~9,800 requests a second against a test
             // server. `DefaultBackoff` is client-go's: 800ms doubling to 30s,
             // jittered, reset after 2 minutes of quiet.
-            let mut stream = watcher(api, cfg).default_backoff().boxed();
+            let mut stream = watcher(api.clone(), cfg).default_backoff().boxed();
             // Node per pod, kept incrementally so per-node counts never need
             // a full rescan of the cluster's pods.
             let mut pod_nodes: HashMap<String, String> = HashMap::new();
@@ -607,6 +616,7 @@ impl App {
             let mut synced = false;
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut poll_fallback = false;
             loop {
                 tokio::select! {
                     maybe_event = stream.next() => {
@@ -659,8 +669,19 @@ impl App {
                                 synced = true;
                                 dirty = true;
                             }
+                            // A list-only RBAC grant cannot maintain counts via
+                            // this watcher: after a refused watch, kube retries
+                            // that watch from the same resourceVersion rather
+                            // than re-listing. Restore the periodic list path in
+                            // that case. This also paces a refused initial list,
+                            // whose preceding `Init` event would otherwise keep
+                            // resetting `DefaultBackoff` to its minimum delay.
+                            Err(error) if node_pods_watch_forbidden(&error) => {
+                                poll_fallback = true;
+                                break;
+                            }
                             // The stream self-heals, and the backoff above
-                            // paces the retries.
+                            // paces other transient failures.
                             Err(_) => {}
                         }
                     }
@@ -683,6 +704,41 @@ impl App {
                         }
                     }
                 }
+            }
+
+            if !poll_fallback {
+                return;
+            }
+
+            let params =
+                ListParams::default().fields("status.phase!=Succeeded,status.phase!=Failed");
+            loop {
+                if flag.load(Ordering::SeqCst) != genr {
+                    break;
+                }
+                if let Ok(list) = api.list(&params).await {
+                    let mut counts: HashMap<String, usize> = HashMap::new();
+                    for item in list {
+                        if let Some(node) = item
+                            .data
+                            .pointer("/spec/nodeName")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            *counts.entry(node.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                    if tx
+                        .send(Msg::NodePods {
+                            generation: genr,
+                            counts,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
             }
         });
         self.tasks.push(handle);
