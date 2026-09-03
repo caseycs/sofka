@@ -436,3 +436,70 @@ impl Store {
         self.items.iter().map(|(k, v)| (k, v.as_ref()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pod(name: &str) -> DynamicObject {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": { "name": name, "namespace": "default" },
+        }))
+        .expect("pod fixture")
+    }
+
+    /// Every mutating path must advance the counter, because the Helm
+    /// latest-revision dedup is cached against it: a path that changed `items`
+    /// without bumping would leave that cache selecting rows for a store it no
+    /// longer describes. `items` is private and hands out no `&mut`, so these
+    /// seven methods are the complete set of ways it can change.
+    #[test]
+    fn every_mutation_advances_the_version() {
+        fn advanced(store: &Store, last: &mut u64, what: &str) {
+            assert!(
+                store.version() > *last,
+                "{what} must advance the store version ({} -> {})",
+                *last,
+                store.version()
+            );
+            *last = store.version();
+        }
+
+        let mut store = Store::default();
+        let mut last = store.version();
+
+        store.apply("default/a".into(), pod("a"));
+        advanced(&store, &mut last, "apply");
+
+        store.remove("default/a");
+        advanced(&store, &mut last, "remove");
+
+        // Conservative: a remove that matched nothing still bumps. Over-
+        // bumping only costs a recompute; under-bumping serves stale rows.
+        store.remove("default/gone");
+        advanced(&store, &mut last, "remove (no such key)");
+
+        let mut seeded = Items::new();
+        seeded.insert(Rc::from("default/b"), Arc::new(pod("b")));
+        store.seed(seeded);
+        advanced(&store, &mut last, "seed");
+
+        // Non-empty store, so this buffers rather than clearing.
+        assert!(!store.begin_reset(), "seeded store buffers the relist");
+        advanced(&store, &mut last, "begin_reset");
+
+        store.apply("default/c".into(), pod("c"));
+        advanced(&store, &mut last, "apply (buffered during relist)");
+
+        assert!(store.finish_sync(), "the buffered set is swapped in");
+        advanced(&store, &mut last, "finish_sync");
+
+        store.take_items();
+        advanced(&store, &mut last, "take_items");
+
+        store.clear();
+        advanced(&store, &mut last, "clear");
+    }
+}
