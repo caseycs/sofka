@@ -59,6 +59,11 @@ const MAX_LOG_LINES_PAUSED: usize = 100_000;
 const LOG_BATCH_LINES: usize = 64;
 const LOG_BATCH_MS: u64 = 50;
 
+/// Initial status-bar hint. Unlike transient action results, this stays visible
+/// until another interaction replaces it.
+const WELCOME_FLASH: &str =
+    "Welcome to sofka — ':' resource · enter drill · d describe · l logs · ? help";
+
 /// Flux CD resource kinds whose spec has a `suspend: bool` field — every kind
 /// with a corresponding `flux suspend/resume` subcommand: kustomize- and
 /// helm-controller reconcilers, source-controller fetchers, image-automation
@@ -1530,8 +1535,7 @@ impl App {
             command: String::new(),
             cmd_suggestions: Vec::new(),
             cmd_sel: 0,
-            flash: "Welcome to sofka — ':' resource · enter drill · d describe · l logs · ? help"
-                .into(),
+            flash: WELCOME_FLASH.into(),
             flash_err: false,
             flash_seen: String::new(),
             flash_since: std::time::Instant::now(),

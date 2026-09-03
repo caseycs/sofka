@@ -2053,17 +2053,21 @@ impl App {
         self.flash_err = true;
     }
 
-    /// Auto-clear the flash 8s after it last changed. Called from the main
-    /// loop's 1s tick; detects a change by diffing against `flash_seen`
-    /// rather than requiring every `self.flash = …` call site to also touch
-    /// a timestamp.
+    /// Auto-clear a successful transient flash 8s after it last changed.
+    /// Errors and the initial welcome hint remain until another interaction
+    /// replaces them. Called from the main loop's 1s tick; detects a change by
+    /// diffing against `flash_seen` rather than requiring every
+    /// `self.flash = …` call site to also touch a timestamp.
     pub fn expire_flash(&mut self) {
         if self.flash != self.flash_seen {
             self.flash_seen = self.flash.clone();
             self.flash_since = std::time::Instant::now();
             return;
         }
-        if !self.flash.is_empty() && self.flash_since.elapsed() >= std::time::Duration::from_secs(8)
+        if !self.flash.is_empty()
+            && !self.flash_err
+            && self.flash != WELCOME_FLASH
+            && self.flash_since.elapsed() >= std::time::Duration::from_secs(8)
         {
             self.flash.clear();
             self.flash_err = false;

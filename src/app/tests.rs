@@ -2006,6 +2006,46 @@ async fn detail_arrival_clears_progress_flash() {
 }
 
 #[tokio::test]
+async fn welcome_flash_does_not_expire() {
+    let (mut app, _rx) = test_app();
+    assert_eq!(app.flash, WELCOME_FLASH);
+
+    app.expire_flash();
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+
+    assert_eq!(app.flash, WELCOME_FLASH);
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn error_flash_does_not_expire() {
+    let (mut app, _rx) = test_app();
+    app.flash = "delete failed: forbidden".into();
+    app.flash_err = true;
+
+    app.expire_flash();
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+
+    assert_eq!(app.flash, "delete failed: forbidden");
+    assert!(app.flash_err);
+}
+
+#[tokio::test]
+async fn successful_transient_flash_expires() {
+    let (mut app, _rx) = test_app();
+    app.flash = "deleted web".into();
+
+    app.expire_flash();
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
 async fn scale_prompt_targets_marked_rows() {
     let (mut app, _rx) = test_app();
     app.switch_kind("deployments");
