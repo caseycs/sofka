@@ -43,8 +43,10 @@ impl App {
             // Anything that names a node drills into it (a Karpenter
             // NodeClaim, or whatever `[views."…"].node` points at). Pods name
             // one too, but they drill into containers above.
-            _ if self.node_pointer().is_some() => self.show_node(),
-            _ => self.open_detail(),
+            _ => match self.node_pointer() {
+                Some(pointer) => self.show_node_at(&pointer),
+                None => self.open_detail(),
+            },
         }
     }
 

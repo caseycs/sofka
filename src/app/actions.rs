@@ -350,20 +350,34 @@ impl App {
             self.flash_warn("this kind names no node (see views.\"…\".node)");
             return;
         };
+        self.show_node_at(&pointer);
+    }
+
+    /// The jump itself, for callers that already resolved the pointer (`enter`
+    /// does, to decide between this and the detail view).
+    pub(super) fn show_node_at(&mut self, pointer: &str) {
         let Some(obj) = self.selected_ref() else {
             return;
         };
-        let node = crate::views::extract(obj, &pointer)
-            .as_ref()
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let name = obj.metadata.name.clone().unwrap_or_default();
-        let target = format!("{}/{name}", trim_s(&self.kind_plural));
-        if node.is_empty() {
-            self.flash_warn(&format!("{target} has no node assigned"));
-            return;
-        }
+        let value = crate::views::extract(obj, pointer);
+        let target = format!(
+            "{}/{}",
+            trim_s(&self.kind_plural),
+            obj.metadata.name.clone().unwrap_or_default()
+        );
+        let node = match value {
+            Some(Value::String(name)) if !name.is_empty() => name,
+            // Landing on something that isn't a name is a bad pointer, not a
+            // row still waiting for a node — say which.
+            Some(_) => {
+                self.flash_warn(&format!("{pointer} on {target} is not a node name"));
+                return;
+            }
+            None => {
+                self.flash_warn(&format!("{target} has no node assigned"));
+                return;
+            }
+        };
         self.goto_node(&node, format!("node of {target}"));
     }
 

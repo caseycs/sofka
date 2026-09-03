@@ -98,7 +98,13 @@ const NODE_REFS: &[(&str, &str)] = &[
 /// The pointer to a kind's node name: an explicit `[views."…"].node` wins over
 /// the built-in table, resolved by the same key precedence as [`lookup`].
 pub fn node_pointer<'a>(views: &'a HashMap<String, View>, ar: &ApiResource) -> Option<&'a str> {
-    if let Some(pointer) = lookup(views, ar).and_then(|v| v.node.as_deref()) {
+    // Resolved key by key, not off whichever view `lookup` picks: a more
+    // specific view that sets only columns mustn't mask a `node` set on a
+    // broader key, which would ignore the setting with no way to see why.
+    if let Some(pointer) = lookup_keys(ar)
+        .into_iter()
+        .find_map(|k| views.get(&k).and_then(|v| v.node.as_deref()))
+    {
         return Some(pointer);
     }
     let plural = ar.plural.to_lowercase();
@@ -246,9 +252,9 @@ fn parse_sort(key: &str, s: &str, warnings: &mut Vec<String>) -> Option<(String,
     Some((col, desc))
 }
 
-/// Find the view for a resource, most specific key first:
+/// The keys a resource's view can be configured under, most specific first:
 /// `apiVersion/plural`, `group/plural`, plural, then lowercased kind.
-pub fn lookup<'a>(views: &'a HashMap<String, View>, ar: &ApiResource) -> Option<&'a View> {
+fn lookup_keys(ar: &ApiResource) -> Vec<String> {
     let plural = ar.plural.to_lowercase();
     let mut keys = vec![format!("{}/{plural}", ar.api_version.to_lowercase())];
     if !ar.group.is_empty() {
@@ -256,7 +262,12 @@ pub fn lookup<'a>(views: &'a HashMap<String, View>, ar: &ApiResource) -> Option<
     }
     keys.push(plural);
     keys.push(ar.kind.to_lowercase());
-    keys.iter().find_map(|k| views.get(k))
+    keys
+}
+
+/// Find the view for a resource, most specific key first.
+pub fn lookup<'a>(views: &'a HashMap<String, View>, ar: &ApiResource) -> Option<&'a View> {
+    lookup_keys(ar).into_iter().find_map(|k| views.get(&k))
 }
 
 /// Resolve a JSON Pointer against the object as served by the API:
@@ -895,6 +906,31 @@ mod tests {
         );
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(node_pointer(&configured, &widgets), Some("/status/host"));
+    }
+
+    #[test]
+    fn a_narrower_view_without_node_does_not_mask_a_broader_one() {
+        let widgets = ApiResource {
+            group: "example.com".into(),
+            version: "v1".into(),
+            api_version: "example.com/v1".into(),
+            kind: "Widget".into(),
+            plural: "widgets".into(),
+        };
+        // The most specific key wins for columns and sort, but it sets no
+        // `node` — the broader key's must still be found.
+        let (views, warnings) = compile_toml(
+            r#"
+            [views."example.com/v1/widgets"]
+            sort = "PHASE"
+
+            [views.widgets]
+            node = "/status/host"
+            "#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(lookup(&views, &widgets).unwrap().node, None);
+        assert_eq!(node_pointer(&views, &widgets), Some("/status/host"));
     }
 
     #[test]

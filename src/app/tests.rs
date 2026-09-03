@@ -1341,6 +1341,37 @@ async fn o_on_a_kind_that_names_no_node_warns() {
     assert_eq!(app.kind_plural, "secrets");
 }
 
+#[tokio::test]
+async fn a_node_pointer_that_lands_on_a_non_name_says_so() {
+    let (mut app, _rx) = test_app();
+    let (views, _) = crate::views::compile(&HashMap::from([(
+        "certificates".to_string(),
+        crate::config::ViewConfig {
+            // Points at an object, not a name — a config mistake, distinct
+            // from a row whose node isn't assigned yet.
+            node: Some("/status".to_string()),
+            ..Default::default()
+        },
+    )]));
+    app.user_views = views;
+
+    app.switch_kind("certificates");
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "cert-manager.io/v1", "kind": "Certificate",
+            "metadata": {"name": "tls", "namespace": "default"},
+            "status": {"assignedNode": "node-7"}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "certificates");
+    assert!(app.flash_err);
+    assert!(app.flash.contains("is not a node name"), "{}", app.flash);
+}
+
 /// A kind the built-in table has never heard of jumps to its node once
 /// `[views."…"].node` says where the name lives.
 #[tokio::test]
