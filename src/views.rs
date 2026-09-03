@@ -81,6 +81,52 @@ pub struct View {
     /// JSON Pointer to the name of the node this kind's objects name — see
     /// [`node_pointer`].
     pub node: Option<String>,
+    /// Where `enter` drills to — see [`drill_for`].
+    pub drill: Option<Drill>,
+}
+
+/// A configured drill-down: `enter` on a row opens `kind`, scoped by the
+/// label selector `labels` yields for that row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Drill {
+    /// Target kind as the user named it (alias, plural, or kind); resolved
+    /// against the cluster when the drill happens.
+    pub kind: String,
+    /// Label selector template with `{name}` / `{namespace}` placeholders.
+    pub labels: Option<String>,
+}
+
+impl Drill {
+    /// The label selector for one row: placeholders filled from its metadata.
+    pub fn labels_for(&self, obj: &DynamicObject) -> Option<String> {
+        let template = self.labels.as_deref()?;
+        let name = obj.metadata.name.as_deref().unwrap_or_default();
+        let namespace = obj.metadata.namespace.as_deref().unwrap_or_default();
+        Some(
+            template
+                .replace("{name}", name)
+                .replace("{namespace}", namespace),
+        )
+    }
+}
+
+/// The placeholders a drill's `labels` template may use.
+const DRILL_PLACEHOLDERS: &[&str] = &["name", "namespace"];
+
+/// The `{…}` tokens in a template that aren't in [`DRILL_PLACEHOLDERS`].
+fn unknown_placeholders(template: &str) -> Vec<String> {
+    let mut unknown = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else { break };
+        let token = &after[..end];
+        if !DRILL_PLACEHOLDERS.contains(&token) {
+            unknown.push(token.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    unknown
 }
 
 /// Kinds whose objects name a node, and the JSON Pointer that holds the name.
@@ -90,16 +136,31 @@ pub struct View {
 /// `[views."…"].node` rather than being enumerated here.
 const NODE_REFS: &[(&str, &str)] = &[("pods", "/spec/nodeName")];
 
-/// The pointer to a kind's node name: an explicit `[views."…"].node` wins over
-/// the built-in table, resolved by the same key precedence as [`lookup`].
-pub fn node_pointer<'a>(views: &'a HashMap<String, View>, ar: &ApiResource) -> Option<&'a str> {
-    // Resolved key by key, not off whichever view `lookup` picks: a more
-    // specific view that sets only columns mustn't mask a `node` set on a
-    // broader key, which would ignore the setting with no way to see why.
-    if let Some(pointer) = lookup_keys(ar)
+/// A per-kind setting, resolved key by key in [`lookup`]'s precedence rather
+/// than off whichever single view `lookup` picks: a more specific view that
+/// sets only columns mustn't mask a setting on a broader key, which would
+/// ignore it with no way to see why.
+fn setting<'a, T: ?Sized>(
+    views: &'a HashMap<String, View>,
+    ar: &ApiResource,
+    pick: impl Fn(&'a View) -> Option<&'a T>,
+) -> Option<&'a T> {
+    lookup_keys(ar)
         .into_iter()
-        .find_map(|k| views.get(&k).and_then(|v| v.node.as_deref()))
-    {
+        .find_map(|k| views.get(&k).and_then(&pick))
+}
+
+/// Where `enter` drills for a kind, per `[views."…"].drill`. Kinds with a
+/// built-in drill-down (workloads to pods, CRDs to their resources, …) never
+/// consult this.
+pub fn drill_for<'a>(views: &'a HashMap<String, View>, ar: &ApiResource) -> Option<&'a Drill> {
+    setting(views, ar, |v| v.drill.as_ref())
+}
+
+/// The pointer to a kind's node name: an explicit `[views."…"].node` wins over
+/// the built-in table.
+pub fn node_pointer<'a>(views: &'a HashMap<String, View>, ar: &ApiResource) -> Option<&'a str> {
+    if let Some(pointer) = setting(views, ar, |v| v.node.as_deref()) {
         return Some(pointer);
     }
     let plural = ar.plural.to_lowercase();
@@ -210,6 +271,27 @@ pub fn compile(
             }
             None => None,
         };
+        let drill = cfg.drill.as_ref().and_then(|d| {
+            let kind = d.kind.trim();
+            if kind.is_empty() {
+                warnings.push(format!("views.\"{key}\": drill.kind is empty; ignored"));
+                return None;
+            }
+            let labels = d.labels.as_deref().map(str::trim).filter(|l| !l.is_empty());
+            let unknown = labels.map(unknown_placeholders).unwrap_or_default();
+            if !unknown.is_empty() {
+                warnings.push(format!(
+                    "views.\"{key}\": drill.labels has unknown placeholder(s) {} \
+                     (only {{name}} and {{namespace}}); ignored",
+                    unknown.join(", ")
+                ));
+                return None;
+            }
+            Some(Drill {
+                kind: kind.to_string(),
+                labels: labels.map(str::to_string),
+            })
+        });
         views.insert(
             key.to_lowercase(),
             View {
@@ -217,6 +299,7 @@ pub fn compile(
                 sort,
                 replace,
                 node,
+                drill,
             },
         );
     }
@@ -569,6 +652,7 @@ pub fn printer_columns_view(crd: &Value, version: &str) -> Option<View> {
             sort: None,
             replace: false,
             node: None,
+            drill: None,
         })
     }
 }
@@ -948,6 +1032,68 @@ mod tests {
         assert_eq!(views["widgets"].node, None);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("JSON Pointer"), "{}", warnings[0]);
+    }
+
+    #[test]
+    fn drill_compiles_and_fills_placeholders_from_the_row() {
+        let pools = ApiResource {
+            group: "karpenter.sh".into(),
+            version: "v1".into(),
+            api_version: "karpenter.sh/v1".into(),
+            kind: "NodePool".into(),
+            plural: "nodepools".into(),
+        };
+        let (views, warnings) = compile_toml(
+            r#"
+            [views."karpenter.sh/v1/nodepools"]
+            sort = "NAME"
+
+            [views.nodepools]
+            drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
+            "#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Found on the broader key even though the narrower one matches first.
+        let drill = drill_for(&views, &pools).expect("drill configured");
+        assert_eq!(drill.kind, "nodeclaims");
+        let pool = obj(json!({"metadata": {"name": "default"}}));
+        assert_eq!(
+            drill.labels_for(&pool).as_deref(),
+            Some("karpenter.sh/nodepool=default")
+        );
+        // A target that needs no selector is allowed.
+        let (views, warnings) = compile_toml(
+            r#"
+            [views.nodepools]
+            drill = { kind = "nodeclaims" }
+            "#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(drill_for(&views, &pools).unwrap().labels_for(&pool), None);
+    }
+
+    #[test]
+    fn drill_validates_kind_and_placeholders() {
+        let (views, warnings) = compile_toml(
+            r#"
+            [views.widgets]
+            drill = { kind = " ", labels = "app={name}" }
+
+            [views.gadgets]
+            drill = { kind = "pods", labels = "owner={uid}" }
+            "#,
+        );
+        assert_eq!(views["widgets"].drill, None);
+        assert_eq!(views["gadgets"].drill, None);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("drill.kind is empty")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("placeholder(s) uid")),
+            "{warnings:?}"
+        );
     }
 
     #[test]

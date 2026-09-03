@@ -673,7 +673,27 @@ pub struct ViewConfig {
     /// JSON Pointer to the name of the node this kind's objects name
     /// (e.g. `/status/nodeName`), making `enter`/`o` jump to that node.
     pub node: Option<String>,
+    /// Where `enter` drills to: another kind, listed under a label selector
+    /// built from the selected row. See [`DrillConfig`].
+    pub drill: Option<DrillConfig>,
     pub columns: Vec<ViewColumnConfig>,
+}
+
+/// The `drill` of a [`ViewConfig`]: `enter` on a row of this kind opens
+/// `kind`, filtered by `labels` with `{name}` and `{namespace}` filled in
+/// from the row.
+///
+/// ```toml
+/// [views."karpenter.sh/v1/nodepools"]
+/// drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
+/// ```
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default)]
+pub struct DrillConfig {
+    /// Target kind (alias, plural, or kind), resolved against the cluster.
+    pub kind: String,
+    /// Label selector template; `{name}` and `{namespace}` come from the row.
+    pub labels: Option<String>,
 }
 
 /// One column of a [`ViewConfig`]. Everything is optional at parse time so a

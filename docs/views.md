@@ -64,9 +64,27 @@ node = "/status/nodeName"   # Karpenter writes the node's name onto the claim
 of opening an empty list; one whose pointer lands on something other than a name
 warns that the pointer is wrong.
 
+### Drilling into another kind
+
+`enter` on a workload opens its pods. A view's `drill` gives any kind without a
+built-in drill-down the same move: open another kind, scoped by a label
+selector filled in from the selected row. `{name}` and `{namespace}` are the
+placeholders.
+
+```toml
+[views."karpenter.sh/v1/nodepools"]
+drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
+```
+
+`kind` is anything `:` accepts (alias, plural, or kind) and is resolved when
+you press `enter`; an unknown kind warns and stays put. A namespaced target
+opens in the row's namespace, a cluster-scoped one ignores it. `esc` comes back,
+like every drill. When a view sets both `drill` and `node`, `enter` drills and
+`o` still jumps to the node.
+
 Unlike `columns` and `sort`, which come from the single most specific view,
-`node` is resolved key by key: a `[views."karpenter.sh/v1/nodeclaims"]` that
-only sets columns doesn't hide a `node` set under `[views.nodeclaims]`.
+`node` and `drill` are resolved key by key: a `[views."karpenter.sh/v1/nodeclaims"]`
+that only sets columns doesn't hide a `node` set under `[views.nodeclaims]`.
 
 ### CRD printer columns
 
