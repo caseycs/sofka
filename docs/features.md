@@ -21,7 +21,9 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   [Views and thresholds](views.md).
 - **Drill-down navigation** with a breadcrumb stack: workload/service → pods,
   node → its pods, pod → containers, namespace → re-scope, CRD → its custom
-  resources. `esc` goes back.
+  resources, Karpenter NodeClaim → the node it's bound to (`shift-j` walks back
+  the other way, through the owner reference Karpenter puts on the node).
+  `esc` goes back.
 - **Command palette** (`:`) - fuzzy search over the full resource catalog, your
   saved bookmarks and workspaces, and the built-in commands (`ctx`, `helm`,
   `pulse`, `xray`, `explain`, `timeline`, `gitops`, `can-i`, `journal`, `debug`,

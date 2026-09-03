@@ -1242,6 +1242,99 @@ async fn drill_into_workload_then_esc_restores() {
 }
 
 #[tokio::test]
+async fn o_on_pod_scopes_to_its_host_node() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "web", "namespace": "default"},
+               "spec": {"nodeName": "node-1"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Char('o'))).unwrap();
+    assert_eq!(app.kind_plural, "nodes");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=node-1"));
+    assert_eq!(app.scope_label.as_deref(), Some("host of web"));
+
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.kind_plural, "pods");
+}
+
+#[tokio::test]
+async fn enter_on_nodeclaim_scopes_to_its_node() {
+    // Karpenter writes the node's name onto the claim at registration; the
+    // pair is otherwise linked by providerID, which nodes can't be field-
+    // selected by.
+    let claim = json!({
+        "apiVersion": "karpenter.sh/v1", "kind": "NodeClaim",
+        "metadata": {"name": "default-sfpsl"},
+        "status": {"nodeName": "ip-10-0-1-2", "providerID": "aws:///us-west-2b/i-0123"}
+    });
+
+    // `enter` and `o` are the same jump, and esc unwinds either.
+    for key in [KeyCode::Enter, KeyCode::Char('o')] {
+        let (mut app, _rx) = test_app();
+        app.switch_kind("nodeclaims");
+        apply(&mut app, claim.clone());
+        app.table_state.select(Some(0));
+
+        app.handle_key(press(key)).unwrap();
+        assert_eq!(app.kind_plural, "nodes");
+        assert_eq!(app.fields.as_deref(), Some("metadata.name=ip-10-0-1-2"));
+        assert_eq!(app.scope_label.as_deref(), Some("node of default-sfpsl"));
+        assert_eq!(app.stack.len(), 1);
+        assert!(!app.flash_err);
+
+        app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert_eq!(app.kind_plural, "nodeclaims");
+        assert_eq!(app.fields, None);
+        assert!(app.stack.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn unregistered_nodeclaim_warns_instead_of_navigating() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("nodeclaims");
+    // Launched but not yet registered: no status.nodeName to jump to.
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "karpenter.sh/v1", "kind": "NodeClaim",
+            "metadata": {"name": "default-pending"},
+            "status": {"providerID": "aws:///us-west-2b/i-0123"}
+        }),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "nodeclaims");
+    assert!(app.stack.is_empty());
+    assert!(app.flash_err);
+    assert!(app.flash.contains("no registered node"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn o_on_an_unrelated_kind_warns() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("services");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Service",
+               "metadata": {"name": "api", "namespace": "default"},
+               "spec": {}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Char('o'))).unwrap();
+    assert_eq!(app.kind_plural, "services");
+    assert!(app.flash_err);
+    assert!(app.flash.contains("pod or nodeclaim"), "{}", app.flash);
+}
+
+#[tokio::test]
 async fn root_switch_clears_drill_stack() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");

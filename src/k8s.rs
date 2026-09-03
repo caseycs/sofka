@@ -624,6 +624,12 @@ impl Cluster {
                 true,
             ),
         );
+        // A cluster-scoped CR that navigates to another kind (Karpenter's
+        // NodeClaim -> its node).
+        registry.insert(
+            "nodeclaims".to_string(),
+            mk("karpenter.sh", "NodeClaim", "nodeclaims", false),
+        );
         // A CR without curated columns, for custom-view tests.
         registry.insert(
             "certificates".to_string(),

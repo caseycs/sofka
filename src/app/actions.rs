@@ -340,36 +340,38 @@ impl App {
         self.pending = Some(Suspend::Shell(argv));
     }
 
-    /// Navigate to the node hosting the selected pod (k9s `o`).
+    /// Navigate to the node hosting the selected pod (k9s `o`), or to the node
+    /// a Karpenter `NodeClaim` is bound to. A pod names its node in the spec;
+    /// Karpenter's lifecycle controller writes the same name onto the
+    /// NodeClaim's status once the instance registers with the cluster.
     pub(super) fn show_node(&mut self) {
-        if self.kind_plural != "pods" {
-            self.flash_warn("'o' shows the node for a pod");
-            return;
-        }
+        let (pointer, scope, unbound) = match self.kind_plural.as_str() {
+            "pods" => ("/spec/nodeName", "host of", "pod has no node assigned"),
+            "nodeclaims" => (
+                "/status/nodeName",
+                "node of",
+                "nodeclaim has no registered node yet",
+            ),
+            _ => {
+                self.flash_warn("'o' shows the node for a pod or nodeclaim");
+                return;
+            }
+        };
         let Some(obj) = self.selected_ref() else {
             return;
         };
-        let Some(node) = obj.data.pointer("/spec/nodeName").and_then(Value::as_str) else {
-            self.flash_warn("pod has no node assigned");
+        let node = obj
+            .data
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let owner = obj.metadata.name.clone().unwrap_or_default();
+        if node.is_empty() {
+            self.flash_warn(unbound);
             return;
-        };
-        let node = node.to_string();
-        let pod_name = obj.metadata.name.clone().unwrap_or_default();
-        let Some(nodes) = self.cluster.resolve("nodes") else {
-            self.flash_warn("nodes kind unavailable");
-            return;
-        };
-        self.push_frame();
-        self.kind = Some(nodes);
-        self.kind_plural = "nodes".into();
-        self.namespace = String::new();
-        self.labels = None;
-        self.fields = Some(format!("metadata.name={node}"));
-        self.scope_label = Some(format!("host of {pod_name}"));
-        self.filter.clear();
-        self.reset_sort();
-        self.table_state.select(Some(0));
-        self.start_watch();
+        }
+        self.goto_node(&node, format!("{scope} {owner}"));
     }
 
     /// Jump to the selected object's controller/owner (k9s Shift-J).

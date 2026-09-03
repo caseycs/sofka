@@ -32,6 +32,8 @@ impl App {
                 None => self.flash_warn("service has no selector"),
             },
             "pods" => self.open_containers(&obj),
+            // Karpenter: a NodeClaim's node is the natural child of the claim.
+            "nodeclaims" => self.show_node(),
             // enter on a CRD lists its custom resources, not its YAML.
             "customresourcedefinitions" => self.drill_into_crd(&obj),
             // Helm: release -> every revision, revision -> its values.
@@ -214,6 +216,29 @@ impl App {
         self.table_state.select(Some(0));
         self.flash = "↳ drilled into pods".into();
         self.flash_err = false;
+        self.start_watch();
+    }
+
+    /// Scope the nodes list to one node by name — the shared tail of `o` on a
+    /// pod and `enter`/`o` on a Karpenter NodeClaim. Karpenter itself pairs a
+    /// NodeClaim with its node by `status.providerID` → `spec.providerID`, but
+    /// `metadata.name` is the only field selector the apiserver indexes for
+    /// nodes, so the name is what we scope the watch by.
+    pub(super) fn goto_node(&mut self, node: &str, scope: String) {
+        let Some(nodes) = self.cluster.resolve("nodes") else {
+            self.flash_warn("nodes kind unavailable");
+            return;
+        };
+        self.push_frame();
+        self.kind = Some(nodes);
+        self.kind_plural = "nodes".into();
+        self.namespace = String::new();
+        self.labels = None;
+        self.fields = Some(format!("metadata.name={node}"));
+        self.scope_label = Some(scope);
+        self.filter.clear();
+        self.reset_sort();
+        self.table_state.select(Some(0));
         self.start_watch();
     }
 
