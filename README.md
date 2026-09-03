@@ -45,7 +45,8 @@ architecture. The short version:
 - **Guardrails and read-only mode** - "never delete in prod" is enforced, not
   remembered.
 - **Skins** - Catppuccin, Gruvbox, Solarized, Nord, Dracula, Tokyo Night, One
-  Dark, Rosé Pine, Monokai, Flexoki, with auto dark/light detection.
+  Dark, Rosé Pine, Rosé Pine Dawn, Monokai, Flexoki, with auto dark/light
+  detection.
 
 The [full feature list](docs/features.md) is long. So is the
 [comparison with k9s](docs/vs-k9s.md), including why it's faster.
