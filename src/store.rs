@@ -214,6 +214,13 @@ pub enum Msg {
         generation: u64,
         error: String,
     },
+    /// A background action (delete, restart, scale, drain, helm op, …)
+    /// finished; replaces its "…ing" progress flash with a result.
+    Flash {
+        generation: u64,
+        message: String,
+        ok: bool,
+    },
     /// A panic in a background task, reported by the process panic hook.
     /// Deliberately generation-free: it must surface no matter which view is
     /// current.

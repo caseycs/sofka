@@ -1202,6 +1202,11 @@ pub struct App {
     pub cmd_sel: usize,
     pub flash: String,
     pub flash_err: bool,
+    /// Last flash text observed by [`App::expire_flash`], so a change can be
+    /// detected (and re-timestamped) without touching every call site that
+    /// sets `flash` directly.
+    pub(super) flash_seen: String,
+    pub(super) flash_since: std::time::Instant,
 
     pub detail: Scrollable,
     /// Search query for the help view (`?`), which has no backing
@@ -1528,6 +1533,8 @@ impl App {
             flash: "Welcome to sofka — ':' resource · enter drill · d describe · l logs · ? help"
                 .into(),
             flash_err: false,
+            flash_seen: String::new(),
+            flash_since: std::time::Instant::now(),
             detail: Scrollable::empty(),
             help_filter: String::new(),
             doc_filter_return: Mode::Detail,

@@ -82,6 +82,7 @@ impl App {
         kind: Kind,
         targets: Vec<(String, String)>,
         patch: Patch<Value>,
+        ok_message: String,
         error_message: F,
     ) where
         F: Fn(&str, kube::Error) -> String + Send + 'static,
@@ -90,6 +91,7 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
+            let mut errors = 0u32;
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
                     Api::namespaced_with(client.clone(), &ns, &kind.ar)
@@ -97,6 +99,7 @@ impl App {
                     Api::all_with(client.clone(), &kind.ar)
                 };
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
+                    errors += 1;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -104,6 +107,15 @@ impl App {
                         })
                         .await;
                 }
+            }
+            if errors == 0 {
+                let _ = tx
+                    .send(Msg::Flash {
+                        generation: genr,
+                        message: ok_message,
+                        ok: true,
+                    })
+                    .await;
             }
         });
     }
@@ -128,6 +140,11 @@ impl App {
             format!("deleting {} {}…", targets.len(), self.kind_plural)
         };
         self.flash_err = false;
+        let done_label = if targets.len() == 1 {
+            format!("deleted {}", targets[0].0)
+        } else {
+            format!("deleted {} {}", targets.len(), self.kind_plural)
+        };
         tokio::spawn(async move {
             let mut dp = DeleteParams {
                 propagation_policy: Some(cascade.policy()),
@@ -136,6 +153,7 @@ impl App {
             if force {
                 dp = dp.grace_period(0);
             }
+            let mut errors = 0u32;
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
                     Api::namespaced_with(client.clone(), &ns, &kind.ar)
@@ -143,6 +161,7 @@ impl App {
                     Api::all_with(client.clone(), &kind.ar)
                 };
                 if let Err(e) = api.delete(&name, &dp).await {
+                    errors += 1;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -150,6 +169,15 @@ impl App {
                         })
                         .await;
                 }
+            }
+            if errors == 0 {
+                let _ = tx
+                    .send(Msg::Flash {
+                        generation: genr,
+                        message: done_label,
+                        ok: true,
+                    })
+                    .await;
             }
         });
     }
@@ -188,6 +216,17 @@ impl App {
             format!("{verb} {} nodes…", targets.len())
         };
         self.flash_err = false;
+        let verb_done = if unschedulable {
+            "cordoned"
+        } else {
+            "uncordoned"
+        };
+        let targets_len = targets.len();
+        let ok_message = if targets_len == 1 {
+            format!("{verb_done} {}", targets[0])
+        } else {
+            format!("{verb_done} {targets_len} nodes")
+        };
         let targets = targets
             .into_iter()
             .map(|name| (name, String::new()))
@@ -196,6 +235,7 @@ impl App {
             kind,
             targets,
             Patch::Merge(node_unschedulable_patch(unschedulable)),
+            ok_message,
             move |name, e| format!("{verb} {name} failed: {e}"),
         );
     }
@@ -248,15 +288,22 @@ impl App {
             format!("draining {} nodes…", targets.len())
         };
         self.flash_err = false;
+        let done_label = if targets.len() == 1 {
+            format!("drained {}", targets[0])
+        } else {
+            format!("drained {} nodes", targets.len())
+        };
         tokio::spawn(async move {
             let nodes: Api<DynamicObject> = Api::all_with(client.clone(), &kind.ar);
             let node_patch = Patch::Merge(node_unschedulable_patch(true));
             let pods: Api<Pod> = Api::all(client.clone());
+            let mut errors = 0u32;
             for node in targets {
                 if let Err(e) = nodes
                     .patch(&node, &PatchParams::default(), &node_patch)
                     .await
                 {
+                    errors += 1;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -272,6 +319,7 @@ impl App {
                 let pod_list = match listed {
                     Ok(list) => list,
                     Err(e) => {
+                        errors += 1;
                         let _ = tx
                             .send(Msg::Error {
                                 generation: genr,
@@ -298,6 +346,7 @@ impl App {
                             if let Err(delete_err) =
                                 pod_api.delete(name, &DeleteParams::default()).await
                             {
+                                errors += 1;
                                 let _ = tx
                                     .send(Msg::Error {
                                         generation: genr,
@@ -309,6 +358,7 @@ impl App {
                             }
                         }
                         Err(e) => {
+                            errors += 1;
                             let _ = tx
                                 .send(Msg::Error {
                                     generation: genr,
@@ -318,6 +368,15 @@ impl App {
                         }
                     }
                 }
+            }
+            if errors == 0 {
+                let _ = tx
+                    .send(Msg::Flash {
+                        generation: genr,
+                        message: done_label,
+                        ok: true,
+                    })
+                    .await;
             }
         });
     }
@@ -591,10 +650,12 @@ impl App {
         self.note_action("restart", format!("{name} in {ns}"));
         self.flash = format!("restarting {name}…");
         self.flash_err = false;
+        let ok_message = format!("restarted {name}");
         self.spawn_patch_action(
             kind,
             vec![(name, ns)],
             Patch::Strategic(restart_patch(&now)),
+            ok_message,
             |_, e| format!("restart failed: {e}"),
         );
     }
@@ -704,10 +765,12 @@ impl App {
         );
         self.flash = format!("setting image: {container} → {image}");
         self.flash_err = false;
+        let ok_message = format!("image set: {container} → {image}");
         self.spawn_patch_action(
             kind,
             vec![(name, ns)],
             Patch::Strategic(set_image_patch(&plural, &container, &image)),
+            ok_message,
             |_, e| format!("set image failed: {e}"),
         );
     }
@@ -1486,10 +1549,16 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
+        let ok_message = if let [(name, _)] = targets.as_slice() {
+            format!("scaled {name} → {replicas}")
+        } else {
+            format!("scaled {} {} → {replicas}", targets.len(), self.kind_plural)
+        };
         self.spawn_patch_action(
             kind,
             targets,
             Patch::Merge(scale_patch(replicas)),
+            ok_message,
             |name, e| format!("scale {name} failed: {e}"),
         );
     }
@@ -1777,6 +1846,7 @@ impl App {
         let label = self.action_label(&targets);
         self.note_action(if suspend { "suspend" } else { "resume" }, label);
         let verb = if suspend { "suspending" } else { "resuming" };
+        let verb_done = if suspend { "suspended" } else { "resumed" };
         self.flash = if targets.len() == 1 {
             format!("{verb} {}…", targets[0].0)
         } else {
@@ -1784,10 +1854,16 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
+        let ok_message = if targets.len() == 1 {
+            format!("{verb_done} {}", targets[0].0)
+        } else {
+            format!("{verb_done} {} {}", targets.len(), self.kind_plural)
+        };
         self.spawn_patch_action(
             kind,
             targets,
             Patch::Merge(suspend_patch(suspend)),
+            ok_message,
             move |name, e| format!("{verb} {name} failed: {e}"),
         );
     }
@@ -1809,10 +1885,16 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
+        let ok_message = if targets.len() == 1 {
+            format!("reconciled {}", targets[0].0)
+        } else {
+            format!("reconciled {} {}", targets.len(), self.kind_plural)
+        };
         self.spawn_patch_action(
             kind,
             targets,
             Patch::Merge(reconcile_patch(&now)),
+            ok_message,
             |name, e| format!("reconcile {name} failed: {e}"),
         );
     }
@@ -1853,6 +1935,11 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
+        let done_label = if jobs.len() == 1 {
+            format!("triggered {}", jobs[0].0)
+        } else {
+            format!("triggered {} {}", jobs.len(), self.kind_plural)
+        };
         let job_ar = ApiResource {
             group: "batch".into(),
             version: "v1".into(),
@@ -1864,11 +1951,13 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
+            let mut errors = 0u32;
             for (name, ns, job) in jobs {
                 let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &job_ar);
                 let job: DynamicObject = match serde_json::from_value(job) {
                     Ok(j) => j,
                     Err(e) => {
+                        errors += 1;
                         let _ = tx
                             .send(Msg::Error {
                                 generation: genr,
@@ -1879,6 +1968,7 @@ impl App {
                     }
                 };
                 if let Err(e) = api.create(&PostParams::default(), &job).await {
+                    errors += 1;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -1886,6 +1976,15 @@ impl App {
                         })
                         .await;
                 }
+            }
+            if errors == 0 {
+                let _ = tx
+                    .send(Msg::Flash {
+                        generation: genr,
+                        message: done_label,
+                        ok: true,
+                    })
+                    .await;
             }
         });
     }
@@ -1926,10 +2025,16 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
+        let ok_message = if targets.len() == 1 {
+            format!("refreshed {}", targets[0].0)
+        } else {
+            format!("refreshed {} {}", targets.len(), self.kind_plural)
+        };
         self.spawn_patch_action(
             kind,
             targets,
             Patch::Merge(external_secret_refresh_patch(&now)),
+            ok_message,
             |name, e| format!("refresh {name} failed: {e}"),
         );
     }
@@ -1946,6 +2051,24 @@ impl App {
     pub(super) fn flash_warn(&mut self, msg: &str) {
         self.flash = msg.to_string();
         self.flash_err = true;
+    }
+
+    /// Auto-clear the flash 8s after it last changed. Called from the main
+    /// loop's 1s tick; detects a change by diffing against `flash_seen`
+    /// rather than requiring every `self.flash = …` call site to also touch
+    /// a timestamp.
+    pub fn expire_flash(&mut self) {
+        if self.flash != self.flash_seen {
+            self.flash_seen = self.flash.clone();
+            self.flash_since = std::time::Instant::now();
+            return;
+        }
+        if !self.flash.is_empty() && self.flash_since.elapsed() >= std::time::Duration::from_secs(8)
+        {
+            self.flash.clear();
+            self.flash_err = false;
+            self.flash_seen.clear();
+        }
     }
 
     /// Base argv for a `kubectl` shell-out, pinned to the active context so it
@@ -2025,13 +2148,24 @@ impl App {
         // No manual re-watch on success: the live `secrets` watch backing the
         // helm/helmhistory view picks up the new revision Secret on its own.
         tokio::spawn(async move {
-            if let Err(e) = run_helm(&argv).await {
-                let _ = tx
-                    .send(Msg::Error {
-                        generation: genr,
-                        error: format!("helm rollback {name} failed: {e}"),
-                    })
-                    .await;
+            match run_helm(&argv).await {
+                Ok(_) => {
+                    let _ = tx
+                        .send(Msg::Flash {
+                            generation: genr,
+                            message: format!("rolled back {name} to revision {revision}"),
+                            ok: true,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Msg::Error {
+                            generation: genr,
+                            error: format!("helm rollback {name} failed: {e}"),
+                        })
+                        .await;
+                }
             }
         });
     }
@@ -2073,14 +2207,21 @@ impl App {
             format!("uninstalling {} Helm releases…", targets.len())
         };
         self.flash_err = false;
+        let done_label = if targets.len() == 1 {
+            format!("uninstalled {}", targets[0].0)
+        } else {
+            format!("uninstalled {} Helm releases", targets.len())
+        };
         let helm_base = self.helm_base();
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
+            let mut errors = 0u32;
             for (name, ns) in targets {
                 let mut argv = helm_base.clone();
                 argv.extend(["uninstall".to_string(), name.clone(), "-n".to_string(), ns]);
                 if let Err(e) = run_helm(&argv).await {
+                    errors += 1;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -2088,6 +2229,15 @@ impl App {
                         })
                         .await;
                 }
+            }
+            if errors == 0 {
+                let _ = tx
+                    .send(Msg::Flash {
+                        generation: genr,
+                        message: done_label,
+                        ok: true,
+                    })
+                    .await;
             }
         });
     }

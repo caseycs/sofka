@@ -838,6 +838,14 @@ impl App {
                 self.flash = format!("error: {error}");
                 self.flash_err = true;
             }
+            Msg::Flash {
+                generation,
+                message,
+                ok,
+            } if generation == self.generation => {
+                self.flash = message;
+                self.flash_err = !ok;
+            }
             Msg::Panic(error) => {
                 self.last_error = Some(error.clone());
                 self.flash = format!("internal error: {error}");
@@ -1003,6 +1011,8 @@ impl App {
                 self.gitops_state
                     .select((!self.gitops_items.is_empty()).then_some(first));
                 self.mode = Mode::Gitops;
+                self.flash.clear();
+                self.flash_err = false;
             }
             Msg::PluginOutput {
                 generation,
