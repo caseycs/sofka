@@ -6,6 +6,7 @@
 
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -30,7 +31,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 use crate::k8s::{Cluster, Kind};
-use crate::store::{Msg, Pulse, Store, XrayItem, row_key};
+use crate::store::{Msg, Pulse, RowKey, Store, StoreMutation, XrayItem, row_key};
 
 pub(crate) use guardrails::ConfirmLevel;
 
@@ -947,14 +948,14 @@ impl LogsView {
 #[derive(Clone)]
 enum SortKey {
     Num(f64),
-    Text(String),
+    Text(Rc<str>),
 }
 
 impl From<crate::views::SortValue> for SortKey {
     fn from(v: crate::views::SortValue) -> Self {
         match v {
             crate::views::SortValue::Num(n) => SortKey::Num(n),
-            crate::views::SortValue::Text(t) => SortKey::Text(t),
+            crate::views::SortValue::Text(t) => SortKey::Text(t.into()),
         }
     }
 }
@@ -1019,11 +1020,11 @@ struct FilterCache {
 #[derive(Default)]
 struct RowsCache {
     dirty: bool,
-    keys: Vec<String>,
-    cells: HashMap<String, CellCacheEntry>,
+    keys: Vec<RowKey>,
+    cells: HashMap<RowKey, CellCacheEntry>,
     /// Computed primary sort keys, valid per (sort header, resourceVersion) —
     /// a rebuild touches every object, but only changed rows re-extract.
-    sort_keys: HashMap<String, SortKeyEntry>,
+    sort_keys: HashMap<RowKey, SortKeyEntry>,
 }
 
 struct CellCacheEntry {

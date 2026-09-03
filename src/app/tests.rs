@@ -6915,6 +6915,93 @@ async fn relist_over_cached_rows_swaps_atomically_on_sync() {
 }
 
 #[tokio::test]
+async fn unchanged_row_order_reuses_shared_keys_on_content_updates() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let pod_state = |rv: &str, phase: &str| {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {
+                "name": "a", "namespace": "default", "resourceVersion": rv
+            },
+            "status": {"phase": phase}
+        })
+    };
+    apply(&mut app, pod_state("1", "Pending"));
+    let rows = app.rows();
+    app.ensure_table_cell_cache(&rows);
+    drop(rows);
+
+    let store_key = app.store.key("default/a").unwrap();
+    let cache = app.rows_cache.borrow();
+    assert!(std::rc::Rc::ptr_eq(store_key, &cache.keys[0]));
+    assert!(std::rc::Rc::ptr_eq(
+        store_key,
+        cache.cells.get_key_value("default/a").unwrap().0
+    ));
+    assert!(!cache.dirty);
+    drop(cache);
+
+    apply(&mut app, pod_state("2", "Running"));
+    let cache = app.rows_cache.borrow();
+    assert!(
+        !cache.dirty,
+        "an unsorted, unfiltered update keeps row order"
+    );
+    assert!(!cache.cells.contains_key("default/a"));
+    drop(cache);
+    assert_eq!(
+        app.rows()[0].data.pointer("/status/phase"),
+        Some(&json!("Running"))
+    );
+}
+
+#[tokio::test]
+async fn updates_still_rebuild_when_filter_membership_can_change() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let pod_state = |rv: &str, phase: &str| {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {
+                "name": "a", "namespace": "default", "resourceVersion": rv
+            },
+            "status": {"phase": phase}
+        })
+    };
+    apply(&mut app, pod_state("1", "Running"));
+    app.filter = "Running".into();
+    app.invalidate_rows();
+    assert_eq!(app.row_count(), 1);
+
+    apply(&mut app, pod_state("2", "Pending"));
+    assert!(app.rows_cache.borrow().dirty);
+    assert_eq!(app.row_count(), 0);
+}
+
+#[tokio::test]
+async fn buffered_relist_updates_do_not_invalidate_visible_rows_until_swap() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    sync_view(&mut app, &["a"]);
+    assert_eq!(app.row_count(), 1);
+    assert!(!app.rows_cache.borrow().dirty);
+
+    app.handle_msg(Msg::Reset {
+        generation: app.generation,
+    });
+    apply(&mut app, pod("b"));
+    assert!(!app.rows_cache.borrow().dirty);
+    assert_eq!(app.rows()[0].metadata.name.as_deref(), Some("a"));
+
+    app.handle_msg(Msg::Synced {
+        generation: app.generation,
+    });
+    assert!(app.rows_cache.borrow().dirty);
+    assert_eq!(app.rows()[0].metadata.name.as_deref(), Some("b"));
+}
+
+#[tokio::test]
 async fn first_visit_still_streams_rows_progressively() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
@@ -7374,7 +7461,7 @@ async fn filtering_matches_a_naive_fuzzy_pass() {
                 cells.iter().any(|c| matcher.fuzzy_match(c, pat).is_some())
             };
             if hit {
-                want.push(k.clone());
+                want.push(k.to_string());
             }
         }
         want.sort();

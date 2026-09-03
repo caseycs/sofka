@@ -1,6 +1,7 @@
 //! In-memory store of the currently-watched resource set.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use kube::core::DynamicObject;
@@ -284,7 +285,18 @@ pub fn row_key(obj: &DynamicObject) -> String {
 /// deep-copying a whole `serde_json::Value` per object — the single largest
 /// contributor to RSS and to per-event cost. Nothing mutates an object once
 /// stored (`apply` replaces wholesale), so sharing is safe.
-pub type Items = HashMap<String, Arc<DynamicObject>>;
+pub type RowKey = Rc<str>;
+pub type Items = HashMap<RowKey, Arc<DynamicObject>>;
+
+/// How a store operation affected the rows currently visible to the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreMutation {
+    Buffered,
+    Inserted,
+    Updated,
+    Removed,
+    Unchanged,
+}
 
 #[derive(Default)]
 pub struct Store {
@@ -349,19 +361,32 @@ impl Store {
         }
     }
 
-    pub fn apply(&mut self, key: String, obj: DynamicObject) {
+    pub fn apply(&mut self, key: String, obj: DynamicObject) -> StoreMutation {
+        let key: RowKey = key.into();
         let obj = Arc::new(obj);
         match &mut self.pending {
-            Some(pending) => pending.insert(key, obj),
-            None => self.items.insert(key, obj),
-        };
+            Some(pending) => {
+                pending.insert(key, obj);
+                StoreMutation::Buffered
+            }
+            None => match self.items.insert(key, obj) {
+                Some(_) => StoreMutation::Updated,
+                None => StoreMutation::Inserted,
+            },
+        }
     }
 
-    pub fn remove(&mut self, key: &str) {
+    pub fn remove(&mut self, key: &str) -> StoreMutation {
         match &mut self.pending {
-            Some(pending) => pending.remove(key),
-            None => self.items.remove(key),
-        };
+            Some(pending) => {
+                pending.remove(key);
+                StoreMutation::Buffered
+            }
+            None => match self.items.remove(key) {
+                Some(_) => StoreMutation::Removed,
+                None => StoreMutation::Unchanged,
+            },
+        }
     }
 
     /// The newest known version of `key`: the in-flight buffered one during a
@@ -387,7 +412,11 @@ impl Store {
         self.items.get(key).map(AsRef::as_ref)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &DynamicObject)> {
+    pub fn key(&self, key: &str) -> Option<&RowKey> {
+        self.items.get_key_value(key).map(|(key, _)| key)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&RowKey, &DynamicObject)> {
         self.items.iter().map(|(k, v)| (k, v.as_ref()))
     }
 }

@@ -653,13 +653,18 @@ impl App {
                     self.prev_revisions
                         .insert(&self.kind_plural, &key, Arc::clone(prev));
                 }
-                self.store.apply(key.clone(), *obj);
-                self.invalidate_row(&key);
+                match self.store.apply(key.clone(), *obj) {
+                    StoreMutation::Inserted => self.invalidate_row(&key),
+                    StoreMutation::Updated => self.invalidate_row_contents(&key),
+                    StoreMutation::Buffered | StoreMutation::Removed | StoreMutation::Unchanged => {
+                    }
+                }
             }
             Msg::Deleted { generation, key } if generation == self.generation => {
                 self.timeline.observe_delete(&self.kind_plural, &key);
-                self.store.remove(&key);
-                self.invalidate_row(&key);
+                if self.store.remove(&key) == StoreMutation::Removed {
+                    self.invalidate_row(&key);
+                }
             }
             Msg::Synced { generation } if generation == self.generation => {
                 if self.store.finish_sync() {

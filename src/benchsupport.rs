@@ -192,7 +192,7 @@ pub fn pods_app(n: usize) -> (App, Receiver<Msg>) {
 pub fn items(n: usize) -> crate::store::Items {
     (0..n)
         .map(pod)
-        .map(|o| (row_key(&o), std::sync::Arc::new(o)))
+        .map(|o| (row_key(&o).into(), std::sync::Arc::new(o)))
         .collect()
 }
 

@@ -5,9 +5,10 @@
 //! Each group isolates one optimized hot path so changes can be evaluated
 //! independently:
 //!
-//! - `rows_cache`  -> 2.1 (full-store rebuild per watch event)
+//! - `rows_cache`  -> 2.1 (watch event followed by the redraw query)
 //! - `filter`      -> 3.1 (uncached cell extraction per keystroke)
 //! - `cells`       -> 2.2 (`pod_summary` 3x, `helm::decode` 5x)
+//! - `metadata`    -> 3.3 (typed field lookup vs whole-meta serialization)
 //! - `log_filter`  -> 4.1 (O(n*m) substring scan)
 //! - `log_wrap`    -> 2.3 / 4.2 (full-buffer re-measure per frame)
 
@@ -19,8 +20,9 @@ use sofka::columns;
 use sofka::logfilter::LogMatcher;
 
 /// 2.1 — one watch event followed by the redraw's row-count query. That pair
-/// is the real steady-state unit: `invalidate_row` marks the whole ordering
-/// dirty, so the next frame rebuilds and re-sorts the entire store.
+/// is the real steady-state unit: after 2.1 an ordinary unsorted/unfiltered
+/// update keeps the existing key order, while paths that can change ordering
+/// or membership are covered by the filter benchmarks below.
 fn rows_cache(c: &mut Criterion) {
     let mut g = c.benchmark_group("rows_cache");
     for n in [500usize, 2_000] {
@@ -91,6 +93,33 @@ fn cells(c: &mut Criterion) {
         });
     });
 
+    g.finish();
+}
+
+/// 3.3 — a common user-column path through labels. Keep the former
+/// serialize-all implementation alongside the production fast path as an
+/// explicit baseline; both return the same owned `Value`.
+fn metadata(c: &mut Criterion) {
+    let mut g = c.benchmark_group("metadata");
+    let pods: Vec<_> = (0..2_000).map(bs::pod).collect();
+    let pointer = "/metadata/labels/app.kubernetes.io~1name";
+    let rest = pointer.strip_prefix("/metadata").unwrap();
+
+    g.bench_function("typed_labels_2000", |b| {
+        b.iter(|| {
+            for pod in &pods {
+                black_box(sofka::views::extract(pod, pointer));
+            }
+        });
+    });
+    g.bench_function("serialized_baseline_2000", |b| {
+        b.iter(|| {
+            for pod in &pods {
+                let meta = serde_json::to_value(&pod.metadata).unwrap();
+                black_box(meta.pointer(rest).cloned());
+            }
+        });
+    });
     g.finish();
 }
 
@@ -183,6 +212,7 @@ criterion_group!(
     rows_cache,
     filter,
     cells,
+    metadata,
     log_filter,
     log_wrap,
     log_viewport

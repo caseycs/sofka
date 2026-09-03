@@ -21,6 +21,18 @@ impl App {
         cache.sort_keys.remove(key);
     }
 
+    /// Drop derived data for an updated row. Its position and membership are
+    /// unchanged when neither filtering nor sorting is active, so keep the
+    /// already-built key order in that common watch-event path.
+    pub(super) fn invalidate_row_contents(&self, key: &str) {
+        let mut cache = self.rows_cache.borrow_mut();
+        cache.cells.remove(key);
+        cache.sort_keys.remove(key);
+        if !self.filter.is_empty() || self.sort_column.is_some() || self.kind_plural == "helm" {
+            cache.dirty = true;
+        }
+    }
+
     /// The parsed form of the active filter, reparsed only when the string
     /// has changed (never per frame — see [`FilterCache`]).
     pub(super) fn parsed_filter(&self) -> Ref<'_, crate::filter::ParsedFilter> {
@@ -43,9 +55,9 @@ impl App {
     fn matches_filter_cached(
         &self,
         o: &DynamicObject,
-        key: &str,
+        key: &RowKey,
         parsed: &crate::filter::ParsedFilter,
-        cells: &mut HashMap<String, CellCacheEntry>,
+        cells: &mut HashMap<RowKey, CellCacheEntry>,
     ) -> bool {
         if self.filter.is_empty() {
             return true;
@@ -56,9 +68,9 @@ impl App {
     fn eval_filter(
         &self,
         o: &DynamicObject,
-        key: &str,
+        key: &RowKey,
         parsed: &crate::filter::ParsedFilter,
-        cells: &mut HashMap<String, CellCacheEntry>,
+        cells: &mut HashMap<RowKey, CellCacheEntry>,
     ) -> bool {
         use crate::filter::{ParsedFilter, Term};
         match parsed {
@@ -88,8 +100,8 @@ impl App {
         &self,
         o: &DynamicObject,
         pat: &str,
-        key: &str,
-        cells: &mut HashMap<String, CellCacheEntry>,
+        key: &RowKey,
+        cells: &mut HashMap<RowKey, CellCacheEntry>,
     ) -> bool {
         let pat_mask = subseq_mask(pat);
         {
@@ -118,9 +130,9 @@ impl App {
     /// The cached cells for `key`, rendering them if absent or stale.
     fn cell_entry<'c>(
         &self,
-        key: &str,
+        key: &RowKey,
         o: &DynamicObject,
-        cells: &'c mut HashMap<String, CellCacheEntry>,
+        cells: &'c mut HashMap<RowKey, CellCacheEntry>,
     ) -> &'c CellCacheEntry {
         let resource_version = o.metadata.resource_version.clone();
         let stale = cells
@@ -131,7 +143,7 @@ impl App {
             let cell_masks: Vec<u64> = rendered.iter().map(|c| subseq_mask(c)).collect();
             let row_mask = cell_masks.iter().fold(0u64, |a, m| a | m);
             cells.insert(
-                key.to_string(),
+                key.clone(),
                 CellCacheEntry {
                     plural: self.kind_plural.clone(),
                     resource_version,
@@ -266,7 +278,8 @@ impl App {
         } = &mut *cache;
 
         // (primary sort key, (ns, name) tiebreak, store key)
-        let mut entries: Vec<(SortKey, (&str, &str), &String)> =
+        let empty_sort: Rc<str> = Rc::from("");
+        let mut entries: Vec<(SortKey, (&str, &str), &RowKey)> =
             Vec::with_capacity(self.store.len());
         for (k, o) in self.store.iter() {
             if let Some(keep) = &helm_latest
@@ -283,7 +296,7 @@ impl App {
             // theirs instead of re-extracting (and, for helm, re-gunzipping)
             // their cells.
             let primary = match sort_header {
-                None => SortKey::Text(String::new()),
+                None => SortKey::Text(empty_sort.clone()),
                 Some(h) if volatile_sort => self.column_sort_key(o, h),
                 Some(h) => {
                     let rv = o.metadata.resource_version.as_deref();
@@ -331,8 +344,8 @@ impl App {
     /// Store keys of the highest-revision secret per (namespace, release) —
     /// label-based (no gunzip/decode needed), used to dedup the aggregated
     /// Helm release list down to one row per release, like `helm list`.
-    fn helm_latest_revision_keys(&self) -> HashSet<String> {
-        let mut latest: HashMap<(String, String), (i64, String)> = HashMap::new();
+    fn helm_latest_revision_keys(&self) -> HashSet<RowKey> {
+        let mut latest: HashMap<(String, String), (i64, RowKey)> = HashMap::new();
         for (k, o) in self.store.iter() {
             let Some(name) = crate::helm::release_name(o) else {
                 continue;
@@ -364,7 +377,7 @@ impl App {
             .borrow()
             .keys
             .iter()
-            .filter_map(|k| self.store.get(k))
+            .filter_map(|k| self.store.get(k.as_ref()))
             .collect()
     }
 
@@ -379,7 +392,7 @@ impl App {
             .iter()
             .skip(offset)
             .take(n)
-            .filter_map(|k| self.store.get(k))
+            .filter_map(|k| self.store.get(k.as_ref()))
             .collect()
     }
 
@@ -390,6 +403,11 @@ impl App {
             // filtering is already warm for the renderer (and vice versa) and
             // there is one place that decides what "stale" means.
             let key = row_key(obj);
+            let key = self
+                .store
+                .key(&key)
+                .cloned()
+                .unwrap_or_else(|| Rc::from(key));
             self.cell_entry(&key, obj, &mut cache.cells);
         }
     }
@@ -585,7 +603,8 @@ impl App {
                     .namespace
                     .clone()
                     .unwrap_or_default()
-                    .to_lowercase(),
+                    .to_lowercase()
+                    .into(),
             ),
             // Unknown timestamps sort last (oldest-unknown) in ascending order.
             "AGE" => SortKey::Num(crate::columns::age_secs(o).unwrap_or(i64::MAX) as f64),
@@ -636,7 +655,7 @@ impl App {
             }
             _ => match self.spec.sort_value(o, header) {
                 Some(v) => SortKey::from(v),
-                None => SortKey::Text(String::new()),
+                None => SortKey::Text(Rc::from("")),
             },
         }
     }
@@ -716,7 +735,7 @@ impl App {
         let idx = self.table_state.selected()?;
         self.ensure_rows_cache();
         let cache = self.rows_cache.borrow();
-        self.store.get(cache.keys.get(idx)?)
+        self.store.get(cache.keys.get(idx)?.as_ref())
     }
 
     pub fn selected(&self) -> Option<DynamicObject> {
