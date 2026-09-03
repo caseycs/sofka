@@ -51,11 +51,13 @@ a warning in the app - they never take down the TUI.
 
 A custom resource with no explicit view picks up its CRD
 `additionalPrinterColumns` automatically (columns with `priority > 0` become
-wide-only). The canonical condition lookup
+wide-only). A condition lookup
 (`.status.conditions[?(@.type=="Ready")].status` - how most CRDs express their
-READY column) becomes a `condition` column. Other JSONPath filter or wildcard
-expressions aren't representable and those columns are skipped. So most custom
-resources get useful columns with zero configuration.
+READY column) becomes a `condition` column, found by type name. The same filter
+selecting another field (`.reason`, `.message`, `.lastTransitionTime`, …) keeps
+the column and reads that field from the named condition. Other JSONPath filter
+or wildcard expressions aren't representable and those columns are skipped. So
+most custom resources get useful columns with zero configuration.
 
 ## Thresholds
 
