@@ -19,7 +19,7 @@ fn current_claim(app: &App) -> crate::store::StatusClaim {
     app.status_claim
         .as_ref()
         .expect("no operation has claimed the status bar")
-        .0
+        .claim
 }
 
 fn press(code: KeyCode) -> KeyEvent {
@@ -1057,6 +1057,55 @@ async fn pulse_and_xray_warns_surface_as_flash() {
     });
     assert!(app.flash_err);
     assert!(app.flash.contains("incomplete"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn recurring_dashboard_poll_can_warn_after_an_initial_success() {
+    let (mut app, _rx) = test_app();
+    let claim = app.claim_status("pulse — cluster health…");
+
+    app.handle_msg(Msg::PulseData {
+        generation: app.generation,
+        claim,
+        data: crate::store::Pulse::default(),
+    });
+    assert!(app.flash.is_empty(), "{}", app.flash);
+
+    app.handle_msg(Msg::PulseData {
+        generation: app.generation,
+        claim,
+        data: crate::store::Pulse {
+            warn: Some("listing pods: 403".into()),
+            ..Default::default()
+        },
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("pulse is incomplete"), "{}", app.flash);
+
+    // The next complete poll clears the warning while retaining the recurring
+    // claim for future polls.
+    app.handle_msg(Msg::PulseData {
+        generation: app.generation,
+        claim,
+        data: crate::store::Pulse::default(),
+    });
+    assert!(app.flash.is_empty(), "{}", app.flash);
+
+    let claim = app.claim_status("xray: pods…");
+    app.handle_msg(Msg::XrayData {
+        generation: app.generation,
+        claim,
+        items: Vec::new(),
+        warn: None,
+    });
+    app.handle_msg(Msg::XrayData {
+        generation: app.generation,
+        claim,
+        items: Vec::new(),
+        warn: Some("listing replicasets: 403".into()),
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("xray is incomplete"), "{}", app.flash);
 }
 
 #[tokio::test]
@@ -2407,7 +2456,7 @@ async fn every_async_result_is_scoped_to_its_own_operation() {
     assert_eq!(app.flash, "deleting 3 pods…");
 
     app.handle_msg(Msg::LogsSaved {
-        generation: app.log_gen,
+        generation: app.generation,
         claim: find,
         result: Ok(std::path::PathBuf::from("/tmp/sofka.log")),
     });
@@ -2465,6 +2514,53 @@ async fn an_unclaimed_status_update_invalidates_the_current_claim() {
         err: false,
     });
     assert_eq!(app.flash, "namespace: prod");
+}
+
+#[tokio::test]
+async fn background_status_borrows_the_bar_without_orphaning_an_action() {
+    let (mut app, _rx) = test_app();
+
+    let claim = app.claim_status("deleting api…");
+    app.handle_msg(Msg::Error {
+        generation: app.generation,
+        error: "watch disconnected".into(),
+    });
+    assert!(app.flash.contains("watch disconnected"), "{}", app.flash);
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "deleted api".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "deleted api");
+
+    let claim = app.claim_status("scaling web → 3…");
+    app.handle_msg(Msg::Panic("worker panic".into()));
+    assert!(app.flash.contains("worker panic"), "{}", app.flash);
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "scaled web → 3".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "scaled web → 3");
+
+    let claim = app.claim_status("draining node-1…");
+    app.handle_msg(Msg::Notify("pod/web: Ready True → False".into()));
+    assert!(app.flash.starts_with('🔔'), "{}", app.flash);
+
+    // A transient notification may expire before the action. The pending
+    // owner still retains its claim against the now-empty bar.
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "drain requested: node-1".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "drain requested: node-1");
 }
 
 #[tokio::test]
@@ -3386,27 +3482,32 @@ async fn log_filter_supports_regex_inverse_and_clear() {
 }
 
 #[tokio::test]
-async fn stale_log_save_result_is_dropped() {
+async fn log_save_result_survives_leaving_logs() {
     let (mut app, _rx) = test_app();
-    let stale = app.log_gen;
-    app.log_gen += 1;
-
     let claim = app.claim_status("saving logs…");
+    // Leaving Logs invalidates its stream but not the independent file write.
+    app.log_gen += 1;
+    app.handle_msg(Msg::LogsSaved {
+        generation: app.generation,
+        claim,
+        result: Ok(std::env::temp_dir().join("sofka-test.log")),
+    });
+    assert!(app.flash.contains("sofka-test.log"));
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn stale_log_save_result_is_dropped_after_a_view_generation_change() {
+    let (mut app, _rx) = test_app();
+    let stale = app.generation;
+    let claim = app.claim_status("saving logs…");
+    app.bump_generation();
     app.handle_msg(Msg::LogsSaved {
         generation: stale,
         claim,
         result: Err("old write failed".into()),
     });
     assert!(!app.flash.contains("old write failed"));
-
-    let claim = app.claim_status("saving logs…");
-    app.handle_msg(Msg::LogsSaved {
-        generation: app.log_gen,
-        claim,
-        result: Ok(std::env::temp_dir().join("sofka-test.log")),
-    });
-    assert!(app.flash.contains("sofka-test.log"));
-    assert!(!app.flash_err);
 }
 
 #[tokio::test]

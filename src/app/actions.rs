@@ -508,7 +508,10 @@ impl App {
             return;
         }
         let claim = self.claim_status("saving logs…");
-        let genr = self.log_gen;
+        // Saving is a one-shot file operation, not part of the live log
+        // stream. Leaving Logs bumps `log_gen`, but must not drop this result
+        // and strand its progress flash.
+        let genr = self.generation;
         let tx = self.tx.clone();
         let ts = k8s_openapi::jiff::Timestamp::now().as_second();
         let safe: String = self
@@ -2128,8 +2131,18 @@ impl App {
         let claim = StatusClaim(self.next_status_claim);
         let message = msg.into();
         self.set_flash(message.clone());
-        self.status_claim = Some((claim, message));
+        self.status_claim = Some(ActiveStatusClaim {
+            claim,
+            text: message,
+            pending: true,
+        });
         claim
+    }
+
+    fn owns_status(&self, claim: StatusClaim) -> bool {
+        self.status_claim
+            .as_ref()
+            .is_some_and(|owner| owner.claim == claim && self.flash == owner.text)
     }
 
     /// Replace the status owned by `claim`. A newer operation or any direct
@@ -2142,10 +2155,7 @@ impl App {
         err: bool,
     ) {
         let message = msg.into();
-        let owns = self
-            .status_claim
-            .as_ref()
-            .is_some_and(|(owner, text)| *owner == claim && self.flash == *text);
+        let owns = self.owns_status(claim);
         if err {
             // A failure is never silently dropped. Even when the bar has no
             // room for it, `:debug` can still answer "did anything break?".
@@ -2154,7 +2164,11 @@ impl App {
         if owns {
             self.set_flash(message.clone());
             self.flash_err = err;
-            self.status_claim = Some((claim, message));
+            self.status_claim = Some(ActiveStatusClaim {
+                claim,
+                text: message,
+                pending: false,
+            });
             return;
         }
         // A stale success is dropped — the operation the user started later
@@ -2163,23 +2177,56 @@ impl App {
         // misses; it never displaces the owner's finished result. Ownership
         // does not change hands, so the owner still reports when it lands.
         if err && self.flash.ends_with('…') {
-            let owner = self.status_claim.as_ref().map(|(owner, _)| *owner);
+            let owner = self.status_claim.take();
             self.set_flash(message.clone());
             self.flash_err = true;
             // `set_flash` drops the claim; hand it straight back against the
             // borrowed text so the owner still reports when it finishes.
-            self.status_claim = owner.map(|owner| (owner, message));
+            self.status_claim = owner.map(|mut owner| {
+                owner.text = message;
+                owner
+            });
         }
+    }
+
+    /// Temporarily show a process/watch-level message without stealing an
+    /// asynchronous operation's ownership. Its result can still replace the
+    /// borrowed text when it arrives.
+    pub(super) fn borrow_status(&mut self, msg: impl Into<String>, err: bool) {
+        let mut owner = self.status_claim.take();
+        let message = msg.into();
+        self.set_flash(message.clone());
+        self.flash_err = err;
+        if let Some(owner) = &mut owner {
+            owner.text = message;
+        }
+        self.status_claim = owner;
+    }
+
+    /// Update a recurring poll's status while retaining its claim for the next
+    /// result. A successful poll clears an earlier warning but leaves an empty,
+    /// pending claim so a later incomplete poll can surface its warning.
+    pub(super) fn set_recurring_status(&mut self, claim: StatusClaim, warn: Option<String>) {
+        if !self.owns_status(claim) {
+            return;
+        }
+        let (message, err) = match warn {
+            Some(message) => (message, true),
+            None => (String::new(), false),
+        };
+        self.set_flash(message.clone());
+        self.flash_err = err;
+        self.status_claim = Some(ActiveStatusClaim {
+            claim,
+            text: message,
+            pending: true,
+        });
     }
 
     /// Clear a completed operation's progress only while it still owns the
     /// bar. Its document/result may still be applied after ownership moves.
     pub(super) fn clear_claimed_status(&mut self, claim: StatusClaim) {
-        if self
-            .status_claim
-            .as_ref()
-            .is_some_and(|(owner, text)| *owner == claim && self.flash == *text)
-        {
+        if self.owns_status(claim) {
             self.flash.clear();
             self.flash_err = false;
             self.flash_seen.clear();
@@ -2226,9 +2273,19 @@ impl App {
             && !self.flash.ends_with('…')
             && self.flash_since.elapsed() >= FLASH_TTL
         {
+            let pending = self
+                .status_claim
+                .as_ref()
+                .is_some_and(|owner| owner.pending && self.flash == owner.text);
             self.flash.clear();
             self.flash_seen.clear();
-            self.status_claim = None;
+            if pending {
+                if let Some(owner) = &mut self.status_claim {
+                    owner.text.clear();
+                }
+            } else {
+                self.status_claim = None;
+            }
         }
     }
 

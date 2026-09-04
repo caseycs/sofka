@@ -103,6 +103,18 @@ pub const CRONJOB_MENU_ITEMS: &[&str] = &["Trigger now", "Suspend", "Resume", "C
 /// prompting for the source and destination paths.
 pub const TRANSFER_MENU_ITEMS: &[&str] = &["Download from pod", "Upload to pod", "Cancel"];
 
+/// An asynchronous operation's ownership of the shared status bar.
+#[derive(Debug)]
+pub(super) struct ActiveStatusClaim {
+    claim: StatusClaim,
+    /// Exact text currently displayed for this claim, including a background
+    /// message that is only borrowing the bar.
+    text: String,
+    /// The owner still has a result to deliver. If borrowed transient text
+    /// expires first, preserve the claim against an empty bar.
+    pending: bool,
+}
+
 /// External Secrets Operator kinds that honour the `force-sync` annotation to
 /// trigger an immediate secret refresh. Both are namespaced; the cluster-scoped
 /// `ClusterExternalSecret` is deliberately left out so the namespaced patch
@@ -1225,7 +1237,7 @@ pub struct App {
     /// Current claim and the exact text it owns. Comparing the text makes a
     /// direct status assignment invalidate the claim even before the next
     /// expiry tick observes that assignment.
-    pub(super) status_claim: Option<(StatusClaim, String)>,
+    pub(super) status_claim: Option<ActiveStatusClaim>,
     /// Last action failure, recorded even when a newer operation owned the
     /// status bar and the message could not be shown. Surfaced by `:debug`
     /// so a failure is never lost outright.

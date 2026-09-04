@@ -837,8 +837,7 @@ impl App {
             Msg::Error { generation, error } if generation == self.generation => {
                 self.watch_errors = self.watch_errors.saturating_add(1);
                 self.last_error = Some(error.clone());
-                self.flash = format!("error: {error}");
-                self.flash_err = true;
+                self.borrow_status(format!("error: {error}"), true);
             }
             Msg::Flash {
                 generation,
@@ -850,12 +849,10 @@ impl App {
             }
             Msg::Panic(error) => {
                 self.last_error = Some(error.clone());
-                self.flash = format!("internal error: {error}");
-                self.flash_err = true;
+                self.borrow_status(format!("internal error: {error}"), true);
             }
             Msg::Notify(text) => {
-                self.flash = format!("🔔 {text}");
-                self.flash_err = false;
+                self.borrow_status(format!("🔔 {text}"), false);
                 // Delivery happens once per frame in the run loop (see
                 // `take_notification`), so a batch of these coalesces.
                 self.pending_notify.push(text);
@@ -954,12 +951,12 @@ impl App {
                 claim,
                 data,
             } if generation == self.generation => {
-                match &data.warn {
-                    Some(w) => {
-                        self.set_claimed_status(claim, format!("pulse is incomplete — {w}"), true)
-                    }
-                    None => self.clear_claimed_status(claim),
-                }
+                self.set_recurring_status(
+                    claim,
+                    data.warn
+                        .as_ref()
+                        .map(|w| format!("pulse is incomplete — {w}")),
+                );
                 self.pulse = data;
             }
             Msg::Rbac {
@@ -975,12 +972,7 @@ impl App {
                 items,
                 warn,
             } if generation == self.generation => {
-                match warn {
-                    Some(w) => {
-                        self.set_claimed_status(claim, format!("xray is incomplete — {w}"), true)
-                    }
-                    None => self.clear_claimed_status(claim),
-                }
+                self.set_recurring_status(claim, warn.map(|w| format!("xray is incomplete — {w}")));
                 let keep = self.xray_state.selected().unwrap_or(0);
                 self.xray_items = items;
                 self.xray_state
@@ -1190,7 +1182,7 @@ impl App {
                 generation,
                 claim,
                 result,
-            } if generation == self.log_gen => match result {
+            } if generation == self.generation => match result {
                 Ok(path) => self.set_claimed_status(
                     claim,
                     format!("saved logs → {}", path.display()),
