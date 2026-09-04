@@ -85,6 +85,10 @@ const FLUX_SUSPENDABLE_KINDS: &[&str] = &[
     "receivers",
 ];
 
+/// The ArgoCD CRD group. Used to disambiguate the very generic `applications`
+/// and `applicationsets` plurals — only `argoproj.io` kinds get the `t` menu.
+const ARGOCD_GROUP: &str = "argoproj.io";
+
 /// Items in the Flux action menu (`t`), in display order. Deliberately a menu
 /// — not a single-key toggle — so suspending something always takes an
 /// explicit, visible choice rather than one accidental keystroke. "Reconcile
@@ -97,6 +101,26 @@ pub const FLUX_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Reconcile now", "Ca
 /// job --from=cronjob/…` does; Suspend/Resume patch `spec.suspend` exactly
 /// like the Flux menu (CronJobs share the field).
 pub const CRONJOB_MENU_ITEMS: &[&str] = &["Trigger now", "Suspend", "Resume", "Cancel"];
+
+/// Items in the ArgoCD Application action menu (`t`), in display order. "Suspend"
+/// disables auto-sync by removing `spec.syncPolicy.automated` and stashing the
+/// original value (including `prune`/`selfHeal`/`allowEmpty`) as a base64
+/// annotation; "Resume" restores it from the annotation, or defaults to an
+/// empty `automated: {}` when the annotation is absent. "Sync now" patches
+/// the top-level `operation` field, which the ArgoCD application controller
+/// picks up — the same mechanism the `argocd app sync` API endpoint uses.
+/// No `argocd` binary.
+pub const ARGOCD_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Sync now", "Cancel"];
+
+/// Items in the ArgoCD ApplicationSet action menu (`t`). Suspend/Resume
+/// toggle `spec.syncPolicy.applicationsSync`. There is no `none`/`disabled`
+/// mode — suspend sets it to `create-only` (stops updates/deletes of existing
+/// child Applications) and stashes the original value as a base64 annotation;
+/// resume restores it from the annotation, or defaults to `"sync"`. There is
+/// no "Sync now" — ApplicationSet has no `operation` field; it generates
+/// Applications on its own schedule, and syncing those individually is an
+/// Application-level action.
+pub const ARGOCD_APPSET_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Cancel"];
 
 /// Items in the pod file-transfer menu (`t` on a pod), in display order. Both
 /// directions shell out to `kubectl cp` (which needs `tar` in the container),

@@ -33,6 +33,111 @@ pub(super) fn reconcile_patch(requested_at: &str) -> Value {
     })
 }
 
+/// Annotation key for stashing an Application's `automated` block on suspend.
+const ARGOCD_AUTOMATED_STASH: &str = "sofka.io/argocd-automated";
+
+/// Annotation key for stashing an ApplicationSet's `applicationsSync` mode.
+const ARGOCD_APPSYNC_STASH: &str = "sofka.io/argocd-applications-sync";
+
+/// ArgoCD Application suspend/resume patch, built from the live object.
+///
+/// **Suspend** base64-encodes the current `spec.syncPolicy.automated` object
+/// into an annotation, then removes the field — so `prune`, `selfHeal`, and
+/// `allowEmpty` survive the round-trip. **Resume** decodes the annotation and
+/// restores the original object, then removes the annotation. When the
+/// annotation is absent (the Application was suspended by someone else), resume
+/// falls back to an empty `automated: {}`.
+pub(super) fn argocd_suspend_patch(obj: &DynamicObject, suspend: bool) -> Value {
+    use base64::Engine;
+    if suspend {
+        let stash = obj.data.pointer("/spec/syncPolicy/automated").map(|v| {
+            base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_string(v).unwrap_or_default().as_bytes())
+        });
+        let mut patch = json!({"spec": {"syncPolicy": {"automated": null}}});
+        if let Some(s) = stash {
+            patch["metadata"]["annotations"][ARGOCD_AUTOMATED_STASH] = json!(s);
+        }
+        patch
+    } else {
+        let annotation = obj
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(ARGOCD_AUTOMATED_STASH));
+        match annotation {
+            Some(s) => {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(s)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+                let mut patch =
+                    json!({"metadata": {"annotations": {ARGOCD_AUTOMATED_STASH: null}}});
+                patch["spec"]["syncPolicy"]["automated"] = decoded.unwrap_or_else(|| json!({}));
+                patch
+            }
+            None => json!({"spec": {"syncPolicy": {"automated": {}}}}),
+        }
+    }
+}
+
+/// ArgoCD ApplicationSet suspend/resume patch, built from the live object.
+///
+/// ApplicationSet has no `automated` field — it uses `spec.syncPolicy.applicationsSync`
+/// (a string: `sync`, `create-only`, `create-update`, `create-delete`). There is
+/// no `none`/`disabled` mode, so suspend sets it to `create-only` (closest to
+/// suspended — stops updates/deletes of existing child Applications). The
+/// original value is base64-stashed into an annotation so resume restores it
+/// exactly. When the annotation is absent, resume falls back to `"sync"`.
+pub(super) fn argocd_appset_suspend_patch(obj: &DynamicObject, suspend: bool) -> Value {
+    use base64::Engine;
+    const SUSPEND_MODE: &str = "create-only";
+    if suspend {
+        let current = obj
+            .data
+            .pointer("/spec/syncPolicy/applicationsSync")
+            .and_then(Value::as_str)
+            .unwrap_or("sync");
+        let stash = base64::engine::general_purpose::STANDARD.encode(
+            serde_json::to_string(current)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        json!({
+            "spec": {"syncPolicy": {"applicationsSync": SUSPEND_MODE}},
+            "metadata": {"annotations": {ARGOCD_APPSYNC_STASH: stash}}
+        })
+    } else {
+        let annotation = obj
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(ARGOCD_APPSYNC_STASH));
+        match annotation {
+            Some(s) => {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(s)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                    .and_then(|v| v.as_str().map(String::from));
+                let restored = decoded.unwrap_or_else(|| "sync".into());
+                json!({
+                    "spec": {"syncPolicy": {"applicationsSync": restored}},
+                    "metadata": {"annotations": {ARGOCD_APPSYNC_STASH: null}}
+                })
+            }
+            None => json!({"spec": {"syncPolicy": {"applicationsSync": "sync"}}}),
+        }
+    }
+}
+
+/// ArgoCD sync patch. Setting the top-level `operation.sync` field triggers a
+/// manual sync — the same mechanism the ArgoCD API server's `SyncApplication`
+/// endpoint uses. The controller fills in the revision from `spec.source`.
+pub(super) fn argocd_sync_patch() -> Value {
+    json!({ "operation": { "sync": {} } })
+}
+
 pub(super) fn external_secret_refresh_patch(force_sync: &str) -> Value {
     json!({
         "metadata": { "annotations": { "force-sync": force_sync } }
@@ -322,6 +427,30 @@ impl App {
         FLUX_SUSPENDABLE_KINDS.contains(&self.kind_plural.as_str())
     }
 
+    /// Whether the current kind is an ArgoCD CRD (Application or
+    /// ApplicationSet, group `argoproj.io`). The plurals are generic, so the
+    /// group is checked too — only the real ArgoCD CRDs get the `t` menu.
+    pub fn argocd_kind(&self) -> bool {
+        matches!(
+            self.kind_plural.as_str(),
+            "applications" | "applicationsets"
+        ) && self
+            .kind
+            .as_ref()
+            .is_some_and(|k| k.ar.group == ARGOCD_GROUP)
+    }
+
+    /// Whether the current kind is an ArgoCD Application (not ApplicationSet).
+    /// Gates "Sync now", which patches the `operation` field — ApplicationSet
+    /// has no such field.
+    pub fn argocd_app_kind(&self) -> bool {
+        self.kind_plural == "applications"
+            && self
+                .kind
+                .as_ref()
+                .is_some_and(|k| k.ar.group == ARGOCD_GROUP)
+    }
+
     /// Whether the current kind is CronJobs, which get their own `t` menu
     /// (trigger/suspend/resume).
     pub fn cronjob_kind(&self) -> bool {
@@ -332,6 +461,10 @@ impl App {
     pub fn action_menu_items(&self) -> &'static [&'static str] {
         if self.cronjob_kind() {
             CRONJOB_MENU_ITEMS
+        } else if self.argocd_app_kind() {
+            ARGOCD_MENU_ITEMS
+        } else if self.argocd_kind() {
+            ARGOCD_APPSET_MENU_ITEMS
         } else {
             FLUX_MENU_ITEMS
         }

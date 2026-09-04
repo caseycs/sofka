@@ -637,6 +637,9 @@ impl Cluster {
         // A CRD whose plural collides with the `:snapshots` built-in command,
         // for palette-priority tests (CRD names outrank built-ins).
         cluster.register_kind("kopiur.home-operations.com", "Snapshot", "snapshots", true);
+        // ArgoCD CRDs, for the `t` suspend/resume/sync menu.
+        cluster.register_kind("argoproj.io", "Application", "applications", true);
+        cluster.register_kind("argoproj.io", "ApplicationSet", "applicationsets", true);
         // A second `events` kind, reachable only by its qualified name — the
         // bare plural stays with core, as `discover` would leave it.
         let events_k8s_io = Kind {

@@ -38,6 +38,7 @@ Milestone status. Longer-form thinking on direction lives in
 - [x] Action-aware authorization checks.
 - [x] Declarative guardrails.
 - [x] Local action journal.
+- [x] ArgoCD Application suspend/resume/sync controls.
 
 ## Milestone 5: debugging and collaboration
 

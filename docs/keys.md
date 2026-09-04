@@ -51,7 +51,7 @@ plugin, bookmark, and workspace chords.
 | `i`                                           | set container image                                                                                                                   |
 | `r`                                           | rollout restart (workloads) / force-sync (ExternalSecrets/PushSecrets) / refresh (elsewhere)                                          |
 | `f` / `shift-f`                               | port-forward (pods/services) - runs in the background                                                                                 |
-| `t`                                           | Flux: suspend/resume/reconcile menu · CronJobs: trigger/suspend/resume · pods: file transfer (`kubectl cp`)                           |
+| `t`                                           | Flux: suspend/resume/reconcile menu · ArgoCD App/AppSet: suspend/resume (App: + sync) · CronJobs: trigger/suspend/resume · pods: file transfer (`kubectl cp`)                           |
 | `C` / `U` / `D`                               | nodes: cordon / uncordon / drain                                                                                                      |
 | `ctrl-d` / `ctrl-k`                           | delete / force-delete (marked rows, or current); in confirm: `f` toggles force, `c` cycles cascade (background → foreground → orphan) |
 | `w`                                           | toggle wide-only columns (kubectl `-o wide`)                                                                                          |

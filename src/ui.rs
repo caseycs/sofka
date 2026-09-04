@@ -488,6 +488,9 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
     if app.flux_suspendable() {
         lines.push(hint_line(&[("t", "flux menu")]));
     }
+    if app.argocd_kind() {
+        lines.push(hint_line(&[("t", "suspend/sync")]));
+    }
     if app.kind_plural == "helmreleases" {
         lines.push(hint_line(&[("⏎", "helm history")]));
     }
@@ -2034,7 +2037,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         ),
         bind(
             "t",
-            "pods: file transfer (kubectl cp, in picker targets a container) · flux: suspend/resume/reconcile · cronjobs: trigger/suspend/resume",
+            "pods: file transfer (kubectl cp, in picker targets a container) · flux: suspend/resume/reconcile · argocd apps: suspend/resume/sync, appsets: suspend/resume · cronjobs: trigger/suspend/resume",
         ),
         bind("C · U · D", "nodes: cordon · uncordon · drain"),
         bind("space", "mark/unmark row for bulk actions (esc clears)"),
@@ -2328,7 +2331,7 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|label| {
             let color = match *label {
                 "Suspend" => theme::peach(),
-                "Resume" | "Trigger now" => theme::green(),
+                "Resume" | "Trigger now" | "Sync now" => theme::green(),
                 _ => theme::overlay1(),
             };
             ListItem::new(Span::styled(*label, Style::default().fg(color)))
@@ -2336,6 +2339,8 @@ fn draw_flux_menu(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let subject = if app.cronjob_kind() {
         "CronJob"
+    } else if app.argocd_kind() {
+        "ArgoCD"
     } else {
         "Flux"
     };
