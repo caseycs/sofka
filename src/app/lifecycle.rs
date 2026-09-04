@@ -262,7 +262,7 @@ impl App {
         };
         self.applied_filter_labels = filter_labels;
         self.applied_filter_fields = filter_fields;
-        self.clear_orphaned_progress_flash();
+        self.clear_progress_flash();
         self.generation += 1;
         self.gen_flag.store(self.generation, Ordering::SeqCst);
         for t in self.tasks.drain(..) {
@@ -778,7 +778,7 @@ impl App {
 
     pub(super) fn bump_generation(&mut self) {
         self.stop_event_stream();
-        self.clear_orphaned_progress_flash();
+        self.clear_progress_flash();
         self.generation += 1;
         self.gen_flag.store(self.generation, Ordering::SeqCst);
         for t in self.tasks.drain(..) {
@@ -845,11 +845,20 @@ impl App {
                 message,
                 err,
             } if generation == self.generation => {
-                // Through the setter, so re-running an action inside the
-                // expiry window restarts the timer on an identical message
-                // instead of letting it vanish a moment later.
-                self.set_flash(message);
-                self.flash_err = err;
+                // Two actions started close together share a generation, so a
+                // slower one can land after a faster one already failed. An
+                // error on the bar is the newer, more important news and now
+                // never expires, so a late success must not be what erases it.
+                // Starting the next action clears `flash_err` through its own
+                // progress flash, so this only ever suppresses a result that
+                // raced an error — never the ordinary one-action flow.
+                if err || !self.flash_err {
+                    // Through the setter, so re-running an action inside the
+                    // expiry window restarts the timer on an identical message
+                    // instead of letting it vanish a moment later.
+                    self.set_flash(message);
+                    self.flash_err = err;
+                }
             }
             Msg::Panic(error) => {
                 self.last_error = Some(error.clone());
@@ -994,8 +1003,7 @@ impl App {
                 self.mode = Mode::Explain;
                 // As in the `Msg::Gitops` arm below: the "explaining X…"
                 // progress flash has done its job now the findings are up.
-                self.flash.clear();
-                self.flash_err = false;
+                self.clear_progress_flash();
             }
             Msg::Gitops {
                 generation,
@@ -1012,8 +1020,7 @@ impl App {
                 self.gitops_state
                     .select((!self.gitops_items.is_empty()).then_some(first));
                 self.mode = Mode::Gitops;
-                self.flash.clear();
-                self.flash_err = false;
+                self.clear_progress_flash();
             }
             Msg::PluginOutput {
                 generation,
@@ -1130,10 +1137,7 @@ impl App {
                     Some(w) => self.flash_warn(&w),
                     // The "describing X…" progress flash has served its
                     // purpose once the document arrives.
-                    None => {
-                        self.flash.clear();
-                        self.flash_err = false;
-                    }
+                    None => self.clear_progress_flash(),
                 }
             }
             Msg::Events {

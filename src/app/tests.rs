@@ -2176,6 +2176,85 @@ async fn an_action_with_no_targets_claims_nothing() {
 }
 
 #[tokio::test]
+async fn a_finished_report_does_not_erase_a_concurrent_action_result() {
+    let (mut app, _rx) = test_app();
+
+    // A describe and a delete share a generation. The delete lands first and
+    // claims the bar; the report is done with its own progress message, but
+    // clearing unconditionally would wipe the confirmation and show nothing.
+    app.flash = "describing web…".into();
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        message: "deleted 3 pods".into(),
+        err: false,
+    });
+    app.handle_msg(Msg::Detail {
+        generation: app.generation,
+        title: "web — describe".into(),
+        lines: vec!["Name: web".into()],
+        warn: None,
+    });
+    assert_eq!(app.flash, "deleted 3 pods");
+
+    // Same for an error, which no longer expires on its own — losing it here
+    // would lose it for good.
+    app.flash = "explaining web…".into();
+    app.handle_msg(Msg::Error {
+        generation: app.generation,
+        error: "delete web failed: forbidden".into(),
+    });
+    app.handle_msg(Msg::Explain {
+        generation: app.generation,
+        title: "explain — web".into(),
+        findings: Vec::new(),
+    });
+    assert_eq!(app.mode, Mode::Explain);
+    assert!(app.flash_err);
+    assert!(app.flash.contains("forbidden"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn a_late_success_does_not_erase_an_error() {
+    let (mut app, _rx) = test_app();
+
+    // Two actions started close together share a generation, so a slower one
+    // can report success after a faster one has already failed.
+    app.flash = "deleting 3 pods…".into();
+    app.handle_msg(Msg::Error {
+        generation: app.generation,
+        error: "scale web failed: forbidden".into(),
+    });
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        message: "deleted 3 pods".into(),
+        err: false,
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("scale web failed"), "{}", app.flash);
+
+    // The next action clears the error through its own progress flash, so
+    // ordinary results are unaffected.
+    app.flash = "deleting 2 pods…".into();
+    app.flash_err = false;
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        message: "deleted 2 pods".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "deleted 2 pods");
+
+    // A `:can-i` verdict answers a question the user just asked, so it lands
+    // even over an error.
+    app.flash_err = true;
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        message: "✗ no — cannot delete pods".into(),
+        err: true,
+    });
+    assert_eq!(app.flash, "✗ no — cannot delete pods");
+}
+
+#[tokio::test]
 async fn can_i_verdict_arrives_as_a_flash() {
     let (mut app, _rx) = test_app();
     // `:can-i` shares `Msg::Flash` with the action results. A denial is an

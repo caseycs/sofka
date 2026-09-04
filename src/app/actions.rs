@@ -2089,13 +2089,19 @@ impl App {
         self.flash_since = std::time::Instant::now();
     }
 
-    /// Drop an in-flight progress flash whose result can no longer reach us.
-    /// [`Msg::Flash`] is generation-gated, so bumping the generation orphans
-    /// the task that would have replaced "deleting 3 pods…" with its result —
-    /// and [`App::expire_flash`] deliberately never times a progress message
-    /// out. Without this, a refresh (`r`) during a bulk delete would strand
-    /// that message on the bar for good.
-    pub(super) fn clear_orphaned_progress_flash(&mut self) {
+    /// Take an in-flight progress message off the bar — but only if that is
+    /// still what the bar is showing. The trailing `…` is the test, the same
+    /// convention [`App::expire_flash`] reads.
+    ///
+    /// Two callers, one rule. A generation bump orphans the task that would
+    /// have replaced "deleting 3 pods…" with its result, and `expire_flash`
+    /// deliberately never times a progress message out, so without this a
+    /// refresh (`r`) during a bulk delete strands that message for good. And a
+    /// document/report task finishing (`Msg::Detail`/`Explain`/`Gitops`) is
+    /// done with its own "describing web…", but a concurrent action may have
+    /// claimed the bar since — clearing unconditionally would wipe that
+    /// action's confirmation, or a sticky error, and leave nothing behind.
+    pub(super) fn clear_progress_flash(&mut self) {
         if self.flash.ends_with('…') {
             self.flash.clear();
             self.flash_err = false;
