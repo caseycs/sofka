@@ -1269,8 +1269,8 @@ fn views_for(key: &str, cfg: crate::config::ViewConfig) -> HashMap<String, crate
     views
 }
 
-/// The `[views."<key>"].node` a user writes to teach sofka where a kind keeps
-/// its node name — nothing about the kind itself is built in.
+/// The `[views."<key>"].node` a user writes to teach sofka where a kind the
+/// built-in table doesn't list keeps its node name.
 fn views_with_node(key: &str, pointer: &str) -> HashMap<String, crate::views::View> {
     views_for(
         key,
@@ -1307,12 +1307,12 @@ async fn enter_on_nodeclaim_scopes_to_its_node() {
         "status": {"nodeName": "ip-10-0-1-2", "providerID": "aws:///us-west-2b/i-0123"}
     });
 
-    // `enter` and `o` are the same jump, and esc unwinds either.
+    // `enter` and `o` are the same jump, and esc unwinds either. No config:
+    // the nodeclaims row ships in the built-in table.
     for key in [KeyCode::Enter, KeyCode::Char('o')] {
         let (mut app, _rx) = test_app();
         app.cluster
             .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
-        app.user_views = views_with_node("karpenter.sh/v1/nodeclaims", "/status/nodeName");
         app.switch_kind("nodeclaims");
         apply(&mut app, claim.clone());
         app.table_state.select(Some(0));
@@ -1339,7 +1339,6 @@ async fn unregistered_nodeclaim_warns_instead_of_navigating() {
     let (mut app, _rx) = test_app();
     app.cluster
         .register_kind("karpenter.sh", "NodeClaim", "nodeclaims", false);
-    app.user_views = views_with_node("karpenter.sh/v1/nodeclaims", "/status/nodeName");
     app.switch_kind("nodeclaims");
     // Launched but not yet registered: no status.nodeName to jump to.
     apply(

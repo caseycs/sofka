@@ -63,7 +63,9 @@ Two shapes cover most cases.
 
 **A row names one node** - `node` is a JSON Pointer to the field holding the
 node's name. `o` jumps to that node, and so does `enter` for a kind with no
-drill-down of its own:
+drill-down of its own. Pods (`/spec/nodeName`) and Karpenter NodeClaims
+(`/status/nodeName`) are built in; `node` adds a kind or overrides a built-in.
+This is what the NodeClaim row amounts to:
 
 ```toml
 [views."karpenter.sh/v1/nodeclaims"]
@@ -74,8 +76,7 @@ The nodes list is scoped by `metadata.name`, the only field selector the
 apiserver indexes for nodes, so the pointer has to land on a name. A row whose
 pointer is empty (the node isn't assigned yet) warns instead of opening an empty
 list; a pointer that lands on something other than a string warns that the
-pointer is wrong. Pods are the built-in row of this table (`/spec/nodeName`);
-config overrides it.
+pointer is wrong.
 
 **A row selects other objects** - `drill` names the kind `enter` should open and
 how to scope it: a label selector (`labels`), a field selector (`fields`), or

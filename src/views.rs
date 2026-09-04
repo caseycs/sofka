@@ -139,10 +139,14 @@ fn unknown_placeholders(template: &str) -> Vec<String> {
 
 /// Kinds whose objects name a node, and the JSON Pointer that holds the name.
 /// A row that names a node can jump to it (`o`, and `enter` where the kind has
-/// no drill-down of its own). Only pods are built in — every other kind,
-/// custom resources included, says where its node name lives via
-/// `[views."…"].node` rather than being enumerated here.
-const NODE_REFS: &[(&str, &str)] = &[("pods", "/spec/nodeName")];
+/// no drill-down of its own). Data, not control flow: a kind common enough to
+/// ship gets a row here — the treatment `FLUX_OBJECT_COLUMNS` gives Flux —
+/// and `[views."…"].node` overrides a row or adds a kind without one.
+const NODE_REFS: &[(&str, &str)] = &[
+    ("pods", "/spec/nodeName"),
+    // Karpenter writes the node's name onto the claim once it registers.
+    ("nodeclaims", "/status/nodeName"),
+];
 
 /// A per-kind setting, resolved key by key in [`lookup`]'s precedence rather
 /// than off whichever single view `lookup` picks: a more specific view that
@@ -981,19 +985,28 @@ mod tests {
             node_pointer(&views, &ar("", "Pod", "pods")),
             Some("/spec/nodeName")
         );
-        // Everything else names no node until config says where: a custom
-        // resource is not something to enumerate here.
         let claims = ar("karpenter.sh", "NodeClaim", "nodeclaims");
-        assert_eq!(node_pointer(&views, &claims), None);
+        assert_eq!(node_pointer(&views, &claims), Some("/status/nodeName"));
+        // A kind the table doesn't list names no node until config says where.
+        let pools = ar("karpenter.sh", "NodePool", "nodepools");
+        assert_eq!(node_pointer(&views, &pools), None);
 
         let (configured, warnings) = compile_toml(
             r#"
             [views."karpenter.sh/v1/nodeclaims"]
-            node = "/status/nodeName"
+            node = "/status/providerID"
+
+            [views.nodepools]
+            node = "/status/host"
             "#,
         );
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(node_pointer(&configured, &claims), Some("/status/nodeName"));
+        // Config overrides a shipped row and adds a kind without one.
+        assert_eq!(
+            node_pointer(&configured, &claims),
+            Some("/status/providerID")
+        );
+        assert_eq!(node_pointer(&configured, &pools), Some("/status/host"));
     }
 
     #[test]
