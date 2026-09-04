@@ -272,26 +272,15 @@ impl App {
     }
 
     /// Scope the nodes list to one node by name — the shared tail of every
-    /// jump to a node. The name is what we scope the watch by because
-    /// `metadata.name` is the only field selector the apiserver indexes for
-    /// nodes — a resource that pairs with its node by some other identifier
-    /// (Karpenter's `status.providerID`, say) can't be selected on that.
+    /// jump to a node, and the same drill as any other so `o` and `enter`
+    /// give the same feedback whichever kind they came from. The name is
+    /// what we scope the watch by because `metadata.name` is the only field
+    /// selector the apiserver indexes for nodes — a resource that pairs with
+    /// its node by some other identifier (Karpenter's `status.providerID`,
+    /// say) can't be selected on that.
     pub(super) fn goto_node(&mut self, node: &str, scope: String) {
-        let Some(nodes) = self.cluster.resolve("nodes") else {
-            self.flash_warn("nodes kind unavailable");
-            return;
-        };
-        self.push_frame();
-        self.kind = Some(nodes);
-        self.kind_plural = "nodes".into();
-        self.namespace = String::new();
-        self.labels = None;
-        self.fields = Some(format!("metadata.name={node}"));
-        self.scope_label = Some(scope);
-        self.filter.clear();
-        self.reset_sort();
-        self.table_state.select(Some(0));
-        self.start_watch();
+        let by_name = Some(format!("metadata.name={node}"));
+        self.drill_to("nodes", String::new(), None, by_name, scope);
     }
 
     /// Navigate to a specific object by (plural, namespace, name) — a

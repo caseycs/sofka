@@ -1257,6 +1257,9 @@ async fn o_on_pod_scopes_to_its_host_node() {
     assert_eq!(app.kind_plural, "nodes");
     assert_eq!(app.fields.as_deref(), Some("metadata.name=node-1"));
     assert_eq!(app.scope_label.as_deref(), Some("node of pod/web"));
+    // The same flash a configured drill gives: one action, one feedback.
+    assert_eq!(app.flash, "↳ drilled into nodes");
+    assert!(!app.flash_err);
 
     app.handle_key(press(KeyCode::Esc)).unwrap();
     assert_eq!(app.kind_plural, "pods");
