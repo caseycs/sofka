@@ -109,10 +109,12 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   rolls back.
 - **Argo CD controls** (`t`) - a suspend/resume/sync-now menu for ArgoCD
   Applications, and a suspend/resume menu for ApplicationSets, built on native
-  Kubernetes API patches. Suspend removes `spec.syncPolicy.automated`, resume
-  restores it, and sync-now patches the top-level `operation` field — the same
-  mechanism the ArgoCD API server uses internally. No `argocd` binary needed.
-  Works with bulk multiselect.
+  Kubernetes API patches. Suspend removes `spec.syncPolicy.automated` and
+  stashes the original value (including `prune`/`selfHeal`/`allowEmpty`) as a
+  base64 annotation so resume restores it exactly; ApplicationSet suspend sets
+  `applicationsSync` to `create-only` (no `none` mode exists) and stashes the
+  original value the same way. Sync-now patches the top-level `operation`
+  field. No `argocd` binary needed. Works with bulk multiselect.
 - **GitOps view** (`:gitops` / `:flux`) - the Flux ownership and reconciliation
   chain for the selection: the owning Kustomization/HelmRelease, its source
   (GitRepository/OCIRepository/HelmRepository) with applied and latest revision,

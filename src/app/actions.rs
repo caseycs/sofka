@@ -1959,10 +1959,11 @@ impl App {
     }
 
     /// Suspend/resume an ArgoCD Application or ApplicationSet. Applications
-    /// toggle `spec.syncPolicy.automated` (remove to suspend, restore to
-    /// resume); ApplicationSets toggle `spec.syncPolicy.applicationsSync`
-    /// (`"none"` to suspend, `"sync"` to resume) — different field, same
-    /// `argocd app suspend`/`resume` intent.
+    /// stash `spec.syncPolicy.automated` into a base64 annotation on suspend
+    /// and restore it on resume — so `prune`, `selfHeal`, and `allowEmpty`
+    /// survive the round-trip. ApplicationSets stash `applicationsSync` and set
+    /// it to `create-only` on suspend (no `none` mode exists). Each target is
+    /// GET-then-patched so the stash is built from the live object.
     pub(super) fn do_argocd_suspend(&mut self, targets: Vec<(String, String)>, suspend: bool) {
         let Some(kind) = self.kind.clone() else {
             return;
@@ -1986,13 +1987,60 @@ impl App {
         } else {
             format!("{verb_done} {} {}", targets.len(), self.kind_plural)
         };
-        let patch = if self.argocd_app_kind() {
-            Patch::Merge(argocd_suspend_patch(suspend))
-        } else {
-            Patch::Merge(argocd_appset_suspend_patch(suspend))
-        };
-        self.spawn_patch_action(kind, targets, patch, claim, ok_message, move |name, e| {
-            format!("{verb} {name} failed: {e}")
+        let is_app = self.argocd_app_kind();
+        let client = self.cluster.client.clone();
+        let tx = self.tx.clone();
+        let genr = self.generation;
+        tokio::spawn(async move {
+            let mut failed = false;
+            for (name, ns) in targets {
+                let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
+                    Api::namespaced_with(client.clone(), &ns, &kind.ar)
+                } else {
+                    Api::all_with(client.clone(), &kind.ar)
+                };
+                let obj = match api.get(&name).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        failed = true;
+                        let _ = tx
+                            .send(Msg::Flash {
+                                generation: genr,
+                                claim,
+                                message: format!("{verb} {name} failed: {e}"),
+                                err: true,
+                            })
+                            .await;
+                        continue;
+                    }
+                };
+                let patch = if is_app {
+                    Patch::Merge(argocd_suspend_patch(&obj, suspend))
+                } else {
+                    Patch::Merge(argocd_appset_suspend_patch(&obj, suspend))
+                };
+                if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
+                    failed = true;
+                    let _ = tx
+                        .send(Msg::Flash {
+                            generation: genr,
+                            claim,
+                            message: format!("{verb} {name} failed: {e}"),
+                            err: true,
+                        })
+                        .await;
+                }
+            }
+            if !failed {
+                let _ = tx
+                    .send(Msg::Flash {
+                        generation: genr,
+                        claim,
+                        message: ok_message,
+                        err: false,
+                    })
+                    .await;
+            }
         });
     }
 

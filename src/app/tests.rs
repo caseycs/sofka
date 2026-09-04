@@ -3012,7 +3012,10 @@ async fn argocd_menu_cancel_item_does_nothing() {
     apply(&mut app, argocd_app("guestbook"));
     let flash_before = app.flash.clone();
     app.request_flux_menu();
-    let cancel = ARGOCD_MENU_ITEMS.iter().position(|s| *s == "Cancel").unwrap();
+    let cancel = ARGOCD_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Cancel")
+        .unwrap();
     app.flux_menu_state.select(Some(cancel));
     app.handle_key(press(KeyCode::Enter)).unwrap();
     assert_eq!(app.mode, Mode::Table);
@@ -3037,33 +3040,130 @@ async fn argocd_menu_requires_explicit_choice_not_a_single_key() {
 }
 
 #[test]
-fn argocd_suspend_patch_removes_automated() {
-    let p = argocd_suspend_patch(true);
-    assert_eq!(p, json!({"spec": {"syncPolicy": {"automated": null}}}));
+fn argocd_suspend_stashes_automated_and_removes_field() {
+    let o = obj(argocd_app("guestbook"));
+    let p = argocd_suspend_patch(&o, true);
+    assert_eq!(p["spec"]["syncPolicy"]["automated"], json!(null));
+    let stash = p["metadata"]["annotations"]["sofka.io/argocd-automated"]
+        .as_str()
+        .unwrap();
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(stash)
+        .unwrap();
+    let restored: Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(restored, json!({"prune": true, "selfHeal": true}));
 }
 
 #[test]
-fn argocd_resume_patch_restores_automated() {
-    let p = argocd_suspend_patch(false);
-    assert_eq!(p, json!({"spec": {"syncPolicy": {"automated": {}}}}));
+fn argocd_suspend_with_no_automated_does_not_stash() {
+    let mut o = obj(argocd_app("guestbook"));
+    if let Some(v) = o.data.pointer_mut("/spec/syncPolicy") {
+        v.as_object_mut().unwrap().remove("automated");
+    }
+    let p = argocd_suspend_patch(&o, true);
+    assert_eq!(p["spec"]["syncPolicy"]["automated"], json!(null));
+    assert!(p["metadata"]["annotations"].is_null());
 }
 
 #[test]
-fn argocd_appset_suspend_patch_removes_field() {
-    let p = argocd_appset_suspend_patch(true);
+fn argocd_resume_restores_from_annotation() {
+    use base64::Engine;
+    let stash =
+        base64::engine::general_purpose::STANDARD.encode(r#"{"prune":true,"selfHeal":true}"#);
+    let o = obj(json!({
+        "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+        "metadata": {"name": "guestbook", "namespace": "argocd",
+                     "annotations": {"sofka.io/argocd-automated": stash}},
+        "spec": {"syncPolicy": {}}
+    }));
+    let p = argocd_suspend_patch(&o, false);
     assert_eq!(
-        p,
-        json!({"spec": {"syncPolicy": {"applicationsSync": null}}})
+        p["spec"]["syncPolicy"]["automated"],
+        json!({"prune": true, "selfHeal": true})
+    );
+    assert_eq!(
+        p["metadata"]["annotations"]["sofka.io/argocd-automated"],
+        json!(null)
     );
 }
 
 #[test]
-fn argocd_appset_resume_patch_sets_sync() {
-    let p = argocd_appset_suspend_patch(false);
+fn argocd_resume_without_annotation_defaults_to_empty() {
+    let o = obj(argocd_app("guestbook"));
+    let p = argocd_suspend_patch(&o, false);
+    assert_eq!(p["spec"]["syncPolicy"]["automated"], json!({}));
+    assert!(p["metadata"].is_null() || p["metadata"]["annotations"].is_null());
+}
+
+#[test]
+fn argocd_appset_suspend_stashes_and_sets_create_only() {
+    let o = obj(argocd_appset("guestbook-set"));
+    let p = argocd_appset_suspend_patch(&o, true);
     assert_eq!(
-        p,
-        json!({"spec": {"syncPolicy": {"applicationsSync": "sync"}}})
+        p["spec"]["syncPolicy"]["applicationsSync"],
+        json!("create-only")
     );
+    let stash = p["metadata"]["annotations"]["sofka.io/argocd-applications-sync"]
+        .as_str()
+        .unwrap();
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(stash)
+        .unwrap();
+    let restored: Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(restored, json!("sync"));
+}
+
+#[test]
+fn argocd_appset_suspend_defaults_stash_to_sync_when_absent() {
+    let mut o = obj(argocd_appset("guestbook-set"));
+    if let Some(v) = o.data.pointer_mut("/spec/syncPolicy") {
+        v.as_object_mut().unwrap().remove("applicationsSync");
+    }
+    let p = argocd_appset_suspend_patch(&o, true);
+    assert_eq!(
+        p["spec"]["syncPolicy"]["applicationsSync"],
+        json!("create-only")
+    );
+    let stash = p["metadata"]["annotations"]["sofka.io/argocd-applications-sync"]
+        .as_str()
+        .unwrap();
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(stash)
+        .unwrap();
+    let restored: Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(restored, json!("sync"));
+}
+
+#[test]
+fn argocd_appset_resume_restores_from_annotation() {
+    use base64::Engine;
+    let stash = base64::engine::general_purpose::STANDARD.encode(r#""create-update""#);
+    let o = obj(json!({
+        "apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationSet",
+        "metadata": {"name": "guestbook-set", "namespace": "argocd",
+                     "annotations": {"sofka.io/argocd-applications-sync": stash}},
+        "spec": {"syncPolicy": {"applicationsSync": "create-only"}}
+    }));
+    let p = argocd_appset_suspend_patch(&o, false);
+    assert_eq!(
+        p["spec"]["syncPolicy"]["applicationsSync"],
+        json!("create-update")
+    );
+    assert_eq!(
+        p["metadata"]["annotations"]["sofka.io/argocd-applications-sync"],
+        json!(null)
+    );
+}
+
+#[test]
+fn argocd_appset_resume_without_annotation_defaults_to_sync() {
+    let o = obj(argocd_appset("guestbook-set"));
+    let p = argocd_appset_suspend_patch(&o, false);
+    assert_eq!(p["spec"]["syncPolicy"]["applicationsSync"], json!("sync"));
+    assert!(p["metadata"].is_null() || p["metadata"]["annotations"].is_null());
 }
 
 #[test]
