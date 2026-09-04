@@ -7516,6 +7516,7 @@ async fn reload_palette_command_dispatches() {
 #[tokio::test]
 async fn info_view_reports_version_cluster_and_watch_health() {
     let (mut app, _rx) = test_app();
+    app.cluster.server_version = "v1.36.2-eks-bca9cf6".into();
     app.watch_errors = 3;
     app.last_error = Some("connection refused".into());
     assert!(app.run_palette_command("info"));
@@ -7530,6 +7531,7 @@ async fn info_view_reports_version_cluster_and_watch_health() {
     assert!(text.contains(&format!("sofka v{}", crate::diagnostics::VERSION)));
     assert!(text.contains("Cluster"), "{text}");
     assert!(text.contains("api server:"), "{text}");
+    assert!(text.contains("k8s rev:     v1.36.2-eks-bca9cf6"), "{text}");
     assert!(text.contains("errors: 3"), "{text}");
     assert!(text.contains("connection refused"), "{text}");
     assert!(text.contains("Directories"), "{text}");

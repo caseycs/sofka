@@ -28,6 +28,10 @@ impl App {
             blank_as(&self.cluster.cluster_url, "(unknown)")
         ));
         lines.push(format!(
+            "  k8s rev:     {}",
+            blank_as(&self.cluster.server_version, "(unknown)")
+        ));
+        lines.push(format!(
             "  namespace:   {}",
             if self.namespace.is_empty() {
                 "(all)"

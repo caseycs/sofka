@@ -147,6 +147,14 @@ async fn run_main(args: Args) -> Result<()> {
         println!("  context:    {}", cluster.context);
         println!("  cluster:    {}", cluster.cluster_name);
         println!("  server:     {}", cluster.cluster_url);
+        println!(
+            "  k8s rev:    {}",
+            if cluster.server_version.is_empty() {
+                "unknown"
+            } else {
+                &cluster.server_version
+            }
+        );
         println!("  namespace:  {}", cluster.default_namespace);
         println!(
             "  kinds:      {} resource types discovered",

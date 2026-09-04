@@ -151,7 +151,8 @@ capture-and-review workflow.
 
 ## Runtime diagnostics
 
-`:info` (or `sofka --info`) prints the version and build, config sources, the live
-context/cluster/API server, discovery and Metrics API status, watch error counts,
-and the state/snapshot/bundle directories. Identifiers and counts only, never
-credentials, tokens, or Secret values.
+`:info` shows the version and build, config sources, live context/cluster/API
+server and Kubernetes revision, discovery and Metrics API status, watch error
+counts, and the state/snapshot/bundle directories. `sofka --info` prints the
+static subset without connecting to a cluster. Identifiers and counts only,
+never credentials, tokens, or Secret values.
