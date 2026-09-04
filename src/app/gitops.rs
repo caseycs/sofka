@@ -74,8 +74,7 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
-        self.flash = format!("GitOps: {}…", subject);
-        self.flash_err = false;
+        let claim = self.claim_status(format!("GitOps: {}…", subject));
 
         tokio::spawn(async move {
             let mut warn = None;
@@ -129,6 +128,7 @@ impl App {
             let _ = tx
                 .send(Msg::Gitops {
                     generation: genr,
+                    claim,
                     title,
                     findings,
                 })

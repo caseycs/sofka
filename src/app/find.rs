@@ -42,8 +42,7 @@ impl App {
         self.find_items.clear();
         self.find_state.select(None);
         self.mode = Mode::Find;
-        self.flash = format!("finding '{query}'…");
-        self.flash_err = false;
+        let claim = self.claim_status(format!("finding '{query}'…"));
 
         let kinds: Vec<(String, ApiResource)> = FIND_KINDS
             .iter()
@@ -109,6 +108,7 @@ impl App {
             let _ = tx
                 .send(Msg::FindResults {
                     generation: genr,
+                    claim,
                     query,
                     items,
                     warn,

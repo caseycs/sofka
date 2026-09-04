@@ -446,8 +446,7 @@ impl App {
         self.namespace = normalize_ns(&sel);
         self.note_recent_namespace(&sel);
         self.remember_namespace();
-        self.flash = format!("namespace: {}", self.namespace_label());
-        self.flash_err = false;
+        self.set_flash(format!("namespace: {}", self.namespace_label()));
         self.ns_filter.clear();
         self.mode = Mode::Table;
         self.table_state.select(Some(0));
@@ -643,6 +642,7 @@ impl App {
             self.flash_warn(&format!("context '{new}' already exists"));
             return;
         }
+        let claim = self.claim_status(format!("renaming {old} → {new}…"));
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
@@ -658,6 +658,7 @@ impl App {
             let _ = tx
                 .send(Msg::ContextRenamed {
                     generation: genr,
+                    claim,
                     old,
                     new,
                     result,
@@ -675,13 +676,14 @@ impl App {
         if name == self.cluster.context && self.cluster.connected {
             return;
         }
-        self.flash = format!("switching to {name}…");
-        self.flash_err = false;
         // Stop the current context's watches and clear stale rows while we
         // reconnect; the new watch starts when the connection lands. The rows
         // are stashed first — if the switch fails we stay on this context,
         // where they're still valid (a successful switch drops the cache).
+        // Bump first: this switch's own progress flash belongs to the new
+        // generation, and the bump clears any left over from the old one.
         self.bump_generation();
+        self.set_flash(format!("switching to {name}…"));
         self.stash_view_snapshot();
         self.store.clear();
         self.invalidate_rows();

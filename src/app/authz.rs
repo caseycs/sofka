@@ -20,8 +20,7 @@ impl App {
             self.namespace.clone()
         };
         let user = self.cluster.context.clone();
-        self.flash = format!("can-i: reviewing rules in {ns}…");
-        self.flash_err = false;
+        let claim = self.claim_status(format!("can-i: reviewing rules in {ns}…"));
         tokio::spawn(async move {
             let review = SelfSubjectRulesReview {
                 spec: SelfSubjectRulesReviewSpec {
@@ -33,12 +32,14 @@ impl App {
             let msg = match api.create(&kube::api::PostParams::default(), &review).await {
                 Ok(resp) => Msg::Detail {
                     generation: genr,
+                    claim,
                     title: format!("can-i · {user} · namespace {ns}"),
                     lines: format_rules(resp.status, &ns),
                     warn: None,
                 },
                 Err(e) => Msg::Detail {
                     generation: genr,
+                    claim,
                     title: format!("can-i · namespace {ns}"),
                     lines: vec![format!("access review failed: {e}")],
                     warn: Some("could not review permissions".into()),
@@ -77,8 +78,7 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
-        self.flash = format!("can-i {subject}…");
-        self.flash_err = false;
+        let claim = self.claim_status(format!("can-i {subject}…"));
         tokio::spawn(async move {
             let review = SelfSubjectAccessReview {
                 spec: SelfSubjectAccessReviewSpec {
@@ -100,21 +100,23 @@ impl App {
                     let reason = status.reason.filter(|r| !r.is_empty());
                     // `denied` overrides `allowed` (an explicit deny wins).
                     if status.denied.unwrap_or(false) {
-                        deny_msg(genr, &subject, reason)
+                        deny_msg(genr, claim, &subject, reason)
                     } else if status.allowed {
-                        Msg::CanIResult {
+                        Msg::Flash {
                             generation: genr,
-                            text: format!("✓ yes — can {subject}"),
-                            ok: true,
+                            claim,
+                            message: format!("✓ yes — can {subject}"),
+                            err: false,
                         }
                     } else {
-                        deny_msg(genr, &subject, reason)
+                        deny_msg(genr, claim, &subject, reason)
                     }
                 }
-                Err(e) => Msg::CanIResult {
+                Err(e) => Msg::Flash {
                     generation: genr,
-                    text: format!("can-i {subject}: review failed: {e}"),
-                    ok: false,
+                    claim,
+                    message: format!("can-i {subject}: review failed: {e}"),
+                    err: true,
                 },
             };
             let _ = tx.send(msg).await;
@@ -122,12 +124,13 @@ impl App {
     }
 }
 
-fn deny_msg(generation: u64, subject: &str, reason: Option<String>) -> Msg {
+fn deny_msg(generation: u64, claim: StatusClaim, subject: &str, reason: Option<String>) -> Msg {
     let tail = reason.map(|r| format!(" ({r})")).unwrap_or_default();
-    Msg::CanIResult {
+    Msg::Flash {
         generation,
-        text: format!("✗ no — cannot {subject}{tail}"),
-        ok: false,
+        claim,
+        message: format!("✗ no — cannot {subject}{tail}"),
+        err: true,
     }
 }
 

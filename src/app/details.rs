@@ -141,8 +141,7 @@ impl App {
             argv.push("-n".into());
             argv.push(ns.clone());
         }
-        self.flash = format!("describing {name}…");
-        self.flash_err = false;
+        let claim = self.claim_status(format!("describing {name}…"));
         tokio::spawn(async move {
             let msg = match tokio::process::Command::new(&argv[0])
                 .args(&argv[1..])
@@ -151,6 +150,7 @@ impl App {
             {
                 Ok(out) if out.status.success() => Msg::Detail {
                     generation: genr,
+                    claim,
                     title: format!("{name} — describe"),
                     lines: String::from_utf8_lossy(&out.stdout)
                         .lines()
@@ -162,6 +162,7 @@ impl App {
                     let err = String::from_utf8_lossy(&out.stderr);
                     Msg::Detail {
                         generation: genr,
+                        claim,
                         title: yaml_title,
                         lines: yaml,
                         warn: Some(format!(
@@ -172,6 +173,7 @@ impl App {
                 }
                 Err(_) => Msg::Detail {
                     generation: genr,
+                    claim,
                     title: yaml_title,
                     lines: yaml,
                     warn: Some("kubectl not found; showing YAML".into()),

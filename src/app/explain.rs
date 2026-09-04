@@ -65,11 +65,10 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
-        self.flash = format!(
+        let claim = self.claim_status(format!(
             "explaining {}…",
             obj.metadata.name.clone().unwrap_or_default()
-        );
-        self.flash_err = false;
+        ));
 
         tokio::spawn(async move {
             let mut warn = None;
@@ -103,6 +102,7 @@ impl App {
             let _ = tx
                 .send(Msg::Explain {
                     generation: genr,
+                    claim,
                     title,
                     findings,
                 })

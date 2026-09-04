@@ -702,6 +702,7 @@ async fn run(
             }
             _ = tick.tick() => {
                 app.reap_port_forwards(); // age columns + drop dead forwards
+                app.expire_flash();
                 dirty = true;
             }
             // A held Esc was a real keypress after all, not the head of a

@@ -6,6 +6,10 @@ use std::sync::Arc;
 
 use kube::core::DynamicObject;
 
+/// Identity of an asynchronous operation's claim on the shared status bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusClaim(pub(crate) u64);
+
 /// Messages flowing from watch tasks to the UI loop. Tagged with a
 /// `generation` so messages from a superseded watch can be discarded.
 pub enum Msg {
@@ -51,10 +55,12 @@ pub enum Msg {
     },
     PulseData {
         generation: u64,
+        claim: StatusClaim,
         data: Pulse,
     },
     XrayData {
         generation: u64,
+        claim: StatusClaim,
         items: Vec<XrayItem>,
         /// A list that failed during the gather — the tree may be incomplete.
         warn: Option<String>,
@@ -69,24 +75,21 @@ pub enum Msg {
     /// Findings for the explain-unhealthy view, gathered off-thread.
     Explain {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         findings: Vec<crate::explain::Finding>,
-    },
-    /// Result of a `:can-i <verb> <resource>` access review, shown as a flash.
-    CanIResult {
-        generation: u64,
-        text: String,
-        ok: bool,
     },
     /// Reconciliation-chain findings for the GitOps view, gathered off-thread.
     Gitops {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         findings: Vec<crate::explain::Finding>,
     },
     /// Captured output of an `output = "popup"` plugin run.
     PluginOutput {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         lines: Vec<String>,
         /// Set when the plugin failed or timed out (a nonzero exit, stderr).
@@ -96,6 +99,7 @@ pub enum Msg {
     /// bulk): how many jobs succeeded and the failures (label + reason).
     PluginBulkDone {
         generation: u64,
+        claim: StatusClaim,
         name: String,
         ok: usize,
         failed: Vec<String>,
@@ -103,6 +107,7 @@ pub enum Msg {
     /// Result of an off-thread `kubectl describe` (or its YAML fallback).
     Detail {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         lines: Vec<String>,
         /// Set when describe failed and we fell back to YAML.
@@ -118,16 +123,19 @@ pub enum Msg {
     /// "copied …" summary, or kubectl's error.
     TransferDone {
         generation: u64,
+        claim: StatusClaim,
         result: Result<String, String>,
     },
     /// Result of an off-thread log save.
     LogsSaved {
         generation: u64,
+        claim: StatusClaim,
         result: Result<std::path::PathBuf, String>,
     },
     /// Result of an off-thread clipboard copy.
     ClipboardCopied {
         generation: u64,
+        claim: StatusClaim,
         copied: bool,
         success: String,
         failure: String,
@@ -152,6 +160,7 @@ pub enum Msg {
     /// context switcher).
     ContextRenamed {
         generation: u64,
+        claim: StatusClaim,
         old: String,
         new: String,
         result: Result<(), String>,
@@ -175,12 +184,14 @@ pub enum Msg {
     /// deleted and any per-pod failures (`ns/name: reason`).
     DebuggersCleaned {
         generation: u64,
+        claim: StatusClaim,
         deleted: usize,
         failed: Vec<String>,
     },
     /// An assembled diagnostic bundle (`:bundle`), ready to preview and save.
     Bundle {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         text: String,
         /// Suggested filename for `:bundle-save`.
@@ -189,11 +200,13 @@ pub enum Msg {
     /// Result of writing a bundle to disk (`:bundle-save`).
     BundleSaved {
         generation: u64,
+        claim: StatusClaim,
         result: Result<std::path::PathBuf, String>,
     },
     /// Result of writing a snapshot to disk (`:snapshot`).
     SnapshotSaved {
         generation: u64,
+        claim: StatusClaim,
         result: Result<std::path::PathBuf, String>,
     },
     /// One context's summary for the fleet dashboard (`:fleet`), arriving
@@ -205,6 +218,7 @@ pub enum Msg {
     /// Results of a `:find <text>` sweep across kinds.
     FindResults {
         generation: u64,
+        claim: StatusClaim,
         query: String,
         items: Vec<FindItem>,
         /// Kinds that failed to list — the results may be incomplete.
@@ -213,6 +227,19 @@ pub enum Msg {
     Error {
         generation: u64,
         error: String,
+    },
+    /// A background action (delete, restart, scale, drain, helm op, …)
+    /// finished; replaces its "…ing" progress flash with a result. Also
+    /// carries `:can-i` verdicts, which are the same thing: a one-line answer
+    /// from an off-thread task.
+    Flash {
+        generation: u64,
+        claim: StatusClaim,
+        message: String,
+        /// Render in the error style. This covers both action failures and a
+        /// `:can-i` denial, which is an answer rather than a watch error but
+        /// still wants to read as a "no".
+        err: bool,
     },
     /// A panic in a background task, reported by the process panic hook.
     /// Deliberately generation-free: it must surface no matter which view is
