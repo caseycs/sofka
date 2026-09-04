@@ -2356,7 +2356,8 @@ async fn an_action_failure_is_never_silently_dropped() {
         Some("delete web failed: forbidden")
     );
 
-    // Borrowing does not take ownership: the describe still reports normally.
+    // Borrowing does not take ownership: the describe still reports normally,
+    // but completing that report must not erase the sticky action failure.
     app.handle_msg(Msg::Detail {
         generation: app.generation,
         claim: describe,
@@ -2364,7 +2365,10 @@ async fn an_action_failure_is_never_silently_dropped() {
         lines: vec!["Name: api".into()],
         warn: None,
     });
-    assert!(app.flash.is_empty(), "{}", app.flash);
+    assert_eq!(app.mode, Mode::Detail);
+    assert_eq!(app.flash, "delete web failed: forbidden");
+    assert!(app.flash_err);
+    assert!(app.status_claim.is_none());
 
     // A failure that cannot even borrow the bar — a newer operation has
     // already put a finished result there — is still recorded for `:debug`.

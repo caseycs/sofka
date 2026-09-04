@@ -2227,11 +2227,16 @@ impl App {
     /// bar. Its document/result may still be applied after ownership moves.
     pub(super) fn clear_claimed_status(&mut self, claim: StatusClaim) {
         if self.owns_status(claim) {
+            self.status_claim = None;
+            // A stale action failure may borrow this operation's progress
+            // flash. Completing a report must relinquish its claim without
+            // erasing that sticky failure from the bar.
+            if self.flash_err {
+                return;
+            }
             self.flash.clear();
-            self.flash_err = false;
             self.flash_seen.clear();
             self.flash_sticky = false;
-            self.status_claim = None;
         }
     }
 
