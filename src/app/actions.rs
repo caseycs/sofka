@@ -1821,8 +1821,8 @@ impl App {
         if self.deny_readonly() {
             return;
         }
-        if !self.flux_suspendable() && !self.cronjob_kind() {
-            self.flash_warn("suspend/resume only applies to CronJobs and Flux resources (ks/hr/git-, helm-, oci-repos, buckets, image automation, alerts, receivers)");
+        if !self.flux_suspendable() && !self.cronjob_kind() && !self.argocd_kind() {
+            self.flash_warn("suspend/resume only applies to CronJobs, Flux resources (ks/hr/git-, helm-, oci-repos, buckets, image automation, alerts, receivers), and ArgoCD Applications/ApplicationSets");
             return;
         }
         if self.action_targets().is_empty() {
@@ -1849,15 +1849,27 @@ impl App {
                 match choice {
                     Some("Suspend") => {
                         let targets = self.action_targets();
-                        self.do_set_suspend(targets, true);
+                        if self.argocd_kind() {
+                            self.do_argocd_suspend(targets, true);
+                        } else {
+                            self.do_flux_suspend(targets, true);
+                        }
                     }
                     Some("Resume") => {
                         let targets = self.action_targets();
-                        self.do_set_suspend(targets, false);
+                        if self.argocd_kind() {
+                            self.do_argocd_suspend(targets, false);
+                        } else {
+                            self.do_flux_suspend(targets, false);
+                        }
                     }
                     Some("Reconcile now") => {
                         let targets = self.action_targets();
-                        self.do_reconcile(targets);
+                        self.do_flux_reconcile(targets);
+                    }
+                    Some("Sync now") => {
+                        let targets = self.action_targets();
+                        self.do_argocd_sync(targets);
                     }
                     Some("Trigger now") => self.do_trigger_cronjobs(),
                     _ => {} // "Cancel" or nothing selected — do nothing.
@@ -1867,7 +1879,7 @@ impl App {
         }
     }
 
-    pub(super) fn do_set_suspend(&mut self, targets: Vec<(String, String)>, suspend: bool) {
+    pub(super) fn do_flux_suspend(&mut self, targets: Vec<(String, String)>, suspend: bool) {
         let Some(kind) = self.kind.clone() else {
             return;
         };
@@ -1907,12 +1919,12 @@ impl App {
     /// Force an immediate Flux reconciliation, bypassing the normal interval —
     /// patches `reconcile.fluxcd.io/requestedAt`, the same annotation `flux
     /// reconcile` sets, watched by every toolkit controller.
-    pub(super) fn do_reconcile(&mut self, targets: Vec<(String, String)>) {
+    pub(super) fn do_flux_reconcile(&mut self, targets: Vec<(String, String)>) {
         let Some(kind) = self.kind.clone() else {
             return;
         };
         if targets.is_empty() {
-            return; // see `do_set_suspend`
+            return; // see `do_flux_suspend`
         }
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
         let label = self.action_label(&targets);
@@ -1943,6 +1955,78 @@ impl App {
             claim,
             ok_message,
             |name, e| format!("reconcile {name} failed: {e}"),
+        );
+    }
+
+    /// Suspend/resume an ArgoCD Application or ApplicationSet. Applications
+    /// toggle `spec.syncPolicy.automated` (remove to suspend, restore to
+    /// resume); ApplicationSets toggle `spec.syncPolicy.applicationsSync`
+    /// (`"none"` to suspend, `"sync"` to resume) — different field, same
+    /// `argocd app suspend`/`resume` intent.
+    pub(super) fn do_argocd_suspend(&mut self, targets: Vec<(String, String)>, suspend: bool) {
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
+        if targets.is_empty() {
+            return; // see `do_flux_suspend`
+        }
+        let label = self.action_label(&targets);
+        self.note_action(if suspend { "suspend" } else { "resume" }, label);
+        let verb = if suspend { "suspending" } else { "resuming" };
+        let verb_done = if suspend { "suspended" } else { "resumed" };
+        let progress = if targets.len() == 1 {
+            format!("{verb} {}…", targets[0].0)
+        } else {
+            format!("{verb} {} {}…", targets.len(), self.kind_plural)
+        };
+        let claim = self.claim_status(progress);
+        self.marked.clear();
+        let ok_message = if targets.len() == 1 {
+            format!("{verb_done} {}", targets[0].0)
+        } else {
+            format!("{verb_done} {} {}", targets.len(), self.kind_plural)
+        };
+        let patch = if self.argocd_app_kind() {
+            Patch::Merge(argocd_suspend_patch(suspend))
+        } else {
+            Patch::Merge(argocd_appset_suspend_patch(suspend))
+        };
+        self.spawn_patch_action(kind, targets, patch, claim, ok_message, move |name, e| {
+            format!("{verb} {name} failed: {e}")
+        });
+    }
+
+    /// Trigger an ArgoCD Application sync by patching the top-level `operation`
+    /// field — the same mechanism the ArgoCD API server's `SyncApplication`
+    /// endpoint uses. The controller fills in the revision from `spec.source`.
+    pub(super) fn do_argocd_sync(&mut self, targets: Vec<(String, String)>) {
+        let Some(kind) = self.kind.clone() else {
+            return;
+        };
+        if targets.is_empty() {
+            return; // see `do_flux_suspend`
+        }
+        let label = self.action_label(&targets);
+        self.note_action("sync", label);
+        let progress = if targets.len() == 1 {
+            format!("syncing {}…", targets[0].0)
+        } else {
+            format!("syncing {} {}…", targets.len(), self.kind_plural)
+        };
+        let claim = self.claim_status(progress);
+        self.marked.clear();
+        let ok_message = if targets.len() == 1 {
+            format!("sync requested: {}", targets[0].0)
+        } else {
+            format!("sync requested: {} {}", targets.len(), self.kind_plural)
+        };
+        self.spawn_patch_action(
+            kind,
+            targets,
+            Patch::Merge(argocd_sync_patch()),
+            claim,
+            ok_message,
+            |name, e| format!("sync {name} failed: {e}"),
         );
     }
 

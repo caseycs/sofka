@@ -202,8 +202,9 @@ impl App {
                 }
             }
             // Action menu on the marked rows, or current: Flux
-            // suspend/resume/reconcile, CronJob trigger/suspend/resume. On
-            // pods, `t` is the file-transfer menu (kubectl cp) instead.
+            // suspend/resume/reconcile, ArgoCD Application suspend/resume/sync,
+            // ArgoCD ApplicationSet suspend/resume, CronJob trigger/suspend/resume.
+            // On pods, `t` is the file-transfer menu (kubectl cp) instead.
             KeyCode::Char('t') => {
                 if self.kind_plural == "pods" {
                     self.request_transfer();

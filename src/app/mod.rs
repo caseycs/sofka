@@ -85,6 +85,10 @@ const FLUX_SUSPENDABLE_KINDS: &[&str] = &[
     "receivers",
 ];
 
+/// The ArgoCD CRD group. Used to disambiguate the very generic `applications`
+/// and `applicationsets` plurals — only `argoproj.io` kinds get the `t` menu.
+const ARGOCD_GROUP: &str = "argoproj.io";
+
 /// Items in the Flux action menu (`t`), in display order. Deliberately a menu
 /// — not a single-key toggle — so suspending something always takes an
 /// explicit, visible choice rather than one accidental keystroke. "Reconcile
@@ -97,6 +101,22 @@ pub const FLUX_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Reconcile now", "Ca
 /// job --from=cronjob/…` does; Suspend/Resume patch `spec.suspend` exactly
 /// like the Flux menu (CronJobs share the field).
 pub const CRONJOB_MENU_ITEMS: &[&str] = &["Trigger now", "Suspend", "Resume", "Cancel"];
+
+/// Items in the ArgoCD Application action menu (`t`), in display order. "Suspend"
+/// disables auto-sync by removing `spec.syncPolicy.automated` (the same merge
+/// patch `argocd app suspend` applies); "Resume" re-enables it with an empty
+/// `automated` object (the `argocd app resume` default). "Sync now" patches
+/// the top-level `operation` field with a sync request, which the ArgoCD
+/// application controller picks up and processes — the same mechanism the
+/// `argocd app sync` API endpoint uses internally. No `argocd` binary.
+pub const ARGOCD_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Sync now", "Cancel"];
+
+/// Items in the ArgoCD ApplicationSet action menu (`t`). Suspend/Resume
+/// toggle `spec.syncPolicy.automated` exactly like Application. There is no
+/// "Sync now" — ApplicationSet has no `operation` field; it generates
+/// Applications on its own schedule, and syncing those individually is an
+/// Application-level action.
+pub const ARGOCD_APPSET_MENU_ITEMS: &[&str] = &["Suspend", "Resume", "Cancel"];
 
 /// Items in the pod file-transfer menu (`t` on a pod), in display order. Both
 /// directions shell out to `kubectl cp` (which needs `tar` in the container),

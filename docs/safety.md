@@ -50,8 +50,8 @@ max_bulk = 1                     # no bulk deletes in kube-system
 
 ## Managed-resource mutation warnings
 
-Before you edit, delete, scale, or otherwise change an object that Flux (or
-another controller) owns, sofka warns you that the next reconcile will revert the
+Before you edit, delete, scale, or otherwise change an object that Flux, ArgoCD,
+(or another controller) owns, sofka warns you that the next reconcile will revert the
 change or recreate the object. The point is to send you to the source instead of
 fighting the controller.
 

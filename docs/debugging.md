@@ -20,7 +20,7 @@ written to disk.
 ## Diff (`:diff`)
 
 A unified diff of the live object against its `last-applied-configuration`. When
-that annotation is missing - as it is for every Flux- or Helm-managed object,
+that annotation is missing - as it is for every Flux-, ArgoCD-, or Helm-managed object,
 which nothing ever `kubectl apply`s - sofka diffs against the previous revision
 this session's watch saw instead, so "what just changed?" has an answer on GitOps
 clusters. The last revision of up to 256 changed objects is kept in memory.

@@ -2203,10 +2203,10 @@ async fn action_progress_flashes_keep_the_ellipsis_convention() {
     );
     assert!(app.flash.ends_with('…'), "set-image: {}", app.flash);
 
-    app.do_set_suspend(targets.clone(), true);
+    app.do_flux_suspend(targets.clone(), true);
     assert!(app.flash.ends_with('…'), "suspend: {}", app.flash);
 
-    app.do_reconcile(targets.clone());
+    app.do_flux_reconcile(targets.clone());
     assert!(app.flash.ends_with('…'), "reconcile: {}", app.flash);
 
     app.do_refresh_es(targets);
@@ -2240,9 +2240,9 @@ async fn an_action_with_no_targets_claims_nothing() {
 
     // `request_flux_menu` guards this, but the menu stays open across watch
     // updates — the selected row can be gone by the time Enter lands.
-    app.do_set_suspend(Vec::new(), true);
+    app.do_flux_suspend(Vec::new(), true);
     assert!(app.flash.is_empty(), "{}", app.flash);
-    app.do_reconcile(Vec::new());
+    app.do_flux_reconcile(Vec::new());
     assert!(app.flash.is_empty(), "{}", app.flash);
 }
 
@@ -2896,6 +2896,267 @@ async fn cronjob_trigger_acts_on_marked_rows() {
     app.handle_key(press(KeyCode::Enter)).unwrap(); // "Trigger now"
     assert!(app.flash.contains("triggering 2 cronjobs"), "{}", app.flash);
     assert!(app.marked.is_empty()); // cleared after the bulk action
+}
+
+fn argocd_app(name: &str) -> serde_json::Value {
+    json!({
+        "apiVersion": "argoproj.io/v1alpha1", "kind": "Application",
+        "metadata": {"name": name, "namespace": "argocd"},
+        "spec": {
+            "source": {"repoURL": "https://github.com/example/repo", "targetRevision": "HEAD",
+                       "path": "manifests"},
+            "destination": {"server": "https://kubernetes.default.svc", "namespace": "default"},
+            "syncPolicy": {"automated": {"prune": true, "selfHeal": true}}
+        }
+    })
+}
+
+#[tokio::test]
+async fn argocd_menu_opens_with_sync_items() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert_eq!(app.action_menu_items(), ARGOCD_MENU_ITEMS);
+    assert_eq!(app.flux_menu_state.selected(), Some(0)); // "Suspend"
+}
+
+#[tokio::test]
+async fn argocd_menu_suspend() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap(); // "Suspend"
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("suspending guestbook"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn argocd_menu_resume() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let idx = ARGOCD_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Resume")
+        .unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(app.flash.contains("resuming guestbook"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn argocd_menu_sync_now() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let idx = ARGOCD_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Sync now")
+        .unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(app.flash.contains("syncing guestbook"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn argocd_menu_suspend_acts_on_marked_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+    apply(&mut app, argocd_app("frontend"));
+    app.marked.insert("argocd/guestbook".into());
+    app.marked.insert("argocd/frontend".into());
+
+    app.request_flux_menu();
+    app.handle_key(press(KeyCode::Enter)).unwrap(); // "Suspend"
+    assert!(
+        app.flash.contains("suspending 2 applications"),
+        "{}",
+        app.flash
+    );
+    assert!(app.marked.is_empty());
+}
+
+#[tokio::test]
+async fn argocd_menu_rejects_non_argocd_applications() {
+    let (mut app, _rx) = test_app();
+    // "applications" from a non-argoproj group should not get the ArgoCD menu.
+    // The fake cluster only registers argoproj.io/applications, so a different
+    // group would need its own registration — here we verify that a known
+    // non-ArgoCD kind is rejected.
+    app.switch_kind("pods");
+    apply(
+        &mut app,
+        json!({"apiVersion": "v1", "kind": "Pod",
+               "metadata": {"name": "a", "namespace": "default"}}),
+    );
+    app.request_flux_menu();
+    assert!(app.flash_err);
+    assert_eq!(app.mode, Mode::Table);
+}
+
+#[tokio::test]
+async fn argocd_menu_cancel_item_does_nothing() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+    let flash_before = app.flash.clone();
+    app.request_flux_menu();
+    let cancel = ARGOCD_MENU_ITEMS.iter().position(|s| *s == "Cancel").unwrap();
+    app.flux_menu_state.select(Some(cancel));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert_eq!(app.flash, flash_before);
+}
+
+#[tokio::test]
+async fn argocd_menu_requires_explicit_choice_not_a_single_key() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applications");
+    apply(&mut app, argocd_app("guestbook"));
+
+    // `t` opens the menu — nothing is patched yet.
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert_eq!(app.flux_menu_state.selected(), Some(0)); // "Suspend"
+
+    // Esc backs out without doing anything.
+    app.handle_key(press(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Table);
+    assert!(!app.flash.contains("suspending"));
+}
+
+#[test]
+fn argocd_suspend_patch_removes_automated() {
+    let p = argocd_suspend_patch(true);
+    assert_eq!(p, json!({"spec": {"syncPolicy": {"automated": null}}}));
+}
+
+#[test]
+fn argocd_resume_patch_restores_automated() {
+    let p = argocd_suspend_patch(false);
+    assert_eq!(p, json!({"spec": {"syncPolicy": {"automated": {}}}}));
+}
+
+#[test]
+fn argocd_appset_suspend_patch_removes_field() {
+    let p = argocd_appset_suspend_patch(true);
+    assert_eq!(
+        p,
+        json!({"spec": {"syncPolicy": {"applicationsSync": null}}})
+    );
+}
+
+#[test]
+fn argocd_appset_resume_patch_sets_sync() {
+    let p = argocd_appset_suspend_patch(false);
+    assert_eq!(
+        p,
+        json!({"spec": {"syncPolicy": {"applicationsSync": "sync"}}})
+    );
+}
+
+#[test]
+fn argocd_sync_patch_sets_operation() {
+    let p = argocd_sync_patch();
+    assert_eq!(p, json!({"operation": {"sync": {}}}));
+}
+
+fn argocd_appset(name: &str) -> serde_json::Value {
+    json!({
+        "apiVersion": "argoproj.io/v1alpha1", "kind": "ApplicationSet",
+        "metadata": {"name": name, "namespace": "argocd"},
+        "spec": {
+            "generators": [{"list": {"elements": [{"cluster": "dev-weu", "url": "https://kubernetes.default.svc"}]}}],
+            "template": {
+                "metadata": {"name": "app-{{cluster}}"},
+                "spec": {
+                    "source": {"repoURL": "https://github.com/example/repo", "path": "manifests"},
+                    "destination": {"server": "{{url}}", "namespace": "default"},
+                    "syncPolicy": {"automated": {"prune": true}}
+                }
+            },
+            "syncPolicy": {"applicationsSync": "sync"}
+        }
+    })
+}
+
+#[tokio::test]
+async fn argocd_appset_menu_opens_without_sync() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applicationsets");
+    apply(&mut app, argocd_appset("guestbook-set"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    assert_eq!(app.mode, Mode::FluxMenu);
+    assert_eq!(app.action_menu_items(), ARGOCD_APPSET_MENU_ITEMS);
+    // No "Sync now" in the menu.
+    assert!(!ARGOCD_APPSET_MENU_ITEMS.contains(&"Sync now"));
+}
+
+#[tokio::test]
+async fn argocd_appset_menu_suspend() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applicationsets");
+    apply(&mut app, argocd_appset("guestbook-set"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    app.handle_key(press(KeyCode::Enter)).unwrap(); // "Suspend"
+    assert_eq!(app.mode, Mode::Table);
+    assert!(
+        app.flash.contains("suspending guestbook-set"),
+        "{}",
+        app.flash
+    );
+}
+
+#[tokio::test]
+async fn argocd_appset_menu_resume() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applicationsets");
+    apply(&mut app, argocd_appset("guestbook-set"));
+
+    app.handle_key(press(KeyCode::Char('t'))).unwrap();
+    let idx = ARGOCD_APPSET_MENU_ITEMS
+        .iter()
+        .position(|s| *s == "Resume")
+        .unwrap();
+    app.flux_menu_state.select(Some(idx));
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert!(
+        app.flash.contains("resuming guestbook-set"),
+        "{}",
+        app.flash
+    );
+}
+
+#[tokio::test]
+async fn argocd_appset_suspend_acts_on_marked_rows() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("applicationsets");
+    apply(&mut app, argocd_appset("set-a"));
+    apply(&mut app, argocd_appset("set-b"));
+    app.marked.insert("argocd/set-a".into());
+    app.marked.insert("argocd/set-b".into());
+
+    app.request_flux_menu();
+    app.handle_key(press(KeyCode::Enter)).unwrap(); // "Suspend"
+    assert!(
+        app.flash.contains("suspending 2 applicationsets"),
+        "{}",
+        app.flash
+    );
+    assert!(app.marked.is_empty());
 }
 
 #[test]

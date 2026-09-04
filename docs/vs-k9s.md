@@ -15,18 +15,21 @@ For measured start time, memory use, command start time, and binary size, see th
   function that turns a `DynamicObject` into cells, with curated columns for
   common kinds and a NAME/AGE fallback for everything else. A CRD with no
   renderer still lists, sorts, and filters correctly on day one.
-- **Flux CD is built in, not a plugin.** `t` opens a
-  suspend/resume/reconcile-now menu for Kustomizations, HelmReleases,
+- **Flux CD and Argo CD are built in, not plugins.** `t` opens a
+  suspend/resume/reconcile-now menu for Flux Kustomizations, HelmReleases,
   git/helm/oci repositories, buckets, image automation, and notification alerts
-  and receivers. sofka patches `spec.suspend` and the
-  `reconcile.fluxcd.io/requestedAt` annotation through the Kubernetes API - no
-  `flux` binary. Works with bulk multiselect too.
+  and receivers, and a suspend/resume/sync-now menu for ArgoCD Applications
+  (suspend/resume only for ApplicationSets).
+  sofka patches `spec.suspend`, `spec.syncPolicy.automated`, the
+  `reconcile.fluxcd.io/requestedAt` annotation, and the ArgoCD `operation`
+  field through the Kubernetes API - no `flux` or `argocd` binary. Works with
+  bulk multiselect too.
 - **Port-forwards run in the background.** Starting one doesn't freeze the TUI
   for its lifetime. `:pf` lists the active forwards and stops them individually
   while the others keep running. sofka tears all of them down on quit instead of
   orphaning them.
 - **Bulk actions with multiselect.** `space` marks rows for delete, kill, or
-  Flux suspend/resume/reconcile across many resources at once.
+  Flux/ArgoCD suspend/resume/reconcile/sync across many resources at once.
 - **CRD rows drill into their custom resources**, not their YAML. `enter` on a
   CustomResourceDefinition resolves its served version and lists the actual
   objects.
@@ -68,9 +71,9 @@ Design choices you can verify in the source, not marketing numbers.
   data or the filter text changes, guarded by a dirty flag - not on every frame
   or every keystroke across the full object set.
 - **No subprocess overhead on hot paths.** Delete, scale,
-  suspend/resume/reconcile, and CRD drill-down are direct kube API calls (JSON
-  merge-patches over the existing client). No forking `kubectl` or `flux` per
-  action.
+  suspend/resume/reconcile/sync, and CRD drill-down are direct kube API calls
+  (JSON merge-patches over the existing client). No forking `kubectl`, `flux`,
+  or `argocd` per action.
 - **Generation-tagged streams.** Changing views doesn't wait for the old watcher
   to tear down. A generation tag identifies stale messages and sofka drops them
   the instant a newer watch takes over, so navigation never stalls behind a slow

@@ -663,9 +663,20 @@ impl Cluster {
             "snapshots".to_string(),
             mk("kopiur.home-operations.com", "Snapshot", "snapshots", true),
         );
+        // ArgoCD CRDs, for the `t` suspend/resume/sync menu.
+        registry.insert(
+            "applications".to_string(),
+            mk("argoproj.io", "Application", "applications", true),
+        );
+        registry.insert(
+            "applicationsets".to_string(),
+            mk("argoproj.io", "ApplicationSet", "applicationsets", true),
+        );
         // Mirror discover(): catalogued kinds with a group also resolve by
         // (and are listed under) their group-qualified name.
         let mut catalog: Vec<String> = [
+            "applications",
+            "applicationsets",
             "certificates",
             "deployments",
             "events",

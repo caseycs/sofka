@@ -33,6 +33,37 @@ pub(super) fn reconcile_patch(requested_at: &str) -> Value {
     })
 }
 
+/// ArgoCD Application suspend/resume patch. Suspend removes
+/// `spec.syncPolicy.automated` (merge-patch `null` deletes the field), resume
+/// restores it as an empty object — the same `argocd app suspend`/`resume`
+/// semantics.
+pub(super) fn argocd_suspend_patch(suspend: bool) -> Value {
+    if suspend {
+        json!({ "spec": { "syncPolicy": { "automated": null } } })
+    } else {
+        json!({ "spec": { "syncPolicy": { "automated": {} } } })
+    }
+}
+
+/// ArgoCD ApplicationSet suspend/resume patch. ApplicationSet has no
+/// `automated` field — it uses `spec.syncPolicy.applicationsSync` (a string:
+/// `sync`, `create-only`, `create-update`, `create-delete`). Suspend removes
+/// the field entirely (merge-patch `null`), resume restores it to `sync`.
+pub(super) fn argocd_appset_suspend_patch(suspend: bool) -> Value {
+    if suspend {
+        json!({ "spec": { "syncPolicy": { "applicationsSync": null } } })
+    } else {
+        json!({ "spec": { "syncPolicy": { "applicationsSync": "sync" } } })
+    }
+}
+
+/// ArgoCD sync patch. Setting the top-level `operation.sync` field triggers a
+/// manual sync — the same mechanism the ArgoCD API server's `SyncApplication`
+/// endpoint uses. The controller fills in the revision from `spec.source`.
+pub(super) fn argocd_sync_patch() -> Value {
+    json!({ "operation": { "sync": {} } })
+}
+
 pub(super) fn external_secret_refresh_patch(force_sync: &str) -> Value {
     json!({
         "metadata": { "annotations": { "force-sync": force_sync } }
@@ -322,6 +353,30 @@ impl App {
         FLUX_SUSPENDABLE_KINDS.contains(&self.kind_plural.as_str())
     }
 
+    /// Whether the current kind is an ArgoCD CRD (Application or
+    /// ApplicationSet, group `argoproj.io`). The plurals are generic, so the
+    /// group is checked too — only the real ArgoCD CRDs get the `t` menu.
+    pub fn argocd_kind(&self) -> bool {
+        matches!(
+            self.kind_plural.as_str(),
+            "applications" | "applicationsets"
+        ) && self
+            .kind
+            .as_ref()
+            .is_some_and(|k| k.ar.group == ARGOCD_GROUP)
+    }
+
+    /// Whether the current kind is an ArgoCD Application (not ApplicationSet).
+    /// Gates "Sync now", which patches the `operation` field — ApplicationSet
+    /// has no such field.
+    pub fn argocd_app_kind(&self) -> bool {
+        self.kind_plural == "applications"
+            && self
+                .kind
+                .as_ref()
+                .is_some_and(|k| k.ar.group == ARGOCD_GROUP)
+    }
+
     /// Whether the current kind is CronJobs, which get their own `t` menu
     /// (trigger/suspend/resume).
     pub fn cronjob_kind(&self) -> bool {
@@ -332,6 +387,10 @@ impl App {
     pub fn action_menu_items(&self) -> &'static [&'static str] {
         if self.cronjob_kind() {
             CRONJOB_MENU_ITEMS
+        } else if self.argocd_app_kind() {
+            ARGOCD_MENU_ITEMS
+        } else if self.argocd_kind() {
+            ARGOCD_APPSET_MENU_ITEMS
         } else {
             FLUX_MENU_ITEMS
         }

@@ -107,6 +107,12 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   (resolved the way helm-controller composes `releaseName`/`storageNamespace`):
   `⏎` shows a revision's values, `y` the rendered manifest, `d` the NOTES, `r`
   rolls back.
+- **Argo CD controls** (`t`) - a suspend/resume/sync-now menu for ArgoCD
+  Applications, and a suspend/resume menu for ApplicationSets, built on native
+  Kubernetes API patches. Suspend removes `spec.syncPolicy.automated`, resume
+  restores it, and sync-now patches the top-level `operation` field — the same
+  mechanism the ArgoCD API server uses internally. No `argocd` binary needed.
+  Works with bulk multiselect.
 - **GitOps view** (`:gitops` / `:flux`) - the Flux ownership and reconciliation
   chain for the selection: the owning Kustomization/HelmRelease, its source
   (GitRepository/OCIRepository/HelmRepository) with applied and latest revision,

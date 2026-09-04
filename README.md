@@ -36,6 +36,8 @@ architecture. The short version:
 - **Flux CD built in** - `t` suspends, resumes, and reconciles through native API
   patches. No `flux` binary. Plus a native Helm inspector that decodes release
   Secrets itself.
+- **Argo CD built in** - `t` suspends, resumes, and syncs ArgoCD Applications
+  and ApplicationSets through native API patches. No `argocd` binary.
 - **It tells you why something is broken** - `X` opens a deterministic,
   evidence-based incident view. No AI, no external service.
 - **Bulk actions** - `space` marks rows for delete, kill, or Flux actions across
@@ -125,7 +127,7 @@ The essentials. `?` in the app shows everything, or see the
 | `X` / `T`            | explain why it's unhealthy / state-change timeline                                                |
 | `s` / `e` / `a`      | shell or scale / edit in `$EDITOR` / attach                                                       |
 | `f`                  | port-forward, in the background (`:pf` manages them)                                              |
-| `t`                  | Flux menu · CronJob trigger · pod file transfer                                                   |
+| `t`                  | Flux/ArgoCD menu · CronJob trigger · pod file transfer                                                   |
 | `r` / `i`            | rollout restart / set container image                                                             |
 | `ctrl-d` / `ctrl-k`  | delete / force-delete (marked rows, or current)                                                   |
 | `S` / `w` / `ctrl-e` | sort picker / wide columns / compact mode                                                         |
