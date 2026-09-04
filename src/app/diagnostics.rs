@@ -28,6 +28,10 @@ impl App {
             blank_as(&self.cluster.cluster_url, "(unknown)")
         ));
         lines.push(format!(
+            "  k8s rev:     {}",
+            blank_as(&self.cluster.server_version, "(unknown)")
+        ));
+        lines.push(format!(
             "  namespace:   {}",
             if self.namespace.is_empty() {
                 "(all)"
@@ -57,6 +61,13 @@ impl App {
         match &self.last_error {
             Some(e) => lines.push(format!("  last error: {e}")),
             None => lines.push("  last error: none".into()),
+        }
+
+        lines.push(String::new());
+        lines.push("Actions".into());
+        match &self.last_action_error {
+            Some(e) => lines.push(format!("  last failure: {e}")),
+            None => lines.push("  last failure: none".into()),
         }
 
         lines.push(String::new());

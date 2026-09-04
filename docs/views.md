@@ -47,6 +47,38 @@ the layout. By default columns overlay the curated ones: a matching header
 replaces it in place, new columns go before AGE. Invalid entries are skipped with
 a warning in the app - they never take down the TUI.
 
+### Pods and nodes
+
+Custom columns also overlay sofka's curated core-resource views. Pods already
+show `IP` and `NODE` after toggling wide mode with `w`, and nodes always show
+`VERSION`. Extra node topology and provisioning details can come from labels:
+
+```toml
+# Karpenter example; adjust provider-specific NODEPOOL and TYPE label names.
+[views."v1/nodes"]
+
+[[views."v1/nodes".columns]]
+name = "NODEPOOL"
+path = "/metadata/labels/karpenter.sh~1nodepool"
+
+[[views."v1/nodes".columns]]
+name = "ZONE"
+path = "/metadata/labels/topology.kubernetes.io~1zone"
+
+[[views."v1/nodes".columns]]
+name = "INSTANCE"
+path = "/metadata/labels/node.kubernetes.io~1instance-type"
+
+[[views."v1/nodes".columns]]
+name = "TYPE"
+path = "/metadata/labels/karpenter.sh~1capacity-type"
+```
+
+In a JSON Pointer, `/` inside a label name must be escaped as `~1`. For example,
+EKS commonly uses `eks.amazonaws.com~1nodegroup` for `NODEPOOL` and
+`eks.amazonaws.com~1capacityType` for `TYPE`. Add `wide = true` to any custom
+column that should appear only after pressing `w`.
+
 ### Navigating between kinds
 
 sofka's drill-downs are relationships between kinds, expressed as a watch

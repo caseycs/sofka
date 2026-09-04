@@ -143,6 +143,28 @@ pub fn helm_secret(i: usize) -> DynamicObject {
     .expect("bench helm fixture is valid")
 }
 
+/// The decompressed release JSON inside a fixture secret — exactly the bytes
+/// `helm::decode` hands to serde. Lets a bench separate the JSON parse from
+/// the base64 + gunzip in front of it.
+pub fn helm_release_json(i: usize) -> Vec<u8> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use std::io::Read as _;
+
+    let secret = helm_secret(i);
+    let wire = secret
+        .data
+        .pointer("/data/release")
+        .and_then(serde_json::Value::as_str)
+        .expect("fixture carries a release payload");
+    let helm_encoded = BASE64.decode(wire).expect("outer base64");
+    let gzipped = BASE64.decode(helm_encoded).expect("inner base64");
+    let mut gz = flate2::read::GzDecoder::new(&gzipped[..]);
+    let mut json = Vec::new();
+    gz.read_to_end(&mut json).expect("gunzip");
+    json
+}
+
 /// Criterion runs benchmarks on a bare thread, but building a kube `Client`
 /// spawns a tower buffer worker and panics without a reactor. One process-wide
 /// runtime, kept alive for the whole run, is enough: the offline client never
@@ -214,6 +236,34 @@ pub fn helm_app(n: usize) -> (App, Receiver<Msg>) {
     a.kind_plural = "helm".to_string();
     seed(&mut a, (0..n).map(helm_secret));
     (a, rx)
+}
+
+/// The context switcher's per-row fleet marker, exactly as `draw_contexts`
+/// computes it: one membership test per visible context, per frame.
+pub fn fleet_marks_for_all(app: &App) -> usize {
+    app.filtered_contexts()
+        .iter()
+        .filter(|c| app.is_fleet_context(c))
+        .count()
+}
+
+/// An app whose context switcher lists `n` contexts, half of them in the
+/// fleet — the shape the switcher draws.
+pub fn contexts_app(n: usize) -> (App, Receiver<Msg>) {
+    let (mut a, rx) = app();
+    a.ctx_list = (0..n).map(|i| format!("cluster-{i:03}")).collect();
+    a.fleet_cfg.contexts = (0..n)
+        .step_by(2)
+        .map(|i| format!("cluster-{i:03}"))
+        .collect();
+    (a, rx)
+}
+
+/// Mark the row ordering stale *without* a store write — a filter keystroke
+/// or sort toggle. The distinction matters for anything cached against store
+/// contents: a store write has to recompute it, this does not.
+pub fn invalidate(app: &App) {
+    app.bench_invalidate_rows();
 }
 
 /// Mark the row ordering stale the way one watch event does, so a bench

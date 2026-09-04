@@ -207,10 +207,98 @@ fn log_viewport(c: &mut Criterion) {
     g.finish();
 }
 
+/// 3.2 — the same rebuild with a *structured* comparison filter. Unlike the
+/// fuzzy group above, every object pays `column_cell` (one column extracted
+/// per object) plus the comparison itself, so this is where per-object
+/// allocation in `eval_cmp` shows up.
+fn filter_cmp(c: &mut Criterion) {
+    let mut g = c.benchmark_group("filter_cmp");
+    let n = 2_000usize;
+    for (label, pat) in [
+        ("str_curated", "status=Running"),
+        ("str_ns", "namespace=ns-3"),
+        ("num", "restarts>=5"),
+    ] {
+        let (mut app, _rx) = bs::pods_app(n);
+        app.filter = pat.to_string();
+        black_box(app.row_count());
+        g.bench_with_input(BenchmarkId::new(label, n), &n, |b, &n| {
+            let mut i = 0usize;
+            b.iter(|| {
+                bs::touch_one(&mut app, i % n);
+                i += 1;
+                black_box(app.row_count())
+            });
+        });
+    }
+    g.finish();
+}
+
+/// 3.4 — the aggregated Helm release list. Every rebuild dedups the store
+/// down to the latest revision per release. `refilter` is the case a cache
+/// can help: the order is stale but the store has not changed, so the dedup
+/// result is still valid.
+fn helm_rows(c: &mut Criterion) {
+    let mut g = c.benchmark_group("helm_rows");
+    for n in [300usize, 1_200] {
+        let (app, _rx) = bs::helm_app(n);
+        black_box(app.row_count());
+        g.bench_with_input(BenchmarkId::new("refilter", n), &n, |b, _| {
+            b.iter(|| {
+                bs::invalidate(&app);
+                black_box(app.row_count())
+            });
+        });
+    }
+    g.finish();
+}
+
+/// 2.7 — the context switcher's fleet column: one membership test per listed
+/// context, on every frame the picker is open.
+fn fleet_marks(c: &mut Criterion) {
+    let mut g = c.benchmark_group("fleet_marks");
+    for n in [32usize, 128] {
+        let (app, _rx) = bs::contexts_app(n);
+        g.bench_with_input(BenchmarkId::new("draw", n), &n, |b, _| {
+            b.iter(|| black_box(bs::fleet_marks_for_all(&app)));
+        });
+    }
+    g.finish();
+}
+
+/// 4.3.2A — where a Helm release decode actually spends its time. Swapping in
+/// a SIMD JSON parser is only worth a dependency if the parse dominates.
+/// `full` is `helm::decode` end to end; `parse_only` is a DOM parse of the
+/// same bytes, which upper-bounds the parse share (the real code deserializes
+/// into a typed struct, which is cheaper than building a `Value`).
+fn helm_decode(c: &mut Criterion) {
+    let mut g = c.benchmark_group("helm_decode");
+    let secret = bs::helm_secret(1);
+    let json = bs::helm_release_json(1);
+    g.bench_function("full", |b| {
+        b.iter(|| black_box(sofka::helm::decode(black_box(&secret))));
+    });
+    g.bench_function("parse_only", |b| {
+        b.iter(|| {
+            let v: serde_json::Value =
+                serde_json::from_slice(black_box(&json)).expect("fixture json");
+            black_box(v)
+        });
+    });
+    g.bench_function("parse_typed", |b| {
+        b.iter(|| black_box(sofka::helm::parse_release_json(black_box(&json))));
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     rows_cache,
     filter,
+    filter_cmp,
+    helm_rows,
+    fleet_marks,
+    helm_decode,
     cells,
     metadata,
     log_filter,

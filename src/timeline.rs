@@ -17,8 +17,11 @@ use k8s_openapi::jiff::Timestamp;
 use kube::core::DynamicObject;
 use serde_json::Value;
 
-/// How many entries to keep per object before dropping the oldest.
-const MAX_PER_OBJECT: usize = 200;
+/// How many entries to keep per object before dropping the oldest. The
+/// detail view only ever shows one object's history at a time and far fewer
+/// than 200 transitions are useful there — kept modest to bound
+/// `MAX_PER_OBJECT * MAX_OBJECTS` worst-case memory.
+const MAX_PER_OBJECT: usize = 50;
 /// How many distinct objects to keep history for before evicting the
 /// least-recently-touched one.
 const MAX_OBJECTS: usize = 2000;

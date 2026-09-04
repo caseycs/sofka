@@ -4,6 +4,7 @@
 //! drills into a child (workload -> pods, pod -> containers, namespace ->
 //! re-scope the previous view), and `esc` pops back.
 
+use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -24,16 +25,27 @@ use kube::api::{
 };
 use kube::core::{DynamicObject, TypeMeta};
 use kube::discovery::ApiResource;
-use kube::runtime::watcher;
+use kube::runtime::{utils::Backoff, watcher};
 use ratatui::widgets::{ListState, TableState};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 use crate::k8s::{Cluster, Kind};
-use crate::store::{Msg, Pulse, RowKey, Store, StoreMutation, XrayItem, row_key};
+use crate::store::{Msg, Pulse, RowKey, StatusClaim, Store, StoreMutation, XrayItem, row_key};
 
 pub(crate) use guardrails::ConfirmLevel;
+
+impl App {
+    /// Mark the row ordering stale without touching the store — the shape of a
+    /// filter keystroke or a sort toggle. `invalidate_rows` is `pub(super)`;
+    /// this exposes it to `benchsupport` under the bench feature only, rather
+    /// than widening it for the shipped binary.
+    #[cfg(feature = "bench")]
+    pub fn bench_invalidate_rows(&self) {
+        self.invalidate_rows();
+    }
+}
 
 /// Larger cap used while autoscroll is paused: we stop trimming so the line
 /// indices don't shift under the frozen view (which would make it appear to
@@ -46,6 +58,15 @@ const MAX_LOG_LINES_PAUSED: usize = 100_000;
 /// flushing quickly for low-volume logs.
 const LOG_BATCH_LINES: usize = 64;
 const LOG_BATCH_MS: u64 = 50;
+
+/// Initial status-bar hint. Unlike transient action results, this stays visible
+/// until another interaction replaces it.
+const WELCOME_FLASH: &str =
+    "Welcome to sofka — ':' resource · enter drill · d describe · l logs · ? help";
+
+/// How long a finished, successful flash stays on screen before the 1s tick
+/// clears it (see [`App::expire_flash`]).
+const FLASH_TTL: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Flux CD resource kinds whose spec has a `suspend: bool` field — every kind
 /// with a corresponding `flux suspend/resume` subcommand: kustomize- and
@@ -81,6 +102,18 @@ pub const CRONJOB_MENU_ITEMS: &[&str] = &["Trigger now", "Suspend", "Resume", "C
 /// directions shell out to `kubectl cp` (which needs `tar` in the container),
 /// prompting for the source and destination paths.
 pub const TRANSFER_MENU_ITEMS: &[&str] = &["Download from pod", "Upload to pod", "Cancel"];
+
+/// An asynchronous operation's ownership of the shared status bar.
+#[derive(Debug)]
+pub(super) struct ActiveStatusClaim {
+    claim: StatusClaim,
+    /// Exact text currently displayed for this claim, including a background
+    /// message that is only borrowing the bar.
+    text: String,
+    /// The owner still has a result to deliver. If borrowed transient text
+    /// expires first, preserve the claim against an empty bar.
+    pending: bool,
+}
 
 /// External Secrets Operator kinds that honour the `force-sync` annotation to
 /// trigger an immediate secret refresh. Both are namespaced; the cluster-scoped
@@ -1025,6 +1058,10 @@ struct RowsCache {
     /// Computed primary sort keys, valid per (sort header, resourceVersion) —
     /// a rebuild touches every object, but only changed rows re-extract.
     sort_keys: HashMap<RowKey, SortKeyEntry>,
+    /// Helm view only: the latest-revision dedup, paired with the store
+    /// version it was computed from. A rebuild staled by a filter keystroke or
+    /// a sort toggle leaves the store untouched, so the dedup still holds.
+    helm_latest: Option<(u64, HashSet<RowKey>)>,
 }
 
 struct CellCacheEntry {
@@ -1159,6 +1196,7 @@ pub struct App {
 
     pub mode: Mode,
     pub table_state: TableState,
+    pub table_page_rows: usize,
     /// Row keys (`ns/name`) marked for bulk actions via SPACE. Cleared whenever
     /// the view is (re)watched. Bulk actions target this set if non-empty, else
     /// the current selection.
@@ -1186,6 +1224,25 @@ pub struct App {
     pub cmd_sel: usize,
     pub flash: String,
     pub flash_err: bool,
+    /// Last flash text observed by [`App::expire_flash`], so a change can be
+    /// detected (and re-timestamped) without touching every call site that
+    /// sets `flash` directly.
+    pub(super) flash_seen: String,
+    pub(super) flash_since: std::time::Instant,
+    /// Keeps the current flash on screen indefinitely. Only the welcome hint
+    /// starts sticky; the first flash that replaces it clears the flag, so no
+    /// call site has to.
+    pub(super) flash_sticky: bool,
+    /// Monotonic source for asynchronous status-bar ownership claims.
+    pub(super) next_status_claim: u64,
+    /// Current claim and the exact text it owns. Comparing the text makes a
+    /// direct status assignment invalidate the claim even before the next
+    /// expiry tick observes that assignment.
+    pub(super) status_claim: Option<ActiveStatusClaim>,
+    /// Last action failure, recorded even when a newer operation owned the
+    /// status bar and the message could not be shown. Surfaced by `:debug`
+    /// so a failure is never lost outright.
+    pub last_action_error: Option<String>,
 
     pub detail: Scrollable,
     /// Search query for the help view (`?`), which has no backing
@@ -1495,6 +1552,7 @@ impl App {
             history_pos: 0,
             mode: Mode::Table,
             table_state: TableState::default(),
+            table_page_rows: 10,
             marked: HashSet::new(),
             sort_column: None,
             sort_desc: false,
@@ -1509,9 +1567,16 @@ impl App {
             command: String::new(),
             cmd_suggestions: Vec::new(),
             cmd_sel: 0,
-            flash: "Welcome to sofka — ':' resource · enter drill · d describe · l logs · ? help"
-                .into(),
+            flash: WELCOME_FLASH.into(),
             flash_err: false,
+            // Pre-seeded so the first tick sees no change and leaves the
+            // welcome hint's sticky flag alone.
+            flash_seen: WELCOME_FLASH.into(),
+            flash_since: std::time::Instant::now(),
+            flash_sticky: true,
+            next_status_claim: 0,
+            status_claim: None,
+            last_action_error: None,
             detail: Scrollable::empty(),
             help_filter: String::new(),
             doc_filter_return: Mode::Detail,
@@ -1635,6 +1700,7 @@ impl App {
                 keys: Vec::new(),
                 cells: HashMap::new(),
                 sort_keys: HashMap::new(),
+                helm_latest: None,
             }),
             log_provider: None,
             metrics_provider: None,

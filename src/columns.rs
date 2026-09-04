@@ -38,7 +38,7 @@ struct CellContext<'a> {
     name: &'a str,
     age: OnceCell<String>,
     pod: OnceCell<(String, String, String)>,
-    helm: OnceCell<Option<crate::helm::Release>>,
+    helm: OnceCell<Option<crate::helm::Summary>>,
 }
 
 impl<'a> CellContext<'a> {
@@ -64,9 +64,9 @@ impl<'a> CellContext<'a> {
     }
 
     /// The decoded Helm release backing this row's Secret, decoded once.
-    fn helm(&self) -> Option<&crate::helm::Release> {
+    fn helm(&self) -> Option<&crate::helm::Summary> {
         self.helm
-            .get_or_init(|| crate::helm::decode(self.obj))
+            .get_or_init(|| crate::helm::decode_summary(self.obj))
             .as_ref()
     }
 }

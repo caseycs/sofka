@@ -78,8 +78,7 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
-        self.flash = format!("assembling bundle for {name}…");
-        self.flash_err = false;
+        let claim = self.claim_status(format!("assembling bundle for {name}…"));
 
         tokio::spawn(async move {
             let ts = k8s_openapi::jiff::Timestamp::now();
@@ -270,6 +269,7 @@ impl App {
             let _ = tx
                 .send(Msg::Bundle {
                     generation: genr,
+                    claim,
                     title,
                     text,
                     filename,
@@ -285,6 +285,9 @@ impl App {
             return;
         };
         let path = std::env::temp_dir().join(filename);
+        // Claimed like every other async result, which needs a progress
+        // message to own — the write is quick, but the bar is shared.
+        let claim = self.claim_status("saving bundle…");
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
@@ -295,6 +298,7 @@ impl App {
             let _ = tx
                 .send(Msg::BundleSaved {
                     generation: genr,
+                    claim,
                     result,
                 })
                 .await;

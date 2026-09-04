@@ -30,6 +30,18 @@ impl App {
                     self.start_watch();
                     return Ok(());
                 }
+                KeyCode::Char('f')
+                    if self.mode == Mode::Table && key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    self.move_page(1);
+                    return Ok(());
+                }
+                KeyCode::Char('b')
+                    if self.mode == Mode::Table && key.modifiers == KeyModifiers::CONTROL =>
+                {
+                    self.move_page(-1);
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -108,8 +120,8 @@ impl App {
                     self.table_state.select(Some(len - 1));
                 }
             }
-            KeyCode::PageDown => self.move_selection(10),
-            KeyCode::PageUp => self.move_selection(-10),
+            KeyCode::PageDown => self.move_page(1),
+            KeyCode::PageUp => self.move_page(-1),
             // Horizontal column scroll for narrow panes: the NAMESPACE/NAME
             // prefix stays anchored, → hides the next column after it, ←
             // brings one back.
@@ -393,14 +405,12 @@ impl App {
                 // Mirror describe: stay put, swap to the doc view when output
                 // lands, so a view switch mid-run cleanly drops the result.
                 self.set_return_mode();
-                self.flash = plugin_flash(&name, n, "");
-                self.flash_err = false;
-                self.spawn_plugin(jobs, format!("{name} — output"), mode, timeout);
+                let claim = self.claim_status(plugin_flash(&name, n, ""));
+                self.spawn_plugin(jobs, format!("{name} — output"), mode, timeout, claim);
             }
             PluginMode::Background => {
-                self.flash = plugin_flash(&name, n, " (background)");
-                self.flash_err = false;
-                self.spawn_plugin(jobs, name, mode, timeout);
+                let claim = self.claim_status(plugin_flash(&name, n, " (background)"));
+                self.spawn_plugin(jobs, name, mode, timeout, claim);
             }
         }
     }
@@ -416,6 +426,7 @@ impl App {
         title: String,
         mode: PluginMode,
         timeout: u64,
+        claim: StatusClaim,
     ) {
         let tx = self.tx.clone();
         let genr = self.generation;
@@ -437,8 +448,8 @@ impl App {
                 .collect()
                 .await;
             let msg = match mode {
-                PluginMode::Popup => plugin_popup_msg(genr, title, timeout, results),
-                _ => plugin_bulk_msg(genr, title, timeout, results),
+                PluginMode::Popup => plugin_popup_msg(genr, claim, title, timeout, results),
+                _ => plugin_bulk_msg(genr, claim, title, timeout, results),
             };
             let _ = tx.send(msg).await;
         });
@@ -1330,6 +1341,7 @@ fn reduce_outcome(timeout: u64, outcome: SpawnOutcome) -> (bool, Vec<String>, St
 /// per job (with a `== label ==` header when there's more than one).
 fn plugin_popup_msg(
     generation: u64,
+    claim: StatusClaim,
     title: String,
     timeout: u64,
     results: Vec<(String, SpawnOutcome)>,
@@ -1354,6 +1366,7 @@ fn plugin_popup_msg(
     let warn = (failed > 0).then(|| format!("{failed} of {total} failed"));
     Msg::PluginOutput {
         generation,
+        claim,
         title,
         lines,
         warn,
@@ -1364,6 +1377,7 @@ fn plugin_popup_msg(
 /// successes and listing the failures (target label + reason).
 fn plugin_bulk_msg(
     generation: u64,
+    claim: StatusClaim,
     name: String,
     timeout: u64,
     results: Vec<(String, SpawnOutcome)>,
@@ -1380,6 +1394,7 @@ fn plugin_bulk_msg(
     }
     Msg::PluginBulkDone {
         generation,
+        claim,
         name,
         ok,
         failed,
@@ -1411,6 +1426,9 @@ fn plugin_flash(name: &str, n: usize, suffix: &str) -> String {
 /// lists (empty query: everything ties at one score) skip the length
 /// tie-break so they stay alphabetical.
 fn rank_completions<T>(scored: &mut [(i64, T)], label: fn(&T) -> &str, by_len: bool) {
+    // Stable on purpose: `T` is `Suggestion` at one call site, whose `kind` is
+    // not part of the ordering, so two suggestions sharing a label compare
+    // equal and an unstable sort could swap which one the list offers first.
     scored.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then_with(|| {

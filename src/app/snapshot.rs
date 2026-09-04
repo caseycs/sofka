@@ -30,13 +30,13 @@ impl App {
         let path = snapshots_dir().join(snap.filename(format));
         let tx = self.tx.clone();
         let genr = self.generation;
-        self.flash = format!("saving snapshot ({} rows)…", snap.rows.len());
-        self.flash_err = false;
+        let claim = self.claim_status(format!("saving snapshot ({} rows)…", snap.rows.len()));
         tokio::spawn(async move {
             let result = write_snapshot(&path, &text).await;
             let _ = tx
                 .send(Msg::SnapshotSaved {
                     generation: genr,
+                    claim,
                     result,
                 })
                 .await;

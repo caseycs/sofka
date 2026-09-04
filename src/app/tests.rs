@@ -1,6 +1,7 @@
 use super::*;
 use crate::store::row_key;
 use serde_json::json;
+use std::time::Instant;
 use tokio::sync::mpsc::{self, Receiver};
 
 fn obj(v: serde_json::Value) -> DynamicObject {
@@ -10,6 +11,15 @@ fn obj(v: serde_json::Value) -> DynamicObject {
 fn test_app() -> (App, Receiver<Msg>) {
     let (tx, rx) = mpsc::channel(1024);
     (App::new(Cluster::fake(), tx), rx)
+}
+
+/// The claim the operation that just started owns, for tests that hand-build
+/// the result message it is waiting for.
+fn current_claim(app: &App) -> crate::store::StatusClaim {
+    app.status_claim
+        .as_ref()
+        .expect("no operation has claimed the status bar")
+        .claim
 }
 
 fn press(code: KeyCode) -> KeyEvent {
@@ -22,6 +32,476 @@ fn ctrl(code: KeyCode) -> KeyEvent {
 
 fn alt(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::ALT)
+}
+
+/// A stand-in API server for the nodes view's pod counter: the *watch* is
+/// refused, the plain *list* succeeds. That is the RBAC shape — `list` granted,
+/// `watch` not — the poll fallback exists for. Records every request path.
+async fn mock_pods_api() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const POD_LIST_INITIAL: &str = concat!(
+        r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"7"},"items":["#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"1"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"b","namespace":"default","resourceVersion":"2"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"c","namespace":"default","resourceVersion":"3"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}}"#,
+        r#"]}"#
+    );
+    const POD_LIST_UPDATED: &str = concat!(
+        r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"8"},"items":["#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"c","namespace":"default","resourceVersion":"4"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"d","namespace":"default","resourceVersion":"5"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}}"#,
+        r#"]}"#
+    );
+    const FORBIDDEN: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"pods is forbidden: cannot watch at the cluster scope","reason":"Forbidden","code":403}"#;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock pods api");
+    let addr = listener.local_addr().expect("local addr");
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let seen = Arc::clone(&seen);
+            tokio::spawn(async move {
+                let (r, mut w) = sock.split();
+                let mut reader = BufReader::new(r);
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).await.unwrap_or(0) == 0 || header == "\r\n" {
+                        break;
+                    }
+                }
+                let path = request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string();
+                let list_number = {
+                    let mut requests = seen.lock().unwrap();
+                    requests.push(path.clone());
+                    requests
+                        .iter()
+                        .filter(|p| !p.contains("watch=true"))
+                        .count()
+                };
+                let (status, body) = if path.contains("watch=true") {
+                    ("403 Forbidden", FORBIDDEN)
+                } else if list_number == 1 {
+                    ("200 OK", POD_LIST_INITIAL)
+                } else {
+                    ("200 OK", POD_LIST_UPDATED)
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = w.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), requests)
+}
+
+/// A stand-in API server that serves a real list *and* a real watch stream, so
+/// the incremental counting path can be driven event by event. `lists` supplies
+/// one body per list attempt (the last repeats), which is what lets a resync
+/// return a different pod set. The returned sender pushes raw watch frames;
+/// dropping it ends the stream.
+async fn mock_pods_stream_api(
+    lists: Vec<&'static str>,
+) -> (
+    String,
+    mpsc::Sender<String>,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock pods api");
+    let addr = listener.local_addr().expect("local addr");
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let (frame_tx, frame_rx) = mpsc::channel::<String>(64);
+    let frames = Arc::new(tokio::sync::Mutex::new(Some(frame_rx)));
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let seen = Arc::clone(&seen);
+            let frames = Arc::clone(&frames);
+            let lists = lists.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = sock.split();
+                let mut reader = BufReader::new(r);
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).await.unwrap_or(0) == 0 || header == "\r\n" {
+                        break;
+                    }
+                }
+                let path = request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string();
+                let list_number = {
+                    let mut requests = seen.lock().unwrap();
+                    requests.push(path.clone());
+                    requests
+                        .iter()
+                        .filter(|p| !p.contains("watch=true"))
+                        .count()
+                };
+
+                if path.contains("watch=true") {
+                    // Chunked, so the connection stays open and `watcher` reads
+                    // newline-delimited frames off it as they are pushed.
+                    let _ = w
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n",
+                        )
+                        .await;
+                    // Only the first watch is scripted. A re-watch after the
+                    // scripted stream ends just parks, so the test observes the
+                    // resync rather than a reconnect loop.
+                    let scripted = frames.lock().await.take();
+                    match scripted {
+                        Some(mut rx) => {
+                            while let Some(frame) = rx.recv().await {
+                                let body = format!("{frame}\n");
+                                let chunk = format!("{:x}\r\n{body}\r\n", body.len());
+                                if w.write_all(chunk.as_bytes()).await.is_err() {
+                                    return;
+                                }
+                            }
+                            let _ = w.write_all(b"0\r\n\r\n").await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                    return;
+                }
+
+                let body = lists[(list_number - 1).min(lists.len() - 1)];
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = w.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), frame_tx, requests)
+}
+
+/// A stand-in API server whose pod list always fails with a 500, recording when
+/// each attempt arrived so the retry pacing can be measured.
+async fn mock_pods_failing_api() -> (String, Arc<std::sync::Mutex<Vec<Instant>>>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const SERVER_ERROR: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"internal","reason":"InternalError","code":500}"#;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock pods api");
+    let addr = listener.local_addr().expect("local addr");
+    let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&attempts);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let seen = Arc::clone(&seen);
+            tokio::spawn(async move {
+                let (r, mut w) = sock.split();
+                let mut reader = BufReader::new(r);
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).await.unwrap_or(0) == 0 || header == "\r\n" {
+                        break;
+                    }
+                }
+                seen.lock().unwrap().push(Instant::now());
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{SERVER_ERROR}",
+                    SERVER_ERROR.len()
+                );
+                let _ = w.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), attempts)
+}
+
+/// Wait for a `Msg::NodePods` carrying exactly `want`. Publications are
+/// coalesced to one a second, so intermediate states can be skipped — the test
+/// drives one change at a time and waits for each to land.
+async fn await_counts(rx: &mut Receiver<Msg>, want: &[(&str, usize)]) {
+    let want: std::collections::HashMap<String, usize> =
+        want.iter().map(|(n, c)| ((*n).to_string(), *c)).collect();
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Msg::NodePods { counts, .. } = rx.recv().await.expect("channel closed")
+                && counts == want
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(seen.is_ok(), "never saw counts {want:?}");
+}
+
+/// A `Cluster` whose client talks to `url` instead of a real API server.
+fn mock_cluster(url: &str) -> Cluster {
+    let mut config = kube::Config::new(url.parse().expect("mock url"));
+    // The client's own retry policy would turn each 403 into a long stall;
+    // this test is about the app's fallback, not the client's retries.
+    config.default_retry = false;
+    let mut cluster = Cluster::fake();
+    cluster.client = Client::try_from(config).expect("mock client");
+    cluster.cluster_url = url.into();
+    cluster
+}
+
+/// RBAC granting `list` but not `watch`. The first list seeds counts, then the
+/// refused watch must switch to periodic lists: kube's watcher retries only
+/// the watch from the same resourceVersion, so it cannot provide that fallback
+/// itself. The mock changes its list response to prove counts remain fresh.
+#[tokio::test]
+async fn node_pods_survives_a_forbidden_watch_without_hammering_the_api() {
+    let (url, seen) = mock_pods_api().await;
+    let (tx, mut rx) = mpsc::channel(1024);
+    let mut app = App::new(mock_cluster(&url), tx);
+
+    app.spawn_node_pods_poll();
+
+    let counts = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let msg = rx.recv().await.expect("channel closed");
+            if let Msg::NodePods { counts, .. } = msg
+                && !counts.contains_key("node-a")
+                && counts.get("node-b") == Some(&2)
+            {
+                break counts;
+            }
+        }
+    })
+    .await
+    .expect("periodic-list fallback did not publish refreshed counts");
+    assert_eq!(counts.len(), 1, "counts: {counts:?}");
+
+    // Now let the fallback hold for a while. It must neither retry the refused
+    // watch nor start polling faster than its 10-second interval.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let requests = seen.lock().unwrap();
+    let watch_attempts = requests.iter().filter(|p| p.contains("watch=true")).count();
+    let list_attempts = requests.len() - watch_attempts;
+    assert_eq!(watch_attempts, 1, "fallback must stop retrying the watch");
+    assert_eq!(list_attempts, 2, "fallback should wait 10s between lists");
+}
+
+/// The incremental path end to end: initial sync, a new pod, a pod moving to a
+/// different node, and a delete. Each step is awaited before the next is
+/// pushed, because publications are coalesced to one a second.
+#[tokio::test]
+async fn node_pods_counts_follow_the_watch_incrementally() {
+    const INITIAL: &str = concat!(
+        r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"7"},"items":["#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"1"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"b","namespace":"default","resourceVersion":"2"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"c","namespace":"default","resourceVersion":"3"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}}"#,
+        r#"]}"#
+    );
+
+    let (url, frames, _seen) = mock_pods_stream_api(vec![INITIAL]).await;
+    let (tx, mut rx) = mpsc::channel(1024);
+    let mut app = App::new(mock_cluster(&url), tx);
+    app.spawn_node_pods_poll();
+
+    // Nothing is published until `InitDone`: a partial initial list would walk
+    // the PODS column up from zero on every resync.
+    await_counts(&mut rx, &[("node-a", 2), ("node-b", 1)]).await;
+
+    frames
+        .send(r#"{"type":"ADDED","object":{"apiVersion":"v1","kind":"Pod","metadata":{"name":"d","namespace":"default","resourceVersion":"10"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}}}"#.into())
+        .await
+        .expect("push add");
+    await_counts(&mut rx, &[("node-a", 2), ("node-b", 2)]).await;
+
+    // Reassignment: the same pod key reported on a different node has to
+    // decrement the old one as well as increment the new one.
+    frames
+        .send(r#"{"type":"MODIFIED","object":{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"11"},"spec":{"nodeName":"node-b"},"status":{"phase":"Running"}}}"#.into())
+        .await
+        .expect("push move");
+    await_counts(&mut rx, &[("node-a", 1), ("node-b", 3)]).await;
+
+    // A node's last pod leaving drops the node from the map rather than
+    // leaving a zero behind.
+    frames
+        .send(r#"{"type":"DELETED","object":{"apiVersion":"v1","kind":"Pod","metadata":{"name":"b","namespace":"default","resourceVersion":"12"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}}}"#.into())
+        .await
+        .expect("push delete");
+    await_counts(&mut rx, &[("node-b", 3)]).await;
+}
+
+/// A 410 desyncs the watch, so `watcher` re-lists and replays `Init` ->
+/// `InitApply` -> `InitDone`. The counts must be rebuilt from that list alone:
+/// merging into the old ones would strand nodes that no longer have pods.
+#[tokio::test]
+async fn node_pods_rebuilds_counts_after_a_desync_resync() {
+    const INITIAL: &str = concat!(
+        r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"7"},"items":["#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"a","namespace":"default","resourceVersion":"1"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}},"#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"b","namespace":"default","resourceVersion":"2"},"spec":{"nodeName":"node-a"},"status":{"phase":"Running"}}"#,
+        r#"]}"#
+    );
+    const AFTER_RESYNC: &str = concat!(
+        r#"{"kind":"PodList","apiVersion":"v1","metadata":{"resourceVersion":"99"},"items":["#,
+        r#"{"apiVersion":"v1","kind":"Pod","metadata":{"name":"e","namespace":"default","resourceVersion":"20"},"spec":{"nodeName":"node-c"},"status":{"phase":"Running"}}"#,
+        r#"]}"#
+    );
+
+    let (url, frames, _seen) = mock_pods_stream_api(vec![INITIAL, AFTER_RESYNC]).await;
+    let (tx, mut rx) = mpsc::channel(1024);
+    let mut app = App::new(mock_cluster(&url), tx);
+    app.spawn_node_pods_poll();
+
+    await_counts(&mut rx, &[("node-a", 2)]).await;
+
+    frames
+        .send(r#"{"type":"ERROR","object":{"kind":"Status","apiVersion":"v1","status":"Failure","message":"too old resource version","reason":"Expired","code":410}}"#.into())
+        .await
+        .expect("push desync");
+    drop(frames);
+
+    // node-a is gone entirely, not left at its old count.
+    await_counts(&mut rx, &[("node-c", 1)]).await;
+}
+
+/// A persistently failing initial list must back off. `watcher` emits
+/// `Ok(Event::Init)` before *every* list attempt and `StreamBackoff` resets on
+/// any `Ok`, so leaving the pacing to `.default_backoff()` pins the retry at
+/// the 800ms minimum forever — worse than the 10s poll this replaced.
+#[tokio::test]
+async fn node_pods_backs_off_when_the_initial_list_keeps_failing() {
+    let (url, attempts) = mock_pods_failing_api().await;
+    let (tx, _rx) = mpsc::channel(1024);
+    let mut app = App::new(mock_cluster(&url), tx);
+    app.spawn_node_pods_poll();
+
+    // Three attempts is enough to see the interval grow: the delays are
+    // 800ms and 1.6s before jitter, which only ever adds.
+    let gaps = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            {
+                let seen = attempts.lock().unwrap();
+                if seen.len() >= 3 {
+                    break vec![
+                        seen[1].duration_since(seen[0]),
+                        seen[2].duration_since(seen[1]),
+                    ];
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("did not see three list attempts");
+
+    assert!(
+        gaps[0] >= std::time::Duration::from_millis(700),
+        "first retry did not back off at all: {gaps:?}"
+    );
+    assert!(
+        gaps[1] > gaps[0],
+        "retry interval did not grow, backoff is being reset: {gaps:?}"
+    );
+}
+
+/// The row cache's cleanup pass runs at the end of a rebuild; it must both
+/// drop stale entries and hand the memory back. `retain` on its own keeps the
+/// peak allocation, which is the whole point of the bound.
+#[tokio::test]
+async fn row_cache_releases_capacity_after_a_large_view_contracts() {
+    let (mut app, _rx) = test_app();
+    // A filter is what fills `cells`: every object it tests gets an entry,
+    // including the ones it rejects.
+    app.filter = "zzz-matches-nothing".into();
+    for i in 0..2_000 {
+        apply(
+            &mut app,
+            serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": format!("pod-{i:05}"),
+                    "namespace": "default",
+                    "resourceVersion": format!("{i}"),
+                },
+                "status": {"phase": "Running"},
+            }),
+        );
+    }
+    assert_eq!(app.row_count(), 0, "filter matches nothing");
+    let peak = app.rows_cache.borrow().cells.capacity();
+    assert!(peak >= 2_000, "cells cached an entry per tested object");
+
+    for i in 0..1_990 {
+        app.handle_msg(Msg::Deleted {
+            generation: app.generation,
+            key: format!("default/pod-{i:05}"),
+        });
+    }
+    app.row_count();
+
+    let cache = app.rows_cache.borrow();
+    assert!(
+        cache.cells.len() <= 10,
+        "stale entries dropped, got {}",
+        cache.cells.len()
+    );
+    assert!(
+        cache.cells.capacity() < peak / 2,
+        "capacity must be handed back, not just emptied: {} -> {}",
+        peak,
+        cache.cells.capacity()
+    );
+    let settled = cache.cells.capacity();
+    drop(cache);
+
+    // ...and then hold still. Shrinking to a capacity that immediately trips
+    // the same check again would rehash the table on every single rebuild.
+    for _ in 0..3 {
+        app.invalidate_rows();
+        app.row_count();
+    }
+    assert_eq!(
+        app.rows_cache.borrow().cells.capacity(),
+        settled,
+        "the shrink must settle, not re-fire on every rebuild"
+    );
 }
 
 /// Inject a watched object as the current generation would.
@@ -260,6 +740,52 @@ async fn move_selection_from_none_lands_on_first_row_not_second() {
     app.table_state.select(None); // simulate no selection at all
     app.move_selection(1); // Down, with nothing selected yet
     assert_eq!(app.table_state.selected(), Some(0), "must not skip row 0");
+}
+
+#[tokio::test]
+async fn ctrl_f_and_ctrl_b_page_by_the_drawn_viewport_height() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in 0..25 {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": format!("p{n:02}"), "namespace": "default"}}),
+        );
+    }
+    app.table_state.select(Some(0));
+    app.table_page_rows = 8;
+
+    app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(8));
+    app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(16));
+    app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(24), "clamps at the end");
+
+    app.handle_key(ctrl(KeyCode::Char('b'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(16));
+    app.handle_key(ctrl(KeyCode::Char('b'))).unwrap();
+    app.handle_key(ctrl(KeyCode::Char('b'))).unwrap();
+    app.handle_key(ctrl(KeyCode::Char('b'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(0), "clamps at the top");
+
+    app.handle_key(press(KeyCode::PageDown)).unwrap();
+    assert_eq!(app.table_state.selected(), Some(8));
+    app.handle_key(press(KeyCode::PageUp)).unwrap();
+    assert_eq!(app.table_state.selected(), Some(0));
+
+    app.table_page_rows = 20;
+    app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(20));
+
+    // ctrl-alt-f is a distinct chord left to plugins, not a page move.
+    let ctrl_alt_f = KeyEvent::new(
+        KeyCode::Char('f'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    );
+    app.handle_key(ctrl_alt_f).unwrap();
+    assert_eq!(app.table_state.selected(), Some(20));
 }
 
 #[tokio::test]
@@ -558,21 +1084,74 @@ async fn pulse_and_xray_warns_surface_as_flash() {
         warn: Some("listing pods: 403".into()),
         ..Default::default()
     };
+    let claim = app.claim_status("pulse — cluster health…");
     app.handle_msg(Msg::PulseData {
         generation: app.generation,
+        claim,
         data,
     });
     assert!(app.flash_err);
     assert!(app.flash.contains("incomplete"), "{}", app.flash);
 
     app.flash_err = false;
+    let claim = app.claim_status("xray: pods…");
     app.handle_msg(Msg::XrayData {
         generation: app.generation,
+        claim,
         items: Vec::new(),
         warn: Some("listing replicasets: 403".into()),
     });
     assert!(app.flash_err);
     assert!(app.flash.contains("incomplete"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn recurring_dashboard_poll_can_warn_after_an_initial_success() {
+    let (mut app, _rx) = test_app();
+    let claim = app.claim_status("pulse — cluster health…");
+
+    app.handle_msg(Msg::PulseData {
+        generation: app.generation,
+        claim,
+        data: crate::store::Pulse::default(),
+    });
+    assert!(app.flash.is_empty(), "{}", app.flash);
+
+    app.handle_msg(Msg::PulseData {
+        generation: app.generation,
+        claim,
+        data: crate::store::Pulse {
+            warn: Some("listing pods: 403".into()),
+            ..Default::default()
+        },
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("pulse is incomplete"), "{}", app.flash);
+
+    // The next complete poll clears the warning while retaining the recurring
+    // claim for future polls.
+    app.handle_msg(Msg::PulseData {
+        generation: app.generation,
+        claim,
+        data: crate::store::Pulse::default(),
+    });
+    assert!(app.flash.is_empty(), "{}", app.flash);
+
+    let claim = app.claim_status("xray: pods…");
+    app.handle_msg(Msg::XrayData {
+        generation: app.generation,
+        claim,
+        items: Vec::new(),
+        warn: None,
+    });
+    app.handle_msg(Msg::XrayData {
+        generation: app.generation,
+        claim,
+        items: Vec::new(),
+        warn: Some("listing replicasets: 403".into()),
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("xray is incomplete"), "{}", app.flash);
 }
 
 #[tokio::test]
@@ -1086,6 +1665,7 @@ async fn find_opens_picker_and_enter_navigates_to_the_object() {
 
     app.handle_msg(Msg::FindResults {
         generation: app.generation,
+        claim: current_claim(&app),
         query: "web".into(),
         items: vec![
             crate::store::FindItem {
@@ -1110,8 +1690,11 @@ async fn find_opens_picker_and_enter_navigates_to_the_object() {
     assert_eq!(app.fields.as_deref(), Some("metadata.name=web-1"));
 
     // Incomplete sweeps say so instead of pretending the list is exhaustive.
+    // A fresh sweep, because navigating away retired the first one's claim.
+    assert!(app.run_palette_command("find web"));
     app.handle_msg(Msg::FindResults {
         generation: app.generation,
+        claim: current_claim(&app),
         query: "web".into(),
         items: Vec::new(),
         warn: Some("2 kind(s) could not be listed".into()),
@@ -1848,9 +2431,10 @@ async fn restart_key_opens_confirm() {
 #[tokio::test]
 async fn detail_arrival_clears_progress_flash() {
     let (mut app, _rx) = test_app();
-    app.flash = "describing web…".into();
+    let claim = app.claim_status("describing web…");
     app.handle_msg(Msg::Detail {
         generation: app.generation,
+        claim,
         title: "web — describe".into(),
         lines: vec!["Name: web".into()],
         warn: None,
@@ -1859,14 +2443,551 @@ async fn detail_arrival_clears_progress_flash() {
     assert!(app.flash.is_empty(), "{}", app.flash);
 
     // A fallback warning still replaces the progress flash.
-    app.flash = "describing web…".into();
+    let claim = app.claim_status("describing web…");
     app.handle_msg(Msg::Detail {
         generation: app.generation,
+        claim,
         title: "web — YAML".into(),
         lines: vec!["kind: Pod".into()],
         warn: Some("kubectl not found; showing YAML".into()),
     });
     assert!(app.flash.contains("kubectl not found"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn welcome_flash_does_not_expire() {
+    let (mut app, _rx) = test_app();
+    assert_eq!(app.flash, WELCOME_FLASH);
+
+    app.expire_flash();
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+
+    assert_eq!(app.flash, WELCOME_FLASH);
+    assert!(!app.flash_err);
+
+    // Stickiness rides on a flag rather than on matching the constant, and the
+    // first real flash to land clears it.
+    app.flash = "deleted web".into();
+    app.expire_flash();
+    assert!(!app.flash_sticky);
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+    assert!(app.flash.is_empty(), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn error_flash_does_not_expire() {
+    let (mut app, _rx) = test_app();
+    app.flash = "delete failed: forbidden".into();
+    app.flash_err = true;
+
+    app.expire_flash();
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+
+    assert_eq!(app.flash, "delete failed: forbidden");
+    assert!(app.flash_err);
+}
+
+#[tokio::test]
+async fn successful_transient_flash_expires() {
+    let (mut app, _rx) = test_app();
+    app.flash = "deleted web".into();
+
+    app.expire_flash();
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn progress_flash_outlives_the_expiry_window() {
+    let (mut app, _rx) = test_app();
+    let claim = app.claim_status("draining 3 nodes…");
+
+    // A drain or a bulk delete easily runs past 8s; blanking the bar
+    // mid-flight would read as though nothing were happening.
+    app.expire_flash();
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(30);
+    app.expire_flash();
+    assert_eq!(app.flash, "draining 3 nodes…");
+
+    // The result replaces it, and that one does expire on schedule.
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "drain requested: 3 nodes".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "drain requested: 3 nodes");
+    assert!(!app.flash_err);
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+    assert!(app.flash.is_empty(), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn refreshing_mid_action_drops_the_orphaned_progress_flash() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    let claim = app.claim_status("deleting 3 pods…");
+    let stale = app.generation;
+
+    // `r` restarts the watch, which bumps the generation, so the delete's
+    // `Msg::Flash` can no longer land. Nothing would replace the progress
+    // message and `expire_flash` won't time a `…` one out — hence the bump
+    // clears it itself.
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_ne!(app.generation, stale);
+    assert!(app.flash.is_empty(), "{}", app.flash);
+
+    // The orphaned result is still dropped, not shown late.
+    app.handle_msg(Msg::Flash {
+        generation: stale,
+        claim,
+        message: "deleted 3 pods".into(),
+        err: false,
+    });
+    assert!(app.flash.is_empty(), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn action_progress_flashes_keep_the_ellipsis_convention() {
+    // `expire_flash` reads the trailing `…` as "still running". An action that
+    // forgets it gets its progress message blanked out mid-flight, which is
+    // exactly the failure the ellipsis guard exists to prevent.
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    let targets = vec![("web".to_string(), "default".to_string())];
+
+    app.do_scale(targets.clone(), 3);
+    assert!(app.flash.ends_with('…'), "scale: {}", app.flash);
+
+    app.do_scale(
+        vec![
+            targets[0].clone(),
+            ("api".to_string(), "default".to_string()),
+        ],
+        3,
+    );
+    assert!(app.flash.ends_with('…'), "bulk scale: {}", app.flash);
+
+    app.do_set_image(
+        "default".into(),
+        "web".into(),
+        "deployments".into(),
+        "app".into(),
+        "nginx:1.27".into(),
+    );
+    assert!(app.flash.ends_with('…'), "set-image: {}", app.flash);
+
+    app.do_set_suspend(targets.clone(), true);
+    assert!(app.flash.ends_with('…'), "suspend: {}", app.flash);
+
+    app.do_reconcile(targets.clone());
+    assert!(app.flash.ends_with('…'), "reconcile: {}", app.flash);
+
+    app.do_refresh_es(targets);
+    assert!(app.flash.ends_with('…'), "refresh: {}", app.flash);
+}
+
+#[tokio::test]
+async fn explain_findings_clear_the_progress_flash() {
+    let (mut app, _rx) = test_app();
+    let claim = app.claim_status("explaining web…");
+
+    // Nothing else replaces this one, and `expire_flash` won't time a `…` out,
+    // so the handler has to clear it — as the `Msg::Gitops` arm does.
+    app.handle_msg(Msg::Explain {
+        generation: app.generation,
+        claim,
+        title: "explain — web".into(),
+        findings: Vec::new(),
+    });
+
+    assert_eq!(app.mode, Mode::Explain);
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn an_action_with_no_targets_claims_nothing() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    app.flash.clear();
+
+    // `request_flux_menu` guards this, but the menu stays open across watch
+    // updates — the selected row can be gone by the time Enter lands.
+    app.do_set_suspend(Vec::new(), true);
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    app.do_reconcile(Vec::new());
+    assert!(app.flash.is_empty(), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn a_finished_report_only_clears_its_own_status_claim() {
+    let (mut app, _rx) = test_app();
+
+    // A describe and a delete share a generation. The delete claims the bar
+    // after describe; the older report must not clear that in-flight progress.
+    let describe_claim = app.claim_status("describing web…");
+    let delete_claim = app.claim_status("deleting 3 pods…");
+    app.handle_msg(Msg::Detail {
+        generation: app.generation,
+        claim: describe_claim,
+        title: "web — describe".into(),
+        lines: vec!["Name: web".into()],
+        warn: None,
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: delete_claim,
+        message: "deleted 3 pods".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "deleted 3 pods");
+
+    // Same for an error, which no longer expires on its own — losing it here
+    // would lose it for good.
+    let explain_claim = app.claim_status("explaining web…");
+    let delete_claim = app.claim_status("deleting web…");
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: delete_claim,
+        message: "delete web failed: forbidden".into(),
+        err: true,
+    });
+    app.handle_msg(Msg::Explain {
+        generation: app.generation,
+        claim: explain_claim,
+        title: "explain — web".into(),
+        findings: Vec::new(),
+    });
+    assert_eq!(app.mode, Mode::Explain);
+    assert!(app.flash_err);
+    assert!(app.flash.contains("forbidden"), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn an_older_action_result_cannot_overwrite_a_newer_action() {
+    let (mut app, _rx) = test_app();
+
+    let old = app.claim_status("deleting 3 pods…");
+    let new = app.claim_status("scaling web → 3…");
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: old,
+        message: "deleted 3 pods".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "scaling web → 3…");
+
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: new,
+        message: "scale web failed: forbidden".into(),
+        err: true,
+    });
+    assert!(app.flash_err);
+    assert!(app.flash.contains("scale web failed"), "{}", app.flash);
+
+    // An older error also cannot erase a newer successful result.
+    let old = app.claim_status("deleting api…");
+    let new = app.claim_status("scaling worker → 2…");
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: new,
+        message: "scaled worker → 2".into(),
+        err: false,
+    });
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: old,
+        message: "delete api failed: forbidden".into(),
+        err: true,
+    });
+    assert_eq!(app.flash, "scaled worker → 2");
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn an_action_failure_is_never_silently_dropped() {
+    let (mut app, _rx) = test_app();
+
+    // A delete fails after a describe has claimed the bar. The failure is not
+    // this operation's to show, but the bar only holds an unresolved `…`, so
+    // borrowing it costs nothing and losing the failure costs a lot.
+    let delete = app.claim_status("deleting web…");
+    let describe = app.claim_status("describing api…");
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: delete,
+        message: "delete web failed: forbidden".into(),
+        err: true,
+    });
+    assert!(app.flash_err);
+    assert_eq!(app.flash, "delete web failed: forbidden");
+    assert_eq!(
+        app.last_action_error.as_deref(),
+        Some("delete web failed: forbidden")
+    );
+
+    // Borrowing does not take ownership: the describe still reports normally,
+    // but completing that report must not erase the sticky action failure.
+    app.handle_msg(Msg::Detail {
+        generation: app.generation,
+        claim: describe,
+        title: "api — describe".into(),
+        lines: vec!["Name: api".into()],
+        warn: None,
+    });
+    assert_eq!(app.mode, Mode::Detail);
+    assert_eq!(app.flash, "delete web failed: forbidden");
+    assert!(app.flash_err);
+    assert!(app.status_claim.is_none());
+
+    // A failure that cannot even borrow the bar — a newer operation has
+    // already put a finished result there — is still recorded for `:debug`.
+    let stale = app.claim_status("draining node-1…");
+    let newer = app.claim_status("scaling web → 3…");
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: newer,
+        message: "scaled web → 3".into(),
+        err: false,
+    });
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: stale,
+        message: "drain node-1 failed: forbidden".into(),
+        err: true,
+    });
+    assert_eq!(app.flash, "scaled web → 3");
+    assert!(!app.flash_err);
+    assert_eq!(
+        app.last_action_error.as_deref(),
+        Some("drain node-1 failed: forbidden")
+    );
+    app.open_info();
+    assert!(
+        app.detail.lines.iter().any(|l| l
+            .to_string()
+            .contains("last failure: drain node-1 failed: forbidden")),
+        "`:info` does not report the failure"
+    );
+}
+
+#[tokio::test]
+async fn every_async_result_is_scoped_to_its_own_operation() {
+    // The claim plumbing has to reach *every* operation that writes the bar,
+    // not just the action ones — an unclaimed handler overwrites whatever the
+    // user started later.
+    let (mut app, _rx) = test_app();
+
+    let find = app.claim_status("finding 'foo'…");
+    let delete = app.claim_status("deleting 3 pods…");
+    app.handle_msg(Msg::FindResults {
+        generation: app.generation,
+        claim: find,
+        query: "foo".into(),
+        items: Vec::new(),
+        warn: None,
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+    // The results still land, only the status is scoped.
+    assert_eq!(app.find_query, "foo");
+
+    app.handle_msg(Msg::TransferDone {
+        generation: app.generation,
+        claim: find,
+        result: Ok("copied a → b".into()),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::SnapshotSaved {
+        generation: app.generation,
+        claim: find,
+        result: Ok(std::path::PathBuf::from("/tmp/snap.json")),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::BundleSaved {
+        generation: app.generation,
+        claim: find,
+        result: Ok(std::path::PathBuf::from("/tmp/bundle.txt")),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::DebuggersCleaned {
+        generation: app.generation,
+        claim: find,
+        deleted: 2,
+        failed: Vec::new(),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::ClipboardCopied {
+        generation: app.generation,
+        claim: find,
+        copied: true,
+        success: "copied 12 log lines".into(),
+        failure: "no clipboard target".into(),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::LogsSaved {
+        generation: app.generation,
+        claim: find,
+        result: Ok(std::path::PathBuf::from("/tmp/sofka.log")),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::PluginBulkDone {
+        generation: app.generation,
+        claim: find,
+        name: "sync".into(),
+        ok: 3,
+        failed: Vec::new(),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::ContextRenamed {
+        generation: app.generation,
+        claim: find,
+        old: "test".into(),
+        new: "staging".into(),
+        result: Ok(()),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::XrayData {
+        generation: app.generation,
+        claim: find,
+        items: Vec::new(),
+        warn: None,
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    // And the owner still reports when it lands.
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: delete,
+        message: "deleted 3 pods".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "deleted 3 pods");
+}
+
+#[tokio::test]
+async fn an_unclaimed_status_update_invalidates_the_current_claim() {
+    let (mut app, _rx) = test_app();
+    let claim = app.claim_status("deleting api…");
+
+    // Most existing synchronous status updates assign `flash` directly. The
+    // expected-text half of ownership makes those safe without migrating every
+    // call site in this fix.
+    app.flash = "namespace: prod".into();
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "deleted api".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "namespace: prod");
+}
+
+#[tokio::test]
+async fn background_status_borrows_the_bar_without_orphaning_an_action() {
+    let (mut app, _rx) = test_app();
+
+    let claim = app.claim_status("deleting api…");
+    app.handle_msg(Msg::Error {
+        generation: app.generation,
+        error: "watch disconnected".into(),
+    });
+    assert!(app.flash.contains("watch disconnected"), "{}", app.flash);
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "deleted api".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "deleted api");
+
+    let claim = app.claim_status("scaling web → 3…");
+    app.handle_msg(Msg::Panic("worker panic".into()));
+    assert!(app.flash.contains("worker panic"), "{}", app.flash);
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "scaled web → 3".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "scaled web → 3");
+
+    let claim = app.claim_status("draining node-1…");
+    app.handle_msg(Msg::Notify("pod/web: Ready True → False".into()));
+    assert!(app.flash.starts_with('🔔'), "{}", app.flash);
+
+    // A transient notification may expire before the action. The pending
+    // owner still retains its claim against the now-empty bar.
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "drain requested: node-1".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "drain requested: node-1");
+}
+
+#[tokio::test]
+async fn can_i_verdict_arrives_as_a_flash() {
+    let (mut app, _rx) = test_app();
+    // `:can-i` shares `Msg::Flash` with the action results. A denial is an
+    // answer, not a failure, so it doesn't go through `Msg::Error` — but it
+    // still reads as an error and sticks around like one.
+    let claim = app.claim_status("can-i delete pods…");
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "✗ no — cannot delete pods".into(),
+        err: true,
+    });
+    assert!(app.flash_err);
+    assert_eq!(app.last_error, None);
+
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+    assert_eq!(app.flash, "✗ no — cannot delete pods");
+}
+
+#[tokio::test]
+async fn repeating_an_action_restarts_the_expiry_timer() {
+    let (mut app, _rx) = test_app();
+    app.set_flash("namespace: prod");
+
+    // 7s on, the same command runs again. The text is identical, so the
+    // `flash_seen` diff can't tell a repeat from a flash that has been sitting
+    // there all along — only going through the setter can.
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(7);
+    app.set_flash("namespace: prod");
+
+    // 14s since the first showing, 7s since the repeat: still up.
+    app.flash_since -= std::time::Duration::from_secs(7);
+    app.expire_flash();
+    assert_eq!(app.flash, "namespace: prod");
+
+    app.flash_since -= std::time::Duration::from_secs(2);
+    app.expire_flash();
+    assert!(app.flash.is_empty(), "{}", app.flash);
 }
 
 #[tokio::test]
@@ -2746,23 +3867,32 @@ async fn log_filter_supports_regex_inverse_and_clear() {
 }
 
 #[tokio::test]
-async fn stale_log_save_result_is_dropped() {
+async fn log_save_result_survives_leaving_logs() {
     let (mut app, _rx) = test_app();
-    let stale = app.log_gen;
+    let claim = app.claim_status("saving logs…");
+    // Leaving Logs invalidates its stream but not the independent file write.
     app.log_gen += 1;
-
     app.handle_msg(Msg::LogsSaved {
-        generation: stale,
-        result: Err("old write failed".into()),
-    });
-    assert!(!app.flash.contains("old write failed"));
-
-    app.handle_msg(Msg::LogsSaved {
-        generation: app.log_gen,
+        generation: app.generation,
+        claim,
         result: Ok(std::env::temp_dir().join("sofka-test.log")),
     });
     assert!(app.flash.contains("sofka-test.log"));
     assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn stale_log_save_result_is_dropped_after_a_view_generation_change() {
+    let (mut app, _rx) = test_app();
+    let stale = app.generation;
+    let claim = app.claim_status("saving logs…");
+    app.bump_generation();
+    app.handle_msg(Msg::LogsSaved {
+        generation: stale,
+        claim,
+        result: Err("old write failed".into()),
+    });
+    assert!(!app.flash.contains("old write failed"));
 }
 
 #[tokio::test]
@@ -2771,16 +3901,20 @@ async fn stale_clipboard_result_is_dropped() {
     let stale = app.generation;
     app.bump_generation();
 
+    let claim = app.claim_status("copying to clipboard…");
     app.handle_msg(Msg::ClipboardCopied {
         generation: stale,
+        claim,
         copied: false,
         success: "copied stale".into(),
         failure: "stale failed".into(),
     });
     assert!(!app.flash.contains("stale failed"));
 
+    let claim = app.claim_status("copying to clipboard…");
     app.handle_msg(Msg::ClipboardCopied {
         generation: app.generation,
+        claim,
         copied: true,
         success: "copied current".into(),
         failure: "current failed".into(),
@@ -4052,8 +5186,10 @@ async fn context_renamed_updates_lists_and_current_context() {
     app.all_contexts = vec!["prod".into(), "test".into()];
     app.note_recent_namespace("shop");
 
+    let claim = app.claim_status("renaming test → staging…");
     app.handle_msg(Msg::ContextRenamed {
         generation: app.generation,
+        claim,
         old: "test".into(),
         new: "staging".into(),
         result: Ok(()),
@@ -4087,8 +5223,10 @@ async fn context_renamed_updates_lists_and_current_context() {
     );
 
     // A failed rename only flashes.
+    let claim = app.claim_status("renaming prod → live…");
     app.handle_msg(Msg::ContextRenamed {
         generation: app.generation,
+        claim,
         old: "prod".into(),
         new: "live".into(),
         result: Err("no context exists with the name".into()),
@@ -4501,6 +5639,35 @@ async fn helm_list_shows_only_latest_revision_per_release() {
     assert_eq!(cells[1], "2");
     assert_eq!(cells[2], "deployed");
     assert_eq!(cells[3], "mychart-1.0.0");
+}
+
+/// The latest-revision dedup is cached against the store's mutation counter,
+/// so a rebuild staled by a filter or sort reuses it. A new revision arriving
+/// *after* the rows were read must still invalidate it.
+#[tokio::test]
+async fn helm_list_dedup_refreshes_when_a_new_revision_arrives() {
+    let (mut app, _rx) = test_app();
+    app.open_helm_releases();
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 1, "deployed"),
+    );
+    // Read once so the dedup is cached, then supersede it.
+    assert_eq!(app.rows().len(), 1);
+    assert_eq!(crate::helm::revision(app.rows()[0]), Some(1));
+
+    apply(
+        &mut app,
+        helm_release_secret("myapp", "default", 2, "deployed"),
+    );
+
+    let rows = app.rows();
+    assert_eq!(rows.len(), 1, "still one row per release");
+    assert_eq!(
+        crate::helm::revision(rows[0]),
+        Some(2),
+        "a cached dedup must not pin the superseded revision"
+    );
 }
 
 #[tokio::test]
@@ -5905,6 +7072,68 @@ async fn user_view_overlays_columns_and_applies_initial_sort() {
 }
 
 #[tokio::test]
+async fn user_view_adds_provider_label_columns_to_curated_nodes() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."v1/nodes".columns]]
+        name = "NODEPOOL"
+        path = "/metadata/labels/karpenter.sh~1nodepool"
+
+        [[views."v1/nodes".columns]]
+        name = "ZONE"
+        path = "/metadata/labels/topology.kubernetes.io~1zone"
+
+        [[views."v1/nodes".columns]]
+        name = "INSTANCE"
+        path = "/metadata/labels/node.kubernetes.io~1instance-type"
+
+        [[views."v1/nodes".columns]]
+        name = "TYPE"
+        path = "/metadata/labels/karpenter.sh~1capacity-type"
+        "#,
+    );
+    app.switch_kind("nodes");
+
+    assert_eq!(
+        app.display_headers(),
+        [
+            "NAME", "STATUS", "ROLES", "TAINTS", "VERSION", "NODEPOOL", "ZONE", "INSTANCE", "TYPE",
+            "AGE", "PODS", "CPU", "MEM", "%CPU", "%MEM"
+        ]
+    );
+
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": {
+                "name": "worker-1",
+                "labels": {
+                    "karpenter.sh/nodepool": "general",
+                    "topology.kubernetes.io/zone": "eu-west-1a",
+                    "node.kubernetes.io/instance-type": "m7i.large",
+                    "karpenter.sh/capacity-type": "spot"
+                }
+            },
+            "status": {
+                "nodeInfo": {"kubeletVersion": "v1.33.4"}
+            }
+        }),
+    );
+
+    let rows = app.rows();
+    app.ensure_table_cell_cache(&rows);
+    let key = row_key(rows[0]);
+    let cache = app.table_cell_cache();
+    let (cells, _) = cache.get(&key).unwrap();
+    assert_eq!(cells[4], "v1.33.4");
+    assert_eq!(&cells[5..9], ["general", "eu-west-1a", "m7i.large", "spot"]);
+}
+
+#[tokio::test]
 async fn user_view_replace_swaps_out_curated_columns() {
     let (mut app, _rx) = test_app();
     install_views(
@@ -6729,6 +7958,7 @@ async fn reload_palette_command_dispatches() {
 #[tokio::test]
 async fn info_view_reports_version_cluster_and_watch_health() {
     let (mut app, _rx) = test_app();
+    app.cluster.server_version = "v1.36.2-eks-bca9cf6".into();
     app.watch_errors = 3;
     app.last_error = Some("connection refused".into());
     assert!(app.run_palette_command("info"));
@@ -6743,6 +7973,7 @@ async fn info_view_reports_version_cluster_and_watch_health() {
     assert!(text.contains(&format!("sofka v{}", crate::diagnostics::VERSION)));
     assert!(text.contains("Cluster"), "{text}");
     assert!(text.contains("api server:"), "{text}");
+    assert!(text.contains("k8s rev:     v1.36.2-eks-bca9cf6"), "{text}");
     assert!(text.contains("errors: 3"), "{text}");
     assert!(text.contains("connection refused"), "{text}");
     assert!(text.contains("Directories"), "{text}");

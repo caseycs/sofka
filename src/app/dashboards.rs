@@ -5,13 +5,12 @@ impl App {
     pub fn open_pulse(&mut self) {
         self.bump_generation();
         self.pulse = Pulse::default();
-        self.flash = "pulse — cluster health".into();
-        self.flash_err = false;
         self.mode = Mode::Pulse;
         self.spawn_pulse();
     }
 
     pub(super) fn spawn_pulse(&mut self) {
+        let claim = self.claim_status("pulse — cluster health…");
         let resolve = |n: &str| self.cluster.resolve(n).map(|k| (k.ar, k.namespaced));
         let nodes = resolve("nodes");
         let pods = resolve("pods");
@@ -96,6 +95,7 @@ impl App {
                 if tx
                     .send(Msg::PulseData {
                         generation: genr,
+                        claim,
                         data: p,
                     })
                     .await
@@ -132,13 +132,12 @@ impl App {
         self.bump_generation();
         self.xray_items.clear();
         self.xray_state.select(Some(0));
-        self.flash = format!("xray: {}", self.kind_plural);
-        self.flash_err = false;
         self.mode = Mode::Xray;
         self.spawn_xray();
     }
 
     pub(super) fn spawn_xray(&mut self) {
+        let claim = self.claim_status(format!("xray: {}…", self.kind_plural));
         let Some((root_ar, root_nsd)) = self.kind.as_ref().map(|k| (k.ar.clone(), k.namespaced))
         else {
             return;
@@ -194,6 +193,7 @@ impl App {
                 if tx
                     .send(Msg::XrayData {
                         generation: genr,
+                        claim,
                         items,
                         warn,
                     })

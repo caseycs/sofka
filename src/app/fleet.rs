@@ -31,8 +31,15 @@ impl App {
     }
 
     /// Whether `ctx` is currently part of the fleet (config + marks).
+    ///
+    /// Answers the membership question directly rather than materializing
+    /// [`Self::fleet_contexts`]: the context switcher asks this once per row
+    /// per frame, and building (and cloning into) a `Vec` per row made that
+    /// draw quadratic in allocations.
     pub fn is_fleet_context(&self, ctx: &str) -> bool {
-        self.fleet_contexts().iter().any(|c| c == ctx)
+        let listed = self.fleet_cfg.contexts.iter().any(|c| c == ctx)
+            && !self.fleet_marks.removed.iter().any(|c| c == ctx);
+        listed || self.fleet_marks.added.iter().any(|c| c == ctx)
     }
 
     /// Toggle a context in/out of the fleet (`space` in the context
@@ -184,12 +191,12 @@ async fn gather_context(ctx: &str, readonly: bool) -> FleetRow {
             return row;
         }
     };
-    let client = cluster.client.clone();
-
-    row.version = match client.apiserver_version().await {
-        Ok(info) => info.git_version,
-        Err(_) => "?".into(),
+    row.version = if cluster.server_version.is_empty() {
+        "?".into()
+    } else {
+        cluster.server_version.clone()
     };
+    let client = cluster.client.clone();
 
     // A failed list must not summarize as "0 unhealthy" — record it and mark
     // the row, keeping whatever partial counts did arrive.

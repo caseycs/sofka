@@ -201,6 +201,19 @@ const HEADER_HINTS_WIDTH: u16 = 44;
 /// Minimum width the info cluster keeps before the hint column may appear.
 const HEADER_INFO_MIN: u16 = 44;
 
+fn header_title(server_version: &str) -> Line<'static> {
+    let mut spans = vec![Span::styled(" sofka ", theme::title())];
+    if !server_version.is_empty() {
+        spans.push(Span::styled("· K8s Rev: ", theme::dim()));
+        spans.push(Span::styled(
+            server_version.to_string(),
+            Style::default().fg(theme::sapphire()),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
+}
+
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -247,7 +260,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border())
-        .title(Span::styled(" sofka ", theme::title()));
+        .title(header_title(&app.cluster.server_version));
     let inner = block.inner(cols[0]);
     frame.render_widget(block, cols[0]);
 
@@ -421,6 +434,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             hint_line(&[("s", "scale"), ("r", "restart"), ("i", "image")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
             hint_line(&[("X", "explain"), ("T", "timeline"), ("f", "port-fwd")]),
+            hint_line(&[("^d", "delete")]),
         ],
         "daemonsets" => vec![
             hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
@@ -441,6 +455,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
         "nodes" => vec![
             hint_line(&[("⏎", "pods"), ("y", "yaml"), ("d", "describe")]),
             hint_line(&[("C", "cordon"), ("U", "uncordon"), ("D", "drain")]),
+            hint_line(&[("^d", "delete")]),
         ],
         "namespaces" => vec![
             hint_line(&[("⏎", "switch to"), ("y", "yaml"), ("d", "describe")]),
@@ -562,6 +577,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let count = app.row_count();
     let visible_rows = area.height.saturating_sub(3).max(1) as usize;
+    app.table_page_rows = visible_rows;
     if count == 0 {
         *app.table_state.offset_mut() = 0;
     } else {
@@ -1928,6 +1944,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("←/→", "scroll columns (NAMESPACE/NAME stay anchored)"),
         bind("esc", "go back / pop view / clear filter"),
         bind("j/k g/G", "move · top/bottom"),
+        bind("ctrl-f/ctrl-b", "page forward/back (also PgDn/PgUp)"),
         bind("S · I", "sort by column (fuzzy picker) · invert direction"),
         bind("w", "toggle wide columns (kubectl -o wide)"),
         bind(
@@ -3527,6 +3544,15 @@ mod tests {
         );
         // Events are watch-backed, genuinely live.
         assert_eq!(sync_indicator(Mode::Events, Mode::Detail, true).0, "● live");
+    }
+
+    #[test]
+    fn header_title_shows_connected_kubernetes_revision() {
+        assert_eq!(line_text(&header_title("")), " sofka ");
+        assert_eq!(
+            line_text(&header_title("v1.36.2-eks-bca9cf6")),
+            " sofka · K8s Rev: v1.36.2-eks-bca9cf6 "
+        );
     }
 
     /// Deficit: a Flex column whose content fits inside its weight-share takes
