@@ -2,23 +2,10 @@
 
 ## Custom views
 
-A table column is two things: where in the object to read (a JSON Pointer) and
-how to read it (a type, which decides rendering, coloring, and sort order).
-sofka ships curated columns for the core kinds. For everything else it has to
-be told, and a view is how: a per-kind list of columns, plus an initial sort.
-Most useful for custom resources, which otherwise fall back to NAME/AGE - or to
-their CRD's printer columns, see below.
-
-Columns for a kind come from the first of these that applies: the view's
-`columns` if it declares any, else the curated table if the kind has one, else
-the CRD's printer columns, else NAME/AGE. A view's columns *overlay* the curated
-table rather than replacing it: a column whose header matches a curated one
-takes its place, new columns slot in before AGE, and `replace = true` throws the
-curated table away instead.
-
-sofka keys views by apiVersion/plural (`"cert-manager.io/v1/certificates"`,
-`"v1/pods"`), group/plural, bare plural, or lowercase kind. The most specific
-key wins.
+Define table columns for any resource. Most useful for custom resources, which
+otherwise fall back to NAME/AGE. sofka keys views by apiVersion/plural
+(`"cert-manager.io/v1/certificates"`, `"v1/pods"`), group/plural, bare plural, or
+lowercase kind. The most specific key wins.
 
 ```toml
 [views."cert-manager.io/v1/certificates"]
@@ -45,9 +32,7 @@ wide = true               # only shown in wide mode (`w`)
 
 `path` is a JSON Pointer (RFC 6901) into the object as the API serves it:
 `/metadata/…`, `/spec/…`, `/status/…`, and array indices like
-`/spec/ports/0/port`. A `/` inside a key is written `~1` and a `~` as `~0`, which
-is how label and annotation keys are reached:
-`/metadata/labels/topology.kubernetes.io~1zone`.
+`/spec/ports/0/port`.
 
 `type` is `text` (default), `status`, `number`, `quantity` (`500m`, `1Gi`),
 `time`, or `condition`. Typed columns sort by value, not by text.
@@ -58,9 +43,9 @@ never by array index, whose order nothing guarantees - renders its `status`
 (`True`/`False`/`Unknown`), and colors the row like a `status` column.
 
 Optional `width` (for fixed columns) and `align` (`left`/`center`/`right`) tune
-the layout; `wide = true` hides a column until wide mode (`w`). Invalid entries
-are skipped with a warning in the app (`:config` lists them) - they never take
-down the TUI.
+the layout. By default columns overlay the curated ones: a matching header
+replaces it in place, new columns go before AGE. Invalid entries are skipped with
+a warning in the app - they never take down the TUI.
 
 ### Navigating between kinds
 
@@ -134,13 +119,6 @@ selecting another field (`.reason`, `.message`, `.lastTransitionTime`, …) keep
 the column and reads that field from the named condition. Other JSONPath filter
 or wildcard expressions aren't representable and those columns are skipped. So
 most custom resources get useful columns with zero configuration.
-
-Printer columns are a fallback, not a base layer: they apply only while the view
-declares no columns. A view that sets just `sort`, `node`, or `drill` keeps them;
-a view that adds a single column replaces the whole printer table with that
-column. To add to a CRD's table - promote a wide-only column, say - redeclare
-the columns you want to keep alongside the new one (`kubectl get crd <name> -o
-yaml` lists them under `additionalPrinterColumns`, with their JSONPaths).
 
 ## Thresholds
 
