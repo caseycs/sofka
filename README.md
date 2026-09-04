@@ -118,6 +118,7 @@ The essentials. `?` in the app shows everything, or see the
 | `/`                  | filter: fuzzy · `!inverse` · `-l`/`-f` selectors · `status=X` `cpu>500m` `age<2h`                 |
 | `enter` / `esc`      | drill down / go back                                                                              |
 | `j`/`k`, `g`/`G`     | navigate                                                                                          |
+| `ctrl-f` / `ctrl-b`  | page forward / back (also `PgDn` / `PgUp`)                                                        |
 | `n` / `0` / `:ctx`   | namespace switcher / all namespaces / context switcher                                            |
 | `space`              | mark row for bulk actions                                                                         |
 | `y` / `d` / `E`      | YAML / describe / live events                                                                     |

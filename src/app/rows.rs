@@ -925,4 +925,9 @@ impl App {
         let next = (cur + delta).clamp(0, len - 1);
         self.table_state.select(Some(next as usize));
     }
+
+    pub(super) fn move_page(&mut self, pages: i32) {
+        let page = self.table_page_rows.max(1) as i32;
+        self.move_selection(pages.saturating_mul(page));
+    }
 }
