@@ -88,6 +88,15 @@ const STREAMING_UNSUPPORTED: u8 = 2;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 const VERSION_TIMEOUT: Duration = Duration::from_millis(50);
+const SERVER_VERSION_MAX_CHARS: usize = 128;
+
+/// API metadata is remote input and reaches both the TUI and plain terminal
+/// output. Drop terminal control characters once at ingestion, then bound the
+/// value so every downstream sink can safely render the stored revision.
+fn sanitize_server_version(version: &str) -> String {
+    let visible: String = version.chars().filter(|c| !c.is_control()).collect();
+    crate::text::ellipsize(&visible, SERVER_VERSION_MAX_CHARS)
+}
 
 impl Cluster {
     pub async fn connect() -> Result<Self> {
@@ -146,7 +155,7 @@ impl Cluster {
         let (discovery, version) = tokio::join!(cluster.discover(), version);
         discovery?;
         if let Ok(Ok(info)) = version {
-            cluster.server_version = info.git_version;
+            cluster.server_version = sanitize_server_version(&info.git_version);
         }
         Ok(cluster)
     }
@@ -1060,6 +1069,18 @@ mod tests {
             .expect("connect with broken APIService");
         assert!(cluster.resolve("deployments").is_some());
         assert!(cluster.resolve("pods").is_some());
+    }
+
+    #[test]
+    fn server_version_is_terminal_safe_and_bounded() {
+        assert_eq!(
+            sanitize_server_version("v1.36.2\u{1b}[31m\nforged\u{7}"),
+            "v1.36.2[31mforged"
+        );
+        let long = "v".repeat(SERVER_VERSION_MAX_CHARS + 20);
+        let clean = sanitize_server_version(&long);
+        assert_eq!(clean.chars().count(), SERVER_VERSION_MAX_CHARS);
+        assert!(clean.ends_with('…'));
     }
 
     #[tokio::test]
