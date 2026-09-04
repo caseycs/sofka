@@ -264,8 +264,7 @@ impl App {
         self.namespace = ns;
         self.note_recent_namespace(name);
         self.remember_namespace();
-        self.flash = format!("namespace: {}", self.namespace_label());
-        self.flash_err = false;
+        self.set_flash(format!("namespace: {}", self.namespace_label()));
         self.record_history();
         self.start_watch();
     }

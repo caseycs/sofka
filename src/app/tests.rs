@@ -2016,6 +2016,15 @@ async fn welcome_flash_does_not_expire() {
 
     assert_eq!(app.flash, WELCOME_FLASH);
     assert!(!app.flash_err);
+
+    // Stickiness rides on a flag rather than on matching the constant, and the
+    // first real flash to land clears it.
+    app.flash = "deleted web".into();
+    app.expire_flash();
+    assert!(!app.flash_sticky);
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+    assert!(app.flash.is_empty(), "{}", app.flash);
 }
 
 #[tokio::test]
@@ -2043,6 +2052,167 @@ async fn successful_transient_flash_expires() {
 
     assert!(app.flash.is_empty(), "{}", app.flash);
     assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn progress_flash_outlives_the_expiry_window() {
+    let (mut app, _rx) = test_app();
+    app.flash = "draining 3 nodes…".into();
+
+    // A drain or a bulk delete easily runs past 8s; blanking the bar
+    // mid-flight would read as though nothing were happening.
+    app.expire_flash();
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(30);
+    app.expire_flash();
+    assert_eq!(app.flash, "draining 3 nodes…");
+
+    // The result replaces it, and that one does expire on schedule.
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        message: "drain requested: 3 nodes".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "drain requested: 3 nodes");
+    assert!(!app.flash_err);
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+    assert!(app.flash.is_empty(), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn refreshing_mid_action_drops_the_orphaned_progress_flash() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    app.flash = "deleting 3 pods…".into();
+    let stale = app.generation;
+
+    // `r` restarts the watch, which bumps the generation, so the delete's
+    // `Msg::Flash` can no longer land. Nothing would replace the progress
+    // message and `expire_flash` won't time a `…` one out — hence the bump
+    // clears it itself.
+    app.handle_key(press(KeyCode::Char('r'))).unwrap();
+    assert_ne!(app.generation, stale);
+    assert!(app.flash.is_empty(), "{}", app.flash);
+
+    // The orphaned result is still dropped, not shown late.
+    app.handle_msg(Msg::Flash {
+        generation: stale,
+        message: "deleted 3 pods".into(),
+        err: false,
+    });
+    assert!(app.flash.is_empty(), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn action_progress_flashes_keep_the_ellipsis_convention() {
+    // `expire_flash` reads the trailing `…` as "still running". An action that
+    // forgets it gets its progress message blanked out mid-flight, which is
+    // exactly the failure the ellipsis guard exists to prevent.
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    let targets = vec![("web".to_string(), "default".to_string())];
+
+    app.do_scale(targets.clone(), 3);
+    assert!(app.flash.ends_with('…'), "scale: {}", app.flash);
+
+    app.do_scale(
+        vec![
+            targets[0].clone(),
+            ("api".to_string(), "default".to_string()),
+        ],
+        3,
+    );
+    assert!(app.flash.ends_with('…'), "bulk scale: {}", app.flash);
+
+    app.do_set_image(
+        "default".into(),
+        "web".into(),
+        "deployments".into(),
+        "app".into(),
+        "nginx:1.27".into(),
+    );
+    assert!(app.flash.ends_with('…'), "set-image: {}", app.flash);
+
+    app.do_set_suspend(targets.clone(), true);
+    assert!(app.flash.ends_with('…'), "suspend: {}", app.flash);
+
+    app.do_reconcile(targets.clone());
+    assert!(app.flash.ends_with('…'), "reconcile: {}", app.flash);
+
+    app.do_refresh_es(targets);
+    assert!(app.flash.ends_with('…'), "refresh: {}", app.flash);
+}
+
+#[tokio::test]
+async fn explain_findings_clear_the_progress_flash() {
+    let (mut app, _rx) = test_app();
+    app.flash = "explaining web…".into();
+
+    // Nothing else replaces this one, and `expire_flash` won't time a `…` out,
+    // so the handler has to clear it — as the `Msg::Gitops` arm does.
+    app.handle_msg(Msg::Explain {
+        generation: app.generation,
+        title: "explain — web".into(),
+        findings: Vec::new(),
+    });
+
+    assert_eq!(app.mode, Mode::Explain);
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn an_action_with_no_targets_claims_nothing() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("deployments");
+    app.flash.clear();
+
+    // `request_flux_menu` guards this, but the menu stays open across watch
+    // updates — the selected row can be gone by the time Enter lands.
+    app.do_set_suspend(Vec::new(), true);
+    assert!(app.flash.is_empty(), "{}", app.flash);
+    app.do_reconcile(Vec::new());
+    assert!(app.flash.is_empty(), "{}", app.flash);
+}
+
+#[tokio::test]
+async fn can_i_verdict_arrives_as_a_flash() {
+    let (mut app, _rx) = test_app();
+    // `:can-i` shares `Msg::Flash` with the action results. A denial is an
+    // answer, not a failure, so it doesn't go through `Msg::Error` — but it
+    // still reads as an error and sticks around like one.
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        message: "✗ no — cannot delete pods".into(),
+        err: true,
+    });
+    assert!(app.flash_err);
+    assert_eq!(app.last_error, None);
+
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(9);
+    app.expire_flash();
+    assert_eq!(app.flash, "✗ no — cannot delete pods");
+}
+
+#[tokio::test]
+async fn repeating_an_action_restarts_the_expiry_timer() {
+    let (mut app, _rx) = test_app();
+    app.set_flash("namespace: prod");
+
+    // 7s on, the same command runs again. The text is identical, so the
+    // `flash_seen` diff can't tell a repeat from a flash that has been sitting
+    // there all along — only going through the setter can.
+    app.flash_since = std::time::Instant::now() - std::time::Duration::from_secs(7);
+    app.set_flash("namespace: prod");
+
+    // 14s since the first showing, 7s since the repeat: still up.
+    app.flash_since -= std::time::Duration::from_secs(7);
+    app.expire_flash();
+    assert_eq!(app.flash, "namespace: prod");
+
+    app.flash_since -= std::time::Duration::from_secs(2);
+    app.expire_flash();
+    assert!(app.flash.is_empty(), "{}", app.flash);
 }
 
 #[tokio::test]

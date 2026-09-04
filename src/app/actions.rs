@@ -91,7 +91,7 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
-            let mut errors = 0u32;
+            let mut failed = false;
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
                     Api::namespaced_with(client.clone(), &ns, &kind.ar)
@@ -99,7 +99,7 @@ impl App {
                     Api::all_with(client.clone(), &kind.ar)
                 };
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
-                    errors += 1;
+                    failed = true;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -108,12 +108,12 @@ impl App {
                         .await;
                 }
             }
-            if errors == 0 {
+            if !failed {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
                         message: ok_message,
-                        ok: true,
+                        err: false,
                     })
                     .await;
             }
@@ -153,7 +153,7 @@ impl App {
             if force {
                 dp = dp.grace_period(0);
             }
-            let mut errors = 0u32;
+            let mut failed = false;
             for (name, ns) in targets {
                 let api: Api<DynamicObject> = if kind.namespaced && !ns.is_empty() {
                     Api::namespaced_with(client.clone(), &ns, &kind.ar)
@@ -161,7 +161,7 @@ impl App {
                     Api::all_with(client.clone(), &kind.ar)
                 };
                 if let Err(e) = api.delete(&name, &dp).await {
-                    errors += 1;
+                    failed = true;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -170,12 +170,12 @@ impl App {
                         .await;
                 }
             }
-            if errors == 0 {
+            if !failed {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
                         message: done_label,
-                        ok: true,
+                        err: false,
                     })
                     .await;
             }
@@ -288,22 +288,25 @@ impl App {
             format!("draining {} nodes…", targets.len())
         };
         self.flash_err = false;
+        // Not "drained": the task is done once the API accepts the evictions,
+        // but the pods are still terminating at that point (real `kubectl
+        // drain` blocks until they're gone).
         let done_label = if targets.len() == 1 {
-            format!("drained {}", targets[0])
+            format!("drain requested: {}", targets[0])
         } else {
-            format!("drained {} nodes", targets.len())
+            format!("drain requested: {} nodes", targets.len())
         };
         tokio::spawn(async move {
             let nodes: Api<DynamicObject> = Api::all_with(client.clone(), &kind.ar);
             let node_patch = Patch::Merge(node_unschedulable_patch(true));
             let pods: Api<Pod> = Api::all(client.clone());
-            let mut errors = 0u32;
+            let mut failed = false;
             for node in targets {
                 if let Err(e) = nodes
                     .patch(&node, &PatchParams::default(), &node_patch)
                     .await
                 {
-                    errors += 1;
+                    failed = true;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -319,7 +322,7 @@ impl App {
                 let pod_list = match listed {
                     Ok(list) => list,
                     Err(e) => {
-                        errors += 1;
+                        failed = true;
                         let _ = tx
                             .send(Msg::Error {
                                 generation: genr,
@@ -346,7 +349,7 @@ impl App {
                             if let Err(delete_err) =
                                 pod_api.delete(name, &DeleteParams::default()).await
                             {
-                                errors += 1;
+                                failed = true;
                                 let _ = tx
                                     .send(Msg::Error {
                                         generation: genr,
@@ -358,7 +361,7 @@ impl App {
                             }
                         }
                         Err(e) => {
-                            errors += 1;
+                            failed = true;
                             let _ = tx
                                 .send(Msg::Error {
                                     generation: genr,
@@ -369,12 +372,12 @@ impl App {
                     }
                 }
             }
-            if errors == 0 {
+            if !failed {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
                         message: done_label,
-                        ok: true,
+                        err: false,
                     })
                     .await;
             }
@@ -763,7 +766,7 @@ impl App {
             format!("set-image {container}={image}"),
             format!("{name} in {ns}"),
         );
-        self.flash = format!("setting image: {container} → {image}");
+        self.flash = format!("setting image: {container} → {image}…");
         self.flash_err = false;
         let ok_message = format!("image set: {container} → {image}");
         self.spawn_patch_action(
@@ -1539,10 +1542,10 @@ impl App {
         let label = self.action_label(&targets);
         self.note_action(format!("scale to {replicas}"), label);
         self.flash = if let [(name, _)] = targets.as_slice() {
-            format!("scaling {name} → {replicas}")
+            format!("scaling {name} → {replicas}…")
         } else {
             format!(
-                "scaling {} {} → {replicas}",
+                "scaling {} {} → {replicas}…",
                 targets.len(),
                 self.kind_plural
             )
@@ -1843,6 +1846,13 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
+        // `request_flux_menu` checks this, but the menu stays open across
+        // watch updates: if the selected row is deleted while it's up, Enter
+        // would otherwise flash "suspended 0 …" for a patch loop that ran zero
+        // times.
+        if targets.is_empty() {
+            return;
+        }
         let label = self.action_label(&targets);
         self.note_action(if suspend { "suspend" } else { "resume" }, label);
         let verb = if suspend { "suspending" } else { "resuming" };
@@ -1875,6 +1885,9 @@ impl App {
         let Some(kind) = self.kind.clone() else {
             return;
         };
+        if targets.is_empty() {
+            return; // see `do_set_suspend`
+        }
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
         let label = self.action_label(&targets);
         self.note_action("reconcile", label);
@@ -1885,10 +1898,17 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
+        // Same overclaim as "drained": `reconcile_patch` only stamps
+        // `reconcile.fluxcd.io/requestedAt`, and the Flux controller acts on it
+        // later — unlike `flux reconcile`, which waits for the result.
         let ok_message = if targets.len() == 1 {
-            format!("reconciled {}", targets[0].0)
+            format!("reconcile requested: {}", targets[0].0)
         } else {
-            format!("reconciled {} {}", targets.len(), self.kind_plural)
+            format!(
+                "reconcile requested: {} {}",
+                targets.len(),
+                self.kind_plural
+            )
         };
         self.spawn_patch_action(
             kind,
@@ -1951,13 +1971,13 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
-            let mut errors = 0u32;
+            let mut failed = false;
             for (name, ns, job) in jobs {
                 let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &job_ar);
                 let job: DynamicObject = match serde_json::from_value(job) {
                     Ok(j) => j,
                     Err(e) => {
-                        errors += 1;
+                        failed = true;
                         let _ = tx
                             .send(Msg::Error {
                                 generation: genr,
@@ -1968,7 +1988,7 @@ impl App {
                     }
                 };
                 if let Err(e) = api.create(&PostParams::default(), &job).await {
-                    errors += 1;
+                    failed = true;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -1977,12 +1997,12 @@ impl App {
                         .await;
                 }
             }
-            if errors == 0 {
+            if !failed {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
                         message: done_label,
-                        ok: true,
+                        err: false,
                     })
                     .await;
             }
@@ -2025,10 +2045,12 @@ impl App {
         };
         self.flash_err = false;
         self.marked.clear();
+        // Likewise a request: the `force-sync` annotation is picked up by the
+        // operator on its next pass, so the secret isn't refreshed yet.
         let ok_message = if targets.len() == 1 {
-            format!("refreshed {}", targets[0].0)
+            format!("refresh requested: {}", targets[0].0)
         } else {
-            format!("refreshed {} {}", targets.len(), self.kind_plural)
+            format!("refresh requested: {} {}", targets.len(), self.kind_plural)
         };
         self.spawn_patch_action(
             kind,
@@ -2053,24 +2075,59 @@ impl App {
         self.flash_err = true;
     }
 
-    /// Auto-clear a successful transient flash 8s after it last changed.
-    /// Errors and the initial welcome hint remain until another interaction
-    /// replaces them. Called from the main loop's 1s tick; detects a change by
+    /// Set the status bar to a successful transient message and (re)start its
+    /// expiry timer. Assigning `self.flash` directly still works — the tick
+    /// notices by diffing — but only this path restarts the timer when the new
+    /// text equals the old, so repeating an action inside the window re-shows
+    /// its confirmation for the full [`FLASH_TTL`] instead of inheriting the
+    /// first one's remaining time.
+    pub(super) fn set_flash(&mut self, msg: impl Into<String>) {
+        self.flash = msg.into();
+        self.flash_err = false;
+        self.flash_sticky = false;
+        self.flash_seen.clone_from(&self.flash);
+        self.flash_since = std::time::Instant::now();
+    }
+
+    /// Drop an in-flight progress flash whose result can no longer reach us.
+    /// [`Msg::Flash`] is generation-gated, so bumping the generation orphans
+    /// the task that would have replaced "deleting 3 pods…" with its result —
+    /// and [`App::expire_flash`] deliberately never times a progress message
+    /// out. Without this, a refresh (`r`) during a bulk delete would strand
+    /// that message on the bar for good.
+    pub(super) fn clear_orphaned_progress_flash(&mut self) {
+        if self.flash.ends_with('…') {
+            self.flash.clear();
+            self.flash_err = false;
+        }
+    }
+
+    /// Auto-clear a *finished* transient flash [`FLASH_TTL`] after it last
+    /// changed. Called from the main loop's 1s tick; detects a change by
     /// diffing against `flash_seen` rather than requiring every
     /// `self.flash = …` call site to also touch a timestamp.
+    ///
+    /// Three kinds of message are exempt. Errors stay until the next action
+    /// replaces them — a failed delete that erases itself while you're away
+    /// from the terminal leaves no trace that anything broke. The welcome hint
+    /// is sticky. And an in-flight progress message must outlive its own
+    /// operation: a drain or a bulk delete easily runs past the window, and
+    /// blanking it mid-flight would read as "nothing is happening". Those all
+    /// end in `…` by convention, which is what marks them here.
     pub fn expire_flash(&mut self) {
         if self.flash != self.flash_seen {
-            self.flash_seen = self.flash.clone();
+            self.flash_seen.clone_from(&self.flash);
             self.flash_since = std::time::Instant::now();
+            self.flash_sticky = false;
             return;
         }
         if !self.flash.is_empty()
             && !self.flash_err
-            && self.flash != WELCOME_FLASH
-            && self.flash_since.elapsed() >= std::time::Duration::from_secs(8)
+            && !self.flash_sticky
+            && !self.flash.ends_with('…')
+            && self.flash_since.elapsed() >= FLASH_TTL
         {
             self.flash.clear();
-            self.flash_err = false;
             self.flash_seen.clear();
         }
     }
@@ -2158,7 +2215,7 @@ impl App {
                         .send(Msg::Flash {
                             generation: genr,
                             message: format!("rolled back {name} to revision {revision}"),
-                            ok: true,
+                            err: false,
                         })
                         .await;
                 }
@@ -2220,12 +2277,12 @@ impl App {
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
-            let mut errors = 0u32;
+            let mut failed = false;
             for (name, ns) in targets {
                 let mut argv = helm_base.clone();
                 argv.extend(["uninstall".to_string(), name.clone(), "-n".to_string(), ns]);
                 if let Err(e) = run_helm(&argv).await {
-                    errors += 1;
+                    failed = true;
                     let _ = tx
                         .send(Msg::Error {
                             generation: genr,
@@ -2234,12 +2291,12 @@ impl App {
                         .await;
                 }
             }
-            if errors == 0 {
+            if !failed {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
                         message: done_label,
-                        ok: true,
+                        err: false,
                     })
                     .await;
             }

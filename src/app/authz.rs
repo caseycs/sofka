@@ -102,19 +102,19 @@ impl App {
                     if status.denied.unwrap_or(false) {
                         deny_msg(genr, &subject, reason)
                     } else if status.allowed {
-                        Msg::CanIResult {
+                        Msg::Flash {
                             generation: genr,
-                            text: format!("✓ yes — can {subject}"),
-                            ok: true,
+                            message: format!("✓ yes — can {subject}"),
+                            err: false,
                         }
                     } else {
                         deny_msg(genr, &subject, reason)
                     }
                 }
-                Err(e) => Msg::CanIResult {
+                Err(e) => Msg::Flash {
                     generation: genr,
-                    text: format!("can-i {subject}: review failed: {e}"),
-                    ok: false,
+                    message: format!("can-i {subject}: review failed: {e}"),
+                    err: true,
                 },
             };
             let _ = tx.send(msg).await;
@@ -124,10 +124,10 @@ impl App {
 
 fn deny_msg(generation: u64, subject: &str, reason: Option<String>) -> Msg {
     let tail = reason.map(|r| format!(" ({r})")).unwrap_or_default();
-    Msg::CanIResult {
+    Msg::Flash {
         generation,
-        text: format!("✗ no — cannot {subject}{tail}"),
-        ok: false,
+        message: format!("✗ no — cannot {subject}{tail}"),
+        err: true,
     }
 }
 

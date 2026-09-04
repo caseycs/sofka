@@ -64,6 +64,10 @@ const LOG_BATCH_MS: u64 = 50;
 const WELCOME_FLASH: &str =
     "Welcome to sofka — ':' resource · enter drill · d describe · l logs · ? help";
 
+/// How long a finished, successful flash stays on screen before the 1s tick
+/// clears it (see [`App::expire_flash`]).
+const FLASH_TTL: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// Flux CD resource kinds whose spec has a `suspend: bool` field — every kind
 /// with a corresponding `flux suspend/resume` subcommand: kustomize- and
 /// helm-controller reconcilers, source-controller fetchers, image-automation
@@ -1212,6 +1216,10 @@ pub struct App {
     /// sets `flash` directly.
     pub(super) flash_seen: String,
     pub(super) flash_since: std::time::Instant,
+    /// Keeps the current flash on screen indefinitely. Only the welcome hint
+    /// starts sticky; the first flash that replaces it clears the flag, so no
+    /// call site has to.
+    pub(super) flash_sticky: bool,
 
     pub detail: Scrollable,
     /// Search query for the help view (`?`), which has no backing
@@ -1537,8 +1545,11 @@ impl App {
             cmd_sel: 0,
             flash: WELCOME_FLASH.into(),
             flash_err: false,
-            flash_seen: String::new(),
+            // Pre-seeded so the first tick sees no change and leaves the
+            // welcome hint's sticky flag alone.
+            flash_seen: WELCOME_FLASH.into(),
             flash_since: std::time::Instant::now(),
+            flash_sticky: true,
             detail: Scrollable::empty(),
             help_filter: String::new(),
             doc_filter_return: Mode::Detail,

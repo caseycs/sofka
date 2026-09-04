@@ -262,6 +262,7 @@ impl App {
         };
         self.applied_filter_labels = filter_labels;
         self.applied_filter_fields = filter_fields;
+        self.clear_orphaned_progress_flash();
         self.generation += 1;
         self.gen_flag.store(self.generation, Ordering::SeqCst);
         for t in self.tasks.drain(..) {
@@ -777,6 +778,7 @@ impl App {
 
     pub(super) fn bump_generation(&mut self) {
         self.stop_event_stream();
+        self.clear_orphaned_progress_flash();
         self.generation += 1;
         self.gen_flag.store(self.generation, Ordering::SeqCst);
         for t in self.tasks.drain(..) {
@@ -841,10 +843,13 @@ impl App {
             Msg::Flash {
                 generation,
                 message,
-                ok,
+                err,
             } if generation == self.generation => {
-                self.flash = message;
-                self.flash_err = !ok;
+                // Through the setter, so re-running an action inside the
+                // expiry window restarts the timer on an identical message
+                // instead of letting it vanish a moment later.
+                self.set_flash(message);
+                self.flash_err = err;
             }
             Msg::Panic(error) => {
                 self.last_error = Some(error.clone());
@@ -987,14 +992,10 @@ impl App {
                 self.explain_state
                     .select((!self.explain_items.is_empty()).then_some(first));
                 self.mode = Mode::Explain;
-            }
-            Msg::CanIResult {
-                generation,
-                text,
-                ok,
-            } if generation == self.generation => {
-                self.flash = text;
-                self.flash_err = !ok;
+                // As in the `Msg::Gitops` arm below: the "explaining X…"
+                // progress flash has done its job now the findings are up.
+                self.flash.clear();
+                self.flash_err = false;
             }
             Msg::Gitops {
                 generation,

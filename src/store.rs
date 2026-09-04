@@ -72,12 +72,6 @@ pub enum Msg {
         title: String,
         findings: Vec<crate::explain::Finding>,
     },
-    /// Result of a `:can-i <verb> <resource>` access review, shown as a flash.
-    CanIResult {
-        generation: u64,
-        text: String,
-        ok: bool,
-    },
     /// Reconciliation-chain findings for the GitOps view, gathered off-thread.
     Gitops {
         generation: u64,
@@ -215,11 +209,17 @@ pub enum Msg {
         error: String,
     },
     /// A background action (delete, restart, scale, drain, helm op, …)
-    /// finished; replaces its "…ing" progress flash with a result.
+    /// finished; replaces its "…ing" progress flash with a result. Also
+    /// carries `:can-i` verdicts, which are the same thing: a one-line answer
+    /// from an off-thread task.
     Flash {
         generation: u64,
         message: String,
-        ok: bool,
+        /// Render in the error style. Action results never set this — a failed
+        /// action reports through [`Msg::Error`] instead — but a `:can-i`
+        /// denial is a legitimate answer rather than a failure, and still
+        /// wants to read as a "no".
+        err: bool,
     },
     /// A panic in a background task, reported by the process panic hook.
     /// Deliberately generation-free: it must surface no matter which view is
