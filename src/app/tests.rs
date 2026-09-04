@@ -778,6 +778,14 @@ async fn ctrl_f_and_ctrl_b_page_by_the_drawn_viewport_height() {
     app.table_page_rows = 20;
     app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
     assert_eq!(app.table_state.selected(), Some(20));
+
+    // ctrl-alt-f is a distinct chord left to plugins, not a page move.
+    let ctrl_alt_f = KeyEvent::new(
+        KeyCode::Char('f'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    );
+    app.handle_key(ctrl_alt_f).unwrap();
+    assert_eq!(app.table_state.selected(), Some(20));
 }
 
 #[tokio::test]

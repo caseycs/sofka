@@ -30,11 +30,15 @@ impl App {
                     self.start_watch();
                     return Ok(());
                 }
-                KeyCode::Char('f') if self.mode == Mode::Table => {
+                KeyCode::Char('f')
+                    if self.mode == Mode::Table && key.modifiers == KeyModifiers::CONTROL =>
+                {
                     self.move_page(1);
                     return Ok(());
                 }
-                KeyCode::Char('b') if self.mode == Mode::Table => {
+                KeyCode::Char('b')
+                    if self.mode == Mode::Table && key.modifiers == KeyModifiers::CONTROL =>
+                {
                     self.move_page(-1);
                     return Ok(());
                 }
