@@ -263,15 +263,32 @@ fn split_cmp(tok: &str) -> Option<(&str, Op, &str)> {
     Some((key, op, value))
 }
 
-/// Case-fold one string for a filter comparison, per `char`.
+/// Fold a comparison needle once at parse time.
 ///
-/// Deliberately not `str::to_lowercase`: the two disagree on Greek final sigma
-/// (`Σ` folds to `ς` at the end of a word through `str`, always to `σ` through
-/// `char`). The needle is folded once at parse time and each cell is folded
-/// lazily on every rebuild, so they must fold *identically* or a comparison
-/// silently misses — hence one function, used by both sides.
-pub fn fold_lower(s: &str) -> impl Iterator<Item = char> + '_ {
-    s.chars().flat_map(char::to_lowercase)
+/// Whole-string lowercasing is required for non-ASCII text because it applies
+/// context-sensitive mappings such as Greek final sigma. ASCII uses its
+/// cheaper equivalent; the resulting `String` is retained in `CmpValue`.
+fn fold_lower(s: &str) -> String {
+    if s.is_ascii() {
+        s.to_ascii_lowercase()
+    } else {
+        s.to_lowercase()
+    }
+}
+
+/// Compare a cell with a needle already returned by [`fold_lower`].
+///
+/// The common ASCII path performs no per-cell allocation. If either operand is
+/// non-ASCII, use whole-string lowercasing to preserve the case-insensitive
+/// behavior that structured filters had before the ASCII optimization.
+pub fn cmp_folded_lower(cell: &str, want: &str) -> std::cmp::Ordering {
+    if cell.is_ascii() && want.is_ascii() {
+        cell.bytes()
+            .map(|byte| byte.to_ascii_lowercase())
+            .cmp(want.bytes())
+    } else {
+        cell.to_lowercase().as_str().cmp(want)
+    }
 }
 
 /// Type a comparison value from its key: quantities for `cpu`/`mem`/`memory`,
@@ -290,7 +307,7 @@ fn typed_value(key: &str, raw: &str) -> Result<CmpValue, String> {
         _ => Ok(raw
             .parse::<f64>()
             .map(CmpValue::Num)
-            .unwrap_or_else(|_| CmpValue::Str(fold_lower(raw).collect()))),
+            .unwrap_or_else(|_| CmpValue::Str(fold_lower(raw)))),
     }
 }
 
@@ -603,23 +620,29 @@ mod tests {
         assert_eq!(parse("-l app=api").fuzzy_needle(), None);
     }
 
-    /// The needle is folded once at parse time and each cell is folded on every
-    /// rebuild. `str::to_lowercase` applies the Greek final-sigma rule and
-    /// `char::to_lowercase` does not, so folding the two sides with different
-    /// functions makes a comparison silently miss. Both go through
-    /// `fold_lower`; this pins that down at the one place they could drift.
     #[test]
-    fn both_sides_of_a_comparison_fold_the_same_way() {
-        let cell = "ΟΔΟΣ";
-        // The divergence is real, not theoretical.
-        assert_eq!(cell.to_lowercase(), "οδος");
-        assert_eq!(fold_lower(cell).collect::<String>(), "οδοσ");
+    fn unicode_comparisons_fold_mixed_case_in_both_directions() {
+        for (cell, raw_needle) in [("ΟΔΟΣ", "οδος"), ("οδος", "ΟΔΟΣ")] {
+            let CmpValue::Str(needle) = typed_value("name", raw_needle).expect("typed") else {
+                panic!("expected a text comparison");
+            };
+            assert_eq!(
+                cmp_folded_lower(cell, &needle),
+                std::cmp::Ordering::Equal,
+                "cell={cell:?}, needle={raw_needle:?}"
+            );
+        }
+    }
 
-        // What matters is that the stored needle and the folded cell agree.
-        let CmpValue::Str(needle) = typed_value("name", cell).expect("typed") else {
+    #[test]
+    fn ascii_comparisons_remain_case_insensitive() {
+        let CmpValue::Str(needle) = typed_value("status", "rUnNiNg").expect("typed") else {
             panic!("expected a text comparison");
         };
-        assert!(fold_lower(cell).eq(needle.chars()));
+        assert_eq!(
+            cmp_folded_lower("RUNNING", &needle),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]

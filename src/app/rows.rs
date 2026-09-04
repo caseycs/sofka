@@ -193,15 +193,11 @@ impl App {
                     .eval(crate::columns::parse_leading_num(&cell).total_cmp(want)),
                 None => false,
             },
-            // `want` was folded once at parse time and the cell is folded
-            // lazily through the iterator, so a text comparison allocates
-            // nothing per object. UTF-8 orders by code point, so comparing
-            // `char`s matches what comparing the folded `str`s did. Both sides
-            // go through `fold_lower` — see there for why that matters.
+            // `want` was folded once at parse time. ASCII cells compare through
+            // an allocation-free byte iterator; non-ASCII cells use
+            // whole-string lowercasing for context-sensitive Unicode mappings.
             CmpValue::Str(want) => match self.column_cell(o, &cmp.key) {
-                Some(cell) => cmp
-                    .op
-                    .eval(crate::filter::fold_lower(&cell).cmp(want.chars())),
+                Some(cell) => cmp.op.eval(crate::filter::cmp_folded_lower(&cell, want)),
                 None => false,
             },
         }
