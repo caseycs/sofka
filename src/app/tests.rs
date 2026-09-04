@@ -13,6 +13,15 @@ fn test_app() -> (App, Receiver<Msg>) {
     (App::new(Cluster::fake(), tx), rx)
 }
 
+/// The claim the operation that just started owns, for tests that hand-build
+/// the result message it is waiting for.
+fn current_claim(app: &App) -> crate::store::StatusClaim {
+    app.status_claim
+        .as_ref()
+        .expect("no operation has claimed the status bar")
+        .0
+}
+
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -1029,16 +1038,20 @@ async fn pulse_and_xray_warns_surface_as_flash() {
         warn: Some("listing pods: 403".into()),
         ..Default::default()
     };
+    let claim = app.claim_status("pulse — cluster health…");
     app.handle_msg(Msg::PulseData {
         generation: app.generation,
+        claim,
         data,
     });
     assert!(app.flash_err);
     assert!(app.flash.contains("incomplete"), "{}", app.flash);
 
     app.flash_err = false;
+    let claim = app.claim_status("xray: pods…");
     app.handle_msg(Msg::XrayData {
         generation: app.generation,
+        claim,
         items: Vec::new(),
         warn: Some("listing replicasets: 403".into()),
     });
@@ -1557,6 +1570,7 @@ async fn find_opens_picker_and_enter_navigates_to_the_object() {
 
     app.handle_msg(Msg::FindResults {
         generation: app.generation,
+        claim: current_claim(&app),
         query: "web".into(),
         items: vec![
             crate::store::FindItem {
@@ -1581,8 +1595,11 @@ async fn find_opens_picker_and_enter_navigates_to_the_object() {
     assert_eq!(app.fields.as_deref(), Some("metadata.name=web-1"));
 
     // Incomplete sweeps say so instead of pretending the list is exhaustive.
+    // A fresh sweep, because navigating away retired the first one's claim.
+    assert!(app.run_palette_command("find web"));
     app.handle_msg(Msg::FindResults {
         generation: app.generation,
+        claim: current_claim(&app),
         query: "web".into(),
         items: Vec::new(),
         warn: Some("2 kind(s) could not be listed".into()),
@@ -2266,6 +2283,170 @@ async fn an_older_action_result_cannot_overwrite_a_newer_action() {
     });
     assert_eq!(app.flash, "scaled worker → 2");
     assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn an_action_failure_is_never_silently_dropped() {
+    let (mut app, _rx) = test_app();
+
+    // A delete fails after a describe has claimed the bar. The failure is not
+    // this operation's to show, but the bar only holds an unresolved `…`, so
+    // borrowing it costs nothing and losing the failure costs a lot.
+    let delete = app.claim_status("deleting web…");
+    let describe = app.claim_status("describing api…");
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: delete,
+        message: "delete web failed: forbidden".into(),
+        err: true,
+    });
+    assert!(app.flash_err);
+    assert_eq!(app.flash, "delete web failed: forbidden");
+    assert_eq!(
+        app.last_action_error.as_deref(),
+        Some("delete web failed: forbidden")
+    );
+
+    // Borrowing does not take ownership: the describe still reports normally.
+    app.handle_msg(Msg::Detail {
+        generation: app.generation,
+        claim: describe,
+        title: "api — describe".into(),
+        lines: vec!["Name: api".into()],
+        warn: None,
+    });
+    assert!(app.flash.is_empty(), "{}", app.flash);
+
+    // A failure that cannot even borrow the bar — a newer operation has
+    // already put a finished result there — is still recorded for `:debug`.
+    let stale = app.claim_status("draining node-1…");
+    let newer = app.claim_status("scaling web → 3…");
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: newer,
+        message: "scaled web → 3".into(),
+        err: false,
+    });
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: stale,
+        message: "drain node-1 failed: forbidden".into(),
+        err: true,
+    });
+    assert_eq!(app.flash, "scaled web → 3");
+    assert!(!app.flash_err);
+    assert_eq!(
+        app.last_action_error.as_deref(),
+        Some("drain node-1 failed: forbidden")
+    );
+    app.open_info();
+    assert!(
+        app.detail.lines.iter().any(|l| l
+            .to_string()
+            .contains("last failure: drain node-1 failed: forbidden")),
+        "`:info` does not report the failure"
+    );
+}
+
+#[tokio::test]
+async fn every_async_result_is_scoped_to_its_own_operation() {
+    // The claim plumbing has to reach *every* operation that writes the bar,
+    // not just the action ones — an unclaimed handler overwrites whatever the
+    // user started later.
+    let (mut app, _rx) = test_app();
+
+    let find = app.claim_status("finding 'foo'…");
+    let delete = app.claim_status("deleting 3 pods…");
+    app.handle_msg(Msg::FindResults {
+        generation: app.generation,
+        claim: find,
+        query: "foo".into(),
+        items: Vec::new(),
+        warn: None,
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+    // The results still land, only the status is scoped.
+    assert_eq!(app.find_query, "foo");
+
+    app.handle_msg(Msg::TransferDone {
+        generation: app.generation,
+        claim: find,
+        result: Ok("copied a → b".into()),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::SnapshotSaved {
+        generation: app.generation,
+        claim: find,
+        result: Ok(std::path::PathBuf::from("/tmp/snap.json")),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::BundleSaved {
+        generation: app.generation,
+        claim: find,
+        result: Ok(std::path::PathBuf::from("/tmp/bundle.txt")),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::DebuggersCleaned {
+        generation: app.generation,
+        claim: find,
+        deleted: 2,
+        failed: Vec::new(),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::ClipboardCopied {
+        generation: app.generation,
+        claim: find,
+        copied: true,
+        success: "copied 12 log lines".into(),
+        failure: "no clipboard target".into(),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::LogsSaved {
+        generation: app.log_gen,
+        claim: find,
+        result: Ok(std::path::PathBuf::from("/tmp/sofka.log")),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::PluginBulkDone {
+        generation: app.generation,
+        claim: find,
+        name: "sync".into(),
+        ok: 3,
+        failed: Vec::new(),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::ContextRenamed {
+        generation: app.generation,
+        claim: find,
+        old: "test".into(),
+        new: "staging".into(),
+        result: Ok(()),
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::XrayData {
+        generation: app.generation,
+        claim: find,
+        items: Vec::new(),
+        warn: None,
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    // And the owner still reports when it lands.
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: delete,
+        message: "deleted 3 pods".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "deleted 3 pods");
 }
 
 #[tokio::test]
@@ -3210,14 +3391,18 @@ async fn stale_log_save_result_is_dropped() {
     let stale = app.log_gen;
     app.log_gen += 1;
 
+    let claim = app.claim_status("saving logs…");
     app.handle_msg(Msg::LogsSaved {
         generation: stale,
+        claim,
         result: Err("old write failed".into()),
     });
     assert!(!app.flash.contains("old write failed"));
 
+    let claim = app.claim_status("saving logs…");
     app.handle_msg(Msg::LogsSaved {
         generation: app.log_gen,
+        claim,
         result: Ok(std::env::temp_dir().join("sofka-test.log")),
     });
     assert!(app.flash.contains("sofka-test.log"));
@@ -3230,16 +3415,20 @@ async fn stale_clipboard_result_is_dropped() {
     let stale = app.generation;
     app.bump_generation();
 
+    let claim = app.claim_status("copying to clipboard…");
     app.handle_msg(Msg::ClipboardCopied {
         generation: stale,
+        claim,
         copied: false,
         success: "copied stale".into(),
         failure: "stale failed".into(),
     });
     assert!(!app.flash.contains("stale failed"));
 
+    let claim = app.claim_status("copying to clipboard…");
     app.handle_msg(Msg::ClipboardCopied {
         generation: app.generation,
+        claim,
         copied: true,
         success: "copied current".into(),
         failure: "current failed".into(),
@@ -4511,8 +4700,10 @@ async fn context_renamed_updates_lists_and_current_context() {
     app.all_contexts = vec!["prod".into(), "test".into()];
     app.note_recent_namespace("shop");
 
+    let claim = app.claim_status("renaming test → staging…");
     app.handle_msg(Msg::ContextRenamed {
         generation: app.generation,
+        claim,
         old: "test".into(),
         new: "staging".into(),
         result: Ok(()),
@@ -4546,8 +4737,10 @@ async fn context_renamed_updates_lists_and_current_context() {
     );
 
     // A failed rename only flashes.
+    let claim = app.claim_status("renaming prod → live…");
     app.handle_msg(Msg::ContextRenamed {
         generation: app.generation,
+        claim,
         old: "prod".into(),
         new: "live".into(),
         result: Err("no context exists with the name".into()),

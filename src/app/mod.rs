@@ -1226,6 +1226,10 @@ pub struct App {
     /// direct status assignment invalidate the claim even before the next
     /// expiry tick observes that assignment.
     pub(super) status_claim: Option<(StatusClaim, String)>,
+    /// Last action failure, recorded even when a newer operation owned the
+    /// status bar and the message could not be shown. Surfaced by `:debug`
+    /// so a failure is never lost outright.
+    pub last_action_error: Option<String>,
 
     pub detail: Scrollable,
     /// Search query for the help view (`?`), which has no backing
@@ -1558,6 +1562,7 @@ impl App {
             flash_sticky: true,
             next_status_claim: 0,
             status_claim: None,
+            last_action_error: None,
             detail: Scrollable::empty(),
             help_filter: String::new(),
             doc_filter_return: Mode::Detail,

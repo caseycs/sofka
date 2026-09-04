@@ -55,10 +55,12 @@ pub enum Msg {
     },
     PulseData {
         generation: u64,
+        claim: StatusClaim,
         data: Pulse,
     },
     XrayData {
         generation: u64,
+        claim: StatusClaim,
         items: Vec<XrayItem>,
         /// A list that failed during the gather — the tree may be incomplete.
         warn: Option<String>,
@@ -87,6 +89,7 @@ pub enum Msg {
     /// Captured output of an `output = "popup"` plugin run.
     PluginOutput {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         lines: Vec<String>,
         /// Set when the plugin failed or timed out (a nonzero exit, stderr).
@@ -96,6 +99,7 @@ pub enum Msg {
     /// bulk): how many jobs succeeded and the failures (label + reason).
     PluginBulkDone {
         generation: u64,
+        claim: StatusClaim,
         name: String,
         ok: usize,
         failed: Vec<String>,
@@ -119,16 +123,19 @@ pub enum Msg {
     /// "copied …" summary, or kubectl's error.
     TransferDone {
         generation: u64,
+        claim: StatusClaim,
         result: Result<String, String>,
     },
     /// Result of an off-thread log save.
     LogsSaved {
         generation: u64,
+        claim: StatusClaim,
         result: Result<std::path::PathBuf, String>,
     },
     /// Result of an off-thread clipboard copy.
     ClipboardCopied {
         generation: u64,
+        claim: StatusClaim,
         copied: bool,
         success: String,
         failure: String,
@@ -153,6 +160,7 @@ pub enum Msg {
     /// context switcher).
     ContextRenamed {
         generation: u64,
+        claim: StatusClaim,
         old: String,
         new: String,
         result: Result<(), String>,
@@ -176,12 +184,14 @@ pub enum Msg {
     /// deleted and any per-pod failures (`ns/name: reason`).
     DebuggersCleaned {
         generation: u64,
+        claim: StatusClaim,
         deleted: usize,
         failed: Vec<String>,
     },
     /// An assembled diagnostic bundle (`:bundle`), ready to preview and save.
     Bundle {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         text: String,
         /// Suggested filename for `:bundle-save`.
@@ -190,11 +200,13 @@ pub enum Msg {
     /// Result of writing a bundle to disk (`:bundle-save`).
     BundleSaved {
         generation: u64,
+        claim: StatusClaim,
         result: Result<std::path::PathBuf, String>,
     },
     /// Result of writing a snapshot to disk (`:snapshot`).
     SnapshotSaved {
         generation: u64,
+        claim: StatusClaim,
         result: Result<std::path::PathBuf, String>,
     },
     /// One context's summary for the fleet dashboard (`:fleet`), arriving
@@ -206,6 +218,7 @@ pub enum Msg {
     /// Results of a `:find <text>` sweep across kinds.
     FindResults {
         generation: u64,
+        claim: StatusClaim,
         query: String,
         items: Vec<FindItem>,
         /// Kinds that failed to list — the results may be incomplete.

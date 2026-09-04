@@ -929,26 +929,36 @@ impl App {
             }
             Msg::FindResults {
                 generation,
+                claim,
                 query,
                 items,
                 warn,
             } if generation == self.generation => {
-                if let Some(w) = warn {
-                    self.flash = format!("find is incomplete — {w}");
-                    self.flash_err = true;
-                } else {
-                    self.flash = format!("{} hit(s) for '{query}'", items.len());
-                    self.flash_err = false;
+                match warn {
+                    Some(w) => {
+                        self.set_claimed_status(claim, format!("find is incomplete — {w}"), true)
+                    }
+                    None => self.set_claimed_status(
+                        claim,
+                        format!("{} hit(s) for '{query}'", items.len()),
+                        false,
+                    ),
                 }
                 self.find_query = query;
                 self.find_items = items;
                 self.find_state
                     .select((!self.find_items.is_empty()).then_some(0));
             }
-            Msg::PulseData { generation, data } if generation == self.generation => {
-                if let Some(w) = &data.warn {
-                    self.flash = format!("pulse is incomplete — {w}");
-                    self.flash_err = true;
+            Msg::PulseData {
+                generation,
+                claim,
+                data,
+            } if generation == self.generation => {
+                match &data.warn {
+                    Some(w) => {
+                        self.set_claimed_status(claim, format!("pulse is incomplete — {w}"), true)
+                    }
+                    None => self.clear_claimed_status(claim),
                 }
                 self.pulse = data;
             }
@@ -961,12 +971,15 @@ impl App {
             }
             Msg::XrayData {
                 generation,
+                claim,
                 items,
                 warn,
             } if generation == self.generation => {
-                if let Some(w) = warn {
-                    self.flash = format!("xray is incomplete — {w}");
-                    self.flash_err = true;
+                match warn {
+                    Some(w) => {
+                        self.set_claimed_status(claim, format!("xray is incomplete — {w}"), true)
+                    }
+                    None => self.clear_claimed_status(claim),
                 }
                 let keep = self.xray_state.selected().unwrap_or(0);
                 self.xray_items = items;
@@ -1014,6 +1027,7 @@ impl App {
             }
             Msg::PluginOutput {
                 generation,
+                claim,
                 title,
                 lines,
                 warn,
@@ -1025,22 +1039,19 @@ impl App {
                 };
                 self.mode = Mode::Detail;
                 match warn {
-                    Some(w) => self.flash_warn(&w),
-                    None => {
-                        self.flash = "plugin done".into();
-                        self.flash_err = false;
-                    }
+                    Some(w) => self.set_claimed_status(claim, w, true),
+                    None => self.set_claimed_status(claim, "plugin done", false),
                 }
             }
             Msg::PluginBulkDone {
                 generation,
+                claim,
                 name,
                 ok,
                 failed,
             } if generation == self.generation => {
                 if failed.is_empty() {
-                    self.flash = format!("plugin {name}: {ok} ok");
-                    self.flash_err = false;
+                    self.set_claimed_status(claim, format!("plugin {name}: {ok} ok"), false);
                 } else {
                     let shown: Vec<&str> = failed.iter().take(3).map(String::as_str).collect();
                     let more = failed.len().saturating_sub(shown.len());
@@ -1049,32 +1060,45 @@ impl App {
                     } else {
                         String::new()
                     };
-                    self.flash_warn(&format!(
-                        "plugin {name}: {ok} ok, {} failed — {}{tail}",
-                        failed.len(),
-                        shown.join("; ")
-                    ));
+                    self.set_claimed_status(
+                        claim,
+                        format!(
+                            "plugin {name}: {ok} ok, {} failed — {}{tail}",
+                            failed.len(),
+                            shown.join("; ")
+                        ),
+                        true,
+                    );
                 }
             }
             Msg::DebuggersCleaned {
                 generation,
+                claim,
                 deleted,
                 failed,
             } if generation == self.generation => {
                 if failed.is_empty() {
-                    self.flash = format!("removed {deleted} node debugger pod(s)");
-                    self.flash_err = false;
+                    self.set_claimed_status(
+                        claim,
+                        format!("removed {deleted} node debugger pod(s)"),
+                        false,
+                    );
                 } else {
                     let shown: Vec<&str> = failed.iter().take(3).map(String::as_str).collect();
-                    self.flash_warn(&format!(
-                        "debug-clean: removed {deleted}, {} failed — {}",
-                        failed.len(),
-                        shown.join("; ")
-                    ));
+                    self.set_claimed_status(
+                        claim,
+                        format!(
+                            "debug-clean: removed {deleted}, {} failed — {}",
+                            failed.len(),
+                            shown.join("; ")
+                        ),
+                        true,
+                    );
                 }
             }
             Msg::Bundle {
                 generation,
+                claim,
                 title,
                 text,
                 filename,
@@ -1087,30 +1111,37 @@ impl App {
                 self.pending_bundle = Some((filename, text));
                 self.set_return_mode();
                 self.mode = Mode::Detail;
-                self.flash = "bundle ready — review, then :bundle-save".into();
-                self.flash_err = false;
+                self.set_claimed_status(claim, "bundle ready — review, then :bundle-save", false);
             }
-            Msg::BundleSaved { generation, result } if generation == self.generation => {
-                match result {
-                    Ok(path) => {
-                        self.flash = format!("saved bundle → {}", path.display());
-                        self.flash_err = false;
-                    }
-                    Err(e) => self.flash_warn(&format!("bundle save failed: {e}")),
-                }
-            }
+            Msg::BundleSaved {
+                generation,
+                claim,
+                result,
+            } if generation == self.generation => match result {
+                Ok(path) => self.set_claimed_status(
+                    claim,
+                    format!("saved bundle → {}", path.display()),
+                    false,
+                ),
+                Err(e) => self.set_claimed_status(claim, format!("bundle save failed: {e}"), true),
+            },
             Msg::FleetRow { generation, row } if generation == self.generation => {
                 self.apply_fleet_row(*row);
             }
-            Msg::SnapshotSaved { generation, result } if generation == self.generation => {
-                match result {
-                    Ok(path) => {
-                        self.flash = format!("saved snapshot → {}", path.display());
-                        self.flash_err = false;
-                    }
-                    Err(e) => self.flash_warn(&format!("snapshot save failed: {e}")),
+            Msg::SnapshotSaved {
+                generation,
+                claim,
+                result,
+            } if generation == self.generation => match result {
+                Ok(path) => self.set_claimed_status(
+                    claim,
+                    format!("saved snapshot → {}", path.display()),
+                    false,
+                ),
+                Err(e) => {
+                    self.set_claimed_status(claim, format!("snapshot save failed: {e}"), true)
                 }
-            }
+            },
             Msg::Detail {
                 generation,
                 claim,
@@ -1147,33 +1178,37 @@ impl App {
                     .scroll
                     .min(self.detail.lines.len().saturating_sub(1));
             }
-            Msg::TransferDone { generation, result } if generation == self.generation => {
-                match result {
-                    Ok(summary) => {
-                        self.flash = summary;
-                        self.flash_err = false;
-                    }
-                    Err(e) => self.flash_warn(&format!("cp failed: {e}")),
-                }
-            }
-            Msg::LogsSaved { generation, result } if generation == self.log_gen => match result {
-                Ok(path) => {
-                    self.flash = format!("saved logs → {}", path.display());
-                    self.flash_err = false;
-                }
-                Err(e) => self.flash_warn(&format!("save failed: {e}")),
+            Msg::TransferDone {
+                generation,
+                claim,
+                result,
+            } if generation == self.generation => match result {
+                Ok(summary) => self.set_claimed_status(claim, summary, false),
+                Err(e) => self.set_claimed_status(claim, format!("cp failed: {e}"), true),
+            },
+            Msg::LogsSaved {
+                generation,
+                claim,
+                result,
+            } if generation == self.log_gen => match result {
+                Ok(path) => self.set_claimed_status(
+                    claim,
+                    format!("saved logs → {}", path.display()),
+                    false,
+                ),
+                Err(e) => self.set_claimed_status(claim, format!("save failed: {e}"), true),
             },
             Msg::ClipboardCopied {
                 generation,
+                claim,
                 copied,
                 success,
                 failure,
             } if generation == self.generation => {
                 if copied {
-                    self.flash = success;
-                    self.flash_err = false;
+                    self.set_claimed_status(claim, success, false);
                 } else {
-                    self.flash_warn(&failure);
+                    self.set_claimed_status(claim, failure, true);
                 }
             }
             Msg::Namespaces { generation, list } if generation == self.generation => {
@@ -1196,6 +1231,7 @@ impl App {
             }
             Msg::ContextRenamed {
                 generation,
+                claim,
                 old,
                 new,
                 result,
@@ -1220,10 +1256,9 @@ impl App {
                             self.recent_namespaces.insert(new.clone(), recents);
                         }
                     }
-                    self.flash = format!("renamed context {old} → {new}");
-                    self.flash_err = false;
+                    self.set_claimed_status(claim, format!("renamed context {old} → {new}"), false);
                 }
-                Err(e) => self.flash_warn(&format!("rename failed: {e}")),
+                Err(e) => self.set_claimed_status(claim, format!("rename failed: {e}"), true),
             },
             Msg::ContextSwitched {
                 generation,

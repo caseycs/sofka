@@ -60,6 +60,13 @@ impl App {
         }
 
         lines.push(String::new());
+        lines.push("Actions".into());
+        match &self.last_action_error {
+            Some(e) => lines.push(format!("  last failure: {e}")),
+            None => lines.push("  last failure: none".into()),
+        }
+
+        lines.push(String::new());
         lines.push("Config sources".into());
         match self.config.base_path() {
             Some(path) => {

@@ -642,6 +642,7 @@ impl App {
             self.flash_warn(&format!("context '{new}' already exists"));
             return;
         }
+        let claim = self.claim_status(format!("renaming {old} → {new}…"));
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
@@ -657,6 +658,7 @@ impl App {
             let _ = tx
                 .send(Msg::ContextRenamed {
                     generation: genr,
+                    claim,
                     old,
                     new,
                     result,

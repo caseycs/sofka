@@ -507,6 +507,7 @@ impl App {
             self.flash_warn("no log lines to save");
             return;
         }
+        let claim = self.claim_status("saving logs…");
         let genr = self.log_gen;
         let tx = self.tx.clone();
         let ts = k8s_openapi::jiff::Timestamp::now().as_second();
@@ -526,6 +527,7 @@ impl App {
             let _ = tx
                 .send(Msg::LogsSaved {
                     generation: genr,
+                    claim,
                     result,
                 })
                 .await;
@@ -583,7 +585,8 @@ impl App {
         );
     }
 
-    pub(super) fn copy_to_clipboard_async(&self, text: String, success: String, failure: &str) {
+    pub(super) fn copy_to_clipboard_async(&mut self, text: String, success: String, failure: &str) {
+        let claim = self.claim_status("copying to clipboard…");
         let tx = self.tx.clone();
         let genr = self.generation;
         let failure = failure.to_string();
@@ -594,6 +597,7 @@ impl App {
             let _ = tx
                 .send(Msg::ClipboardCopied {
                     generation: genr,
+                    claim,
                     copied,
                     success,
                     failure,
@@ -1060,8 +1064,7 @@ impl App {
     /// the name prefix *and* `spec.nodeName` avoids touching unrelated pods.
     pub(super) fn do_cleanup_debuggers(&mut self) {
         let targets = std::mem::take(&mut self.launched_node_debuggers);
-        self.flash = format!("cleaning up {} node debugger(s)…", targets.len());
-        self.flash_err = false;
+        let claim = self.claim_status(format!("cleaning up {} node debugger(s)…", targets.len()));
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
@@ -1096,6 +1099,7 @@ impl App {
             let _ = tx
                 .send(Msg::DebuggersCleaned {
                     generation: genr,
+                    claim,
                     deleted,
                     failed,
                 })
@@ -1756,8 +1760,7 @@ impl App {
             if upload { "cp upload" } else { "cp download" },
             format!("{pod} in {ns}"),
         );
-        self.flash = format!("copying {from} → {to}…");
-        self.flash_err = false;
+        let claim = self.claim_status(format!("copying {from} → {to}…"));
         let tx = self.tx.clone();
         let genr = self.generation;
         tokio::spawn(async move {
@@ -1799,6 +1802,7 @@ impl App {
             let _ = tx
                 .send(Msg::TransferDone {
                     generation: genr,
+                    claim,
                     result,
                 })
                 .await;
@@ -2129,24 +2133,43 @@ impl App {
     }
 
     /// Replace the status owned by `claim`. A newer operation or any direct
-    /// status assignment makes the old result a no-op.
+    /// status assignment makes an old *success* a no-op; a failure always
+    /// lands (see below).
     pub(super) fn set_claimed_status(
         &mut self,
         claim: StatusClaim,
         msg: impl Into<String>,
         err: bool,
     ) {
-        if !self
+        let message = msg.into();
+        let owns = self
             .status_claim
             .as_ref()
-            .is_some_and(|(owner, text)| *owner == claim && self.flash == *text)
-        {
+            .is_some_and(|(owner, text)| *owner == claim && self.flash == *text);
+        if err {
+            // A failure is never silently dropped. Even when the bar has no
+            // room for it, `:debug` can still answer "did anything break?".
+            self.last_action_error = Some(message.clone());
+        }
+        if owns {
+            self.set_flash(message.clone());
+            self.flash_err = err;
+            self.status_claim = Some((claim, message));
             return;
         }
-        let message = msg.into();
-        self.set_flash(message.clone());
-        self.flash_err = err;
-        self.status_claim = Some((claim, message));
+        // A stale success is dropped — the operation the user started later
+        // owns the bar. A stale *failure* may still borrow it while the owner
+        // has nothing to show yet, since an unresolved `…` is not news anyone
+        // misses; it never displaces the owner's finished result. Ownership
+        // does not change hands, so the owner still reports when it lands.
+        if err && self.flash.ends_with('…') {
+            let owner = self.status_claim.as_ref().map(|(owner, _)| *owner);
+            self.set_flash(message.clone());
+            self.flash_err = true;
+            // `set_flash` drops the claim; hand it straight back against the
+            // borrowed text so the owner still reports when it finishes.
+            self.status_claim = owner.map(|owner| (owner, message));
+        }
     }
 
     /// Clear a completed operation's progress only while it still owns the
