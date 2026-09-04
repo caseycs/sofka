@@ -68,16 +68,21 @@ warns that the pointer is wrong.
 
 `enter` on a workload opens its pods. A view's `drill` gives any kind without a
 built-in drill-down the same move: open another kind, scoped by a label
-selector filled in from the selected row. `{name}` and `{namespace}` are the
-placeholders.
+selector (`labels`) and/or a field selector (`fields`) filled in from the
+selected row. `{name}` and `{namespace}` are the placeholders.
 
 ```toml
 [views."karpenter.sh/v1/nodepools"]
 drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
+
+[views.externalsecrets]                 # the Secret it writes shares its name
+drill = { kind = "secrets", fields = "metadata.name={name}" }
 ```
 
 `kind` is anything `:` accepts (alias, plural, or kind) and is resolved when
-you press `enter`; an unknown kind warns and stays put. A namespaced target
+you press `enter`; an unknown kind warns and stays put. `fields` is for a target
+nothing labels back to the row: `metadata.name` and `metadata.namespace` are
+selectable on every kind, other fields only where the apiserver indexes them. A namespaced target
 opens in the row's namespace, a cluster-scoped one ignores it. `esc` comes back,
 like every drill. When a view sets both `drill` and `node`, `enter` drills and
 `o` still jumps to the node.

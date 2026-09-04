@@ -86,7 +86,7 @@ pub struct View {
 }
 
 /// A configured drill-down: `enter` on a row opens `kind`, scoped by the
-/// label selector `labels` yields for that row.
+/// selectors `labels` and `fields` yield for that row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drill {
     /// Target kind as the user named it (alias, plural, or kind); resolved
@@ -94,20 +94,28 @@ pub struct Drill {
     pub kind: String,
     /// Label selector template with `{name}` / `{namespace}` placeholders.
     pub labels: Option<String>,
+    /// Field selector template, same placeholders.
+    pub fields: Option<String>,
 }
 
 impl Drill {
     /// The label selector for one row: placeholders filled from its metadata.
     pub fn labels_for(&self, obj: &DynamicObject) -> Option<String> {
-        let template = self.labels.as_deref()?;
-        let name = obj.metadata.name.as_deref().unwrap_or_default();
-        let namespace = obj.metadata.namespace.as_deref().unwrap_or_default();
-        Some(
-            template
-                .replace("{name}", name)
-                .replace("{namespace}", namespace),
-        )
+        self.labels.as_deref().map(|t| fill_placeholders(t, obj))
     }
+
+    /// The field selector for one row, likewise.
+    pub fn fields_for(&self, obj: &DynamicObject) -> Option<String> {
+        self.fields.as_deref().map(|t| fill_placeholders(t, obj))
+    }
+}
+
+fn fill_placeholders(template: &str, obj: &DynamicObject) -> String {
+    let name = obj.metadata.name.as_deref().unwrap_or_default();
+    let namespace = obj.metadata.namespace.as_deref().unwrap_or_default();
+    template
+        .replace("{name}", name)
+        .replace("{namespace}", namespace)
 }
 
 /// The placeholders a drill's `labels` template may use.
@@ -278,18 +286,22 @@ pub fn compile(
                 return None;
             }
             let labels = d.labels.as_deref().map(str::trim).filter(|l| !l.is_empty());
-            let unknown = labels.map(unknown_placeholders).unwrap_or_default();
-            if !unknown.is_empty() {
-                warnings.push(format!(
-                    "views.\"{key}\": drill.labels has unknown placeholder(s) {} \
-                     (only {{name}} and {{namespace}}); ignored",
-                    unknown.join(", ")
-                ));
-                return None;
+            let fields = d.fields.as_deref().map(str::trim).filter(|f| !f.is_empty());
+            for (what, template) in [("labels", labels), ("fields", fields)] {
+                let unknown = template.map(unknown_placeholders).unwrap_or_default();
+                if !unknown.is_empty() {
+                    warnings.push(format!(
+                        "views.\"{key}\": drill.{what} has unknown placeholder(s) {} \
+                         (only {{name}} and {{namespace}}); ignored",
+                        unknown.join(", ")
+                    ));
+                    return None;
+                }
             }
             Some(Drill {
                 kind: kind.to_string(),
                 labels: labels.map(str::to_string),
+                fields: fields.map(str::to_string),
             })
         });
         views.insert(
@@ -1061,6 +1073,7 @@ mod tests {
             drill.labels_for(&pool).as_deref(),
             Some("karpenter.sh/nodepool=default")
         );
+        assert_eq!(drill.fields_for(&pool), None);
         // A target that needs no selector is allowed.
         let (views, warnings) = compile_toml(
             r#"
@@ -1070,6 +1083,29 @@ mod tests {
         );
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(drill_for(&views, &pools).unwrap().labels_for(&pool), None);
+    }
+
+    #[test]
+    fn drill_fields_take_the_same_placeholders() {
+        let (views, warnings) = compile_toml(
+            r#"
+            [views.externalsecrets]
+            drill = { kind = "secrets", fields = "metadata.name={name},metadata.namespace={namespace}" }
+
+            [views.widgets]
+            drill = { kind = "pods", fields = "spec.nodeName={node}" }
+            "#,
+        );
+        let drill = views["externalsecrets"].drill.as_ref().unwrap();
+        let es = obj(json!({"metadata": {"name": "db-creds", "namespace": "shop"}}));
+        assert_eq!(
+            drill.fields_for(&es).as_deref(),
+            Some("metadata.name=db-creds,metadata.namespace=shop")
+        );
+        assert_eq!(drill.labels_for(&es), None);
+        assert_eq!(views["widgets"].drill, None);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("drill.fields"), "{}", warnings[0]);
     }
 
     #[test]

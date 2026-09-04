@@ -680,12 +680,15 @@ pub struct ViewConfig {
 }
 
 /// The `drill` of a [`ViewConfig`]: `enter` on a row of this kind opens
-/// `kind`, filtered by `labels` with `{name}` and `{namespace}` filled in
-/// from the row.
+/// `kind`, filtered by `labels` and/or `fields` with `{name}` and
+/// `{namespace}` filled in from the row.
 ///
 /// ```toml
 /// [views."karpenter.sh/v1/nodepools"]
 /// drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
+///
+/// [views.externalsecrets]
+/// drill = { kind = "secrets", fields = "metadata.name={name}" }
 /// ```
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
@@ -694,6 +697,8 @@ pub struct DrillConfig {
     pub kind: String,
     /// Label selector template; `{name}` and `{namespace}` come from the row.
     pub labels: Option<String>,
+    /// Field selector template, same placeholders (e.g. `metadata.name={name}`).
+    pub fields: Option<String>,
 }
 
 /// One column of a [`ViewConfig`]. Everything is optional at parse time so a

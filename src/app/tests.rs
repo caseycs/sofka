@@ -1289,6 +1289,7 @@ fn views_with_drill(key: &str, kind: &str, labels: &str) -> HashMap<String, crat
             drill: Some(crate::config::DrillConfig {
                 kind: kind.to_string(),
                 labels: Some(labels.to_string()),
+                fields: None,
             }),
             ..Default::default()
         },
@@ -1484,6 +1485,38 @@ async fn configured_drill_keeps_a_namespaced_target_in_the_rows_namespace() {
 }
 
 #[tokio::test]
+async fn enter_on_externalsecret_opens_the_secret_it_writes() {
+    let (mut app, _rx) = test_app();
+    // The target Secret shares the ExternalSecret's name and namespace and
+    // carries no label naming it, so this is a field selector, not a label.
+    app.user_views = views_for(
+        "externalsecrets",
+        crate::config::ViewConfig {
+            drill: Some(crate::config::DrillConfig {
+                kind: "secrets".to_string(),
+                labels: None,
+                fields: Some("metadata.name={name}".to_string()),
+            }),
+            ..Default::default()
+        },
+    );
+    app.switch_kind("externalsecrets");
+    apply(
+        &mut app,
+        json!({"apiVersion": "external-secrets.io/v1", "kind": "ExternalSecret",
+               "metadata": {"name": "db-creds", "namespace": "shop"}}),
+    );
+    app.table_state.select(Some(0));
+
+    app.handle_key(press(KeyCode::Enter)).unwrap();
+    assert_eq!(app.kind_plural, "secrets");
+    assert_eq!(app.namespace, "shop");
+    assert_eq!(app.fields.as_deref(), Some("metadata.name=db-creds"));
+    assert_eq!(app.labels, None);
+    assert_eq!(app.scope_label.as_deref(), Some("externalsecret/db-creds"));
+}
+
+#[tokio::test]
 async fn configured_drill_to_an_unknown_kind_warns_and_stays() {
     let (mut app, _rx) = test_app();
     app.user_views = views_with_drill("certificates", "widgets", "cert={name}");
@@ -1516,6 +1549,7 @@ async fn configured_drill_wins_over_node_on_enter_but_o_still_jumps() {
             drill: Some(crate::config::DrillConfig {
                 kind: "secrets".to_string(),
                 labels: Some("cert={name}".to_string()),
+                fields: None,
             }),
             ..Default::default()
         },

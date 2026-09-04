@@ -74,7 +74,13 @@ impl App {
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
         let scope = format!("{}/{name}", trim_s(&self.kind_plural));
-        self.drill_to(&drill.kind, ns, drill.labels_for(obj), None, scope);
+        self.drill_to(
+            &drill.kind,
+            ns,
+            drill.labels_for(obj),
+            drill.fields_for(obj),
+            scope,
+        );
     }
 
     /// Drill from a Flux `HelmRelease` row into the revision history of the
