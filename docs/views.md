@@ -2,10 +2,23 @@
 
 ## Custom views
 
-Define table columns for any resource. Most useful for custom resources, which
-otherwise fall back to NAME/AGE. sofka keys views by apiVersion/plural
-(`"cert-manager.io/v1/certificates"`, `"v1/pods"`), group/plural, bare plural, or
-lowercase kind. The most specific key wins.
+A table column is two things: where in the object to read (a JSON Pointer) and
+how to read it (a type, which decides rendering, coloring, and sort order).
+sofka ships curated columns for the core kinds. For everything else it has to
+be told, and a view is how: a per-kind list of columns, plus an initial sort.
+Most useful for custom resources, which otherwise fall back to NAME/AGE - or to
+their CRD's printer columns, see below.
+
+Columns for a kind come from the first of these that applies: the view's
+`columns` if it declares any, else the curated table if the kind has one, else
+the CRD's printer columns, else NAME/AGE. A view's columns *overlay* the curated
+table rather than replacing it: a column whose header matches a curated one
+takes its place, new columns slot in before AGE, and `replace = true` throws the
+curated table away instead.
+
+sofka keys views by apiVersion/plural (`"cert-manager.io/v1/certificates"`,
+`"v1/pods"`), group/plural, bare plural, or lowercase kind. The most specific
+key wins.
 
 ```toml
 [views."cert-manager.io/v1/certificates"]
@@ -32,7 +45,9 @@ wide = true               # only shown in wide mode (`w`)
 
 `path` is a JSON Pointer (RFC 6901) into the object as the API serves it:
 `/metadata/…`, `/spec/…`, `/status/…`, and array indices like
-`/spec/ports/0/port`.
+`/spec/ports/0/port`. A `/` inside a key is written `~1` and a `~` as `~0`, which
+is how label and annotation keys are reached:
+`/metadata/labels/topology.kubernetes.io~1zone`.
 
 `type` is `text` (default), `status`, `number`, `quantity` (`500m`, `1Gi`),
 `time`, or `condition`. Typed columns sort by value, not by text.
@@ -43,53 +58,70 @@ never by array index, whose order nothing guarantees - renders its `status`
 (`True`/`False`/`Unknown`), and colors the row like a `status` column.
 
 Optional `width` (for fixed columns) and `align` (`left`/`center`/`right`) tune
-the layout. By default columns overlay the curated ones: a matching header
-replaces it in place, new columns go before AGE. Invalid entries are skipped with
-a warning in the app - they never take down the TUI.
+the layout; `wide = true` hides a column until wide mode (`w`). Invalid entries
+are skipped with a warning in the app (`:config` lists them) - they never take
+down the TUI.
 
-### Jumping to a node
+### Navigating between kinds
 
-A kind whose objects name a node can jump to it: `o` opens the nodes list scoped
-to that node, and so does `enter` for a kind with no drill-down of its own. Pods
-are built in (`/spec/nodeName`). For anything else, `node` says where the name
-lives:
+sofka's drill-downs are relationships between kinds, expressed as a watch
+selector: `enter` on a Deployment lists pods under its `matchLabels`, `enter`
+on a Node lists pods with `spec.nodeName` equal to its name, `o` on a pod opens
+the node named in `spec.nodeName`. Those relationships are built in for core
+kinds. Custom resources relate to each other the same way - an operator's
+parent object owns children it labels, a claim names the node it became - but
+sofka can't know a CRD's field layout in advance. A view can declare the
+relationship, and `enter`/`o` then work exactly as they do for core kinds:
+push the current view, open the target scoped to the row, `esc` to come back.
+
+Two shapes cover most cases.
+
+**A row names one node** - `node` is a JSON Pointer to the field holding the
+node's name. `o` jumps to that node, and so does `enter` for a kind with no
+drill-down of its own:
 
 ```toml
 [views."karpenter.sh/v1/nodeclaims"]
-node = "/status/nodeName"   # Karpenter writes the node's name onto the claim
-                            # once it registers; before that, `o` warns
+node = "/status/nodeName"
 ```
 
-`node` is a JSON Pointer, like `path`. A row whose pointer is empty warns instead
-of opening an empty list; one whose pointer lands on something other than a name
-warns that the pointer is wrong.
+The nodes list is scoped by `metadata.name`, the only field selector the
+apiserver indexes for nodes, so the pointer has to land on a name. A row whose
+pointer is empty (the node isn't assigned yet) warns instead of opening an empty
+list; a pointer that lands on something other than a string warns that the
+pointer is wrong. Pods are the built-in row of this table (`/spec/nodeName`);
+config overrides it.
 
-### Drilling into another kind
-
-`enter` on a workload opens its pods. A view's `drill` gives any kind without a
-built-in drill-down the same move: open another kind, scoped by a label
-selector (`labels`) and/or a field selector (`fields`) filled in from the
-selected row. `{name}` and `{namespace}` are the placeholders.
+**A row selects other objects** - `drill` names the kind `enter` should open and
+how to scope it: a label selector (`labels`), a field selector (`fields`), or
+both, with `{name}` and `{namespace}` filled in from the row:
 
 ```toml
+# children carry the parent's name in a label
 [views."karpenter.sh/v1/nodepools"]
 drill = { kind = "nodeclaims", labels = "karpenter.sh/nodepool={name}" }
 
-[views.externalsecrets]                 # the Secret it writes shares its name
+# the target is a single object with a known name and nothing labelling it back
+[views.externalsecrets]
 drill = { kind = "secrets", fields = "metadata.name={name}" }
 ```
 
-`kind` is anything `:` accepts (alias, plural, or kind) and is resolved when
-you press `enter`; an unknown kind warns and stays put. `fields` is for a target
-nothing labels back to the row: `metadata.name` and `metadata.namespace` are
-selectable on every kind, other fields only where the apiserver indexes them. A namespaced target
-opens in the row's namespace, a cluster-scoped one ignores it. `esc` comes back,
-like every drill. When a view sets both `drill` and `node`, `enter` drills and
+Prefer `labels` when the target carries a label pointing back at the row -
+that's how most operators mark what they own. Use `fields` when it doesn't:
+`metadata.name` and `metadata.namespace` are selectable on every kind, other
+fields only where the apiserver indexes them. `kind` is anything `:` accepts
+(alias, plural, or kind) and is resolved when you press `enter`, so an unknown
+kind warns and stays put. A namespaced target opens in the row's namespace; a
+cluster-scoped one ignores it.
+
+Kinds with a built-in drill-down keep it - a `drill` on pods won't replace the
+container picker. When a view sets both `drill` and `node`, `enter` drills and
 `o` still jumps to the node.
 
-Unlike `columns` and `sort`, which come from the single most specific view,
-`node` and `drill` are resolved key by key: a `[views."karpenter.sh/v1/nodeclaims"]`
-that only sets columns doesn't hide a `node` set under `[views.nodeclaims]`.
+Both settings are resolved key by key across the view keys for a kind
+(`apiVersion/plural`, `group/plural`, plural, kind), not off the single most
+specific view the way `columns` and `sort` are. A specific view that only sets
+columns therefore doesn't hide a `node` or `drill` set under a broader key.
 
 ### CRD printer columns
 
@@ -102,6 +134,13 @@ selecting another field (`.reason`, `.message`, `.lastTransitionTime`, …) keep
 the column and reads that field from the named condition. Other JSONPath filter
 or wildcard expressions aren't representable and those columns are skipped. So
 most custom resources get useful columns with zero configuration.
+
+Printer columns are a fallback, not a base layer: they apply only while the view
+declares no columns. A view that sets just `sort`, `node`, or `drill` keeps them;
+a view that adds a single column replaces the whole printer table with that
+column. To add to a CRD's table - promote a wide-only column, say - redeclare
+the columns you want to keep alongside the new one (`kubectl get crd <name> -o
+yaml` lists them under `additionalPrinterColumns`, with their JSONPaths).
 
 ## Thresholds
 
