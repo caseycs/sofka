@@ -14,6 +14,7 @@ plugin, bookmark, and workspace chords.
 | `enter`                                       | drill down (workload/svc → pods, node → its pods, pod → containers, ns → re-scope, CRD → its resources)                               |
 | `esc`                                         | go back / pop the view stack / clear filter / clear marks                                                                             |
 | `j`/`k`, `↓`/`↑`, `g`/`G`                     | navigate                                                                                                                              |
+| `ctrl-f` / `ctrl-b`, `PgDn` / `PgUp`          | page forward / back - one screenful at a time                                                                                         |
 | `S` / `I`                                     | sort-column picker (fuzzy; ⏎ on the active column inverts) / invert sort direction — remembered per kind across views and restarts    |
 | `ctrl-e`                                      | compact mode: collapse the header + footer (for tiled/multiplexed panes)                                                              |
 | `space`                                       | mark/unmark row for bulk actions                                                                                                      |

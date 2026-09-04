@@ -30,6 +30,14 @@ impl App {
                     self.start_watch();
                     return Ok(());
                 }
+                KeyCode::Char('f') if self.mode == Mode::Table => {
+                    self.move_page(1);
+                    return Ok(());
+                }
+                KeyCode::Char('b') if self.mode == Mode::Table => {
+                    self.move_page(-1);
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -108,8 +116,8 @@ impl App {
                     self.table_state.select(Some(len - 1));
                 }
             }
-            KeyCode::PageDown => self.move_selection(10),
-            KeyCode::PageUp => self.move_selection(-10),
+            KeyCode::PageDown => self.move_page(1),
+            KeyCode::PageUp => self.move_page(-1),
             // Horizontal column scroll for narrow panes: the NAMESPACE/NAME
             // prefix stays anchored, → hides the next column after it, ←
             // brings one back.

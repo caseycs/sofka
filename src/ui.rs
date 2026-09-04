@@ -577,6 +577,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let count = app.row_count();
     let visible_rows = area.height.saturating_sub(3).max(1) as usize;
+    app.table_page_rows = visible_rows;
     if count == 0 {
         *app.table_state.offset_mut() = 0;
     } else {
@@ -1943,6 +1944,7 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
         bind("←/→", "scroll columns (NAMESPACE/NAME stay anchored)"),
         bind("esc", "go back / pop view / clear filter"),
         bind("j/k g/G", "move · top/bottom"),
+        bind("ctrl-f/ctrl-b", "page forward/back (also PgDn/PgUp)"),
         bind("S · I", "sort by column (fuzzy picker) · invert direction"),
         bind("w", "toggle wide columns (kubectl -o wide)"),
         bind(

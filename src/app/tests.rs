@@ -743,6 +743,44 @@ async fn move_selection_from_none_lands_on_first_row_not_second() {
 }
 
 #[tokio::test]
+async fn ctrl_f_and_ctrl_b_page_by_the_drawn_viewport_height() {
+    let (mut app, _rx) = test_app();
+    app.switch_kind("pods");
+    for n in 0..25 {
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Pod",
+                   "metadata": {"name": format!("p{n:02}"), "namespace": "default"}}),
+        );
+    }
+    app.table_state.select(Some(0));
+    app.table_page_rows = 8;
+
+    app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(8));
+    app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(16));
+    app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(24), "clamps at the end");
+
+    app.handle_key(ctrl(KeyCode::Char('b'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(16));
+    app.handle_key(ctrl(KeyCode::Char('b'))).unwrap();
+    app.handle_key(ctrl(KeyCode::Char('b'))).unwrap();
+    app.handle_key(ctrl(KeyCode::Char('b'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(0), "clamps at the top");
+
+    app.handle_key(press(KeyCode::PageDown)).unwrap();
+    assert_eq!(app.table_state.selected(), Some(8));
+    app.handle_key(press(KeyCode::PageUp)).unwrap();
+    assert_eq!(app.table_state.selected(), Some(0));
+
+    app.table_page_rows = 20;
+    app.handle_key(ctrl(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.table_state.selected(), Some(20));
+}
+
+#[tokio::test]
 async fn switching_kind_resets_stale_selection_to_top() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
