@@ -92,6 +92,9 @@ impl App {
                     Err(_) => failed += 1,
                 }
             }
+            // Stable on purpose: `FindItem::ns` is not in the tie-break, so
+            // two hits that differ only by namespace compare equal here and an
+            // unstable sort would order them arbitrarily between runs.
             scored.sort_by(|a, b| {
                 b.0.cmp(&a.0)
                     .then_with(|| a.1.name.cmp(&b.1.name))

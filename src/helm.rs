@@ -43,6 +43,20 @@ pub struct Release {
     pub manifest: String,
 }
 
+/// The fields the release *list* renders. Deliberately excludes `manifest`
+/// and `config`: those are the bulk of a release payload (a rendered manifest
+/// runs to hundreds of KB) and no column reads them, so the list's parse walks
+/// past them instead of allocating a `String` and a `Value` DOM per row.
+pub struct Summary {
+    pub status: String,
+    pub chart_name: String,
+    pub chart_version: String,
+    pub app_version: String,
+    pub description: String,
+    /// `info.last_deployed` as a unix timestamp, when parseable.
+    pub last_deployed_secs: Option<i64>,
+}
+
 #[derive(Deserialize, Default)]
 struct RawRelease {
     #[serde(default)]
@@ -87,25 +101,76 @@ struct RawMetadata {
     app_version: String,
 }
 
-/// Decode a release Secret into its `Release`. `None` if the secret doesn't
-/// carry a `data.release` payload or it can't be decoded (corrupt, unknown
-/// format, or not a Helm release secret at all) — callers treat that as
-/// "unrenderable", not a crash.
-pub fn decode(secret: &DynamicObject) -> Option<Release> {
+/// [`RawRelease`] minus the two heavy payloads, and minus `info.notes`.
+#[derive(Deserialize, Default)]
+struct RawSummary {
+    #[serde(default)]
+    info: RawInfoSummary,
+    #[serde(default)]
+    chart: RawChart,
+}
+
+#[derive(Deserialize, Default)]
+struct RawInfoSummary {
+    #[serde(default)]
+    last_deployed: Option<String>,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    status: String,
+}
+
+/// The serde step of [`decode`] in isolation, so a benchmark can price the
+/// JSON parse against the base64 + gunzip in front of it. Deserializes into
+/// the same typed struct the real path uses — a `Value` DOM parse would
+/// overstate the parse share.
+#[cfg(feature = "bench")]
+pub fn parse_release_json(json: &[u8]) -> bool {
+    serde_json::from_slice::<RawRelease>(json).is_ok()
+}
+
+/// The release payload as JSON: `data.release` is base64 twice over, then
+/// gzipped. Shared by [`decode`] and [`decode_summary`].
+fn release_json(secret: &DynamicObject) -> Option<Vec<u8>> {
     let wire = secret.data.pointer("/data/release")?.as_str()?;
     let helm_encoded = BASE64.decode(wire).ok()?;
     let gzipped = BASE64.decode(helm_encoded).ok()?;
     let mut gz = flate2::read::GzDecoder::new(&gzipped[..]);
     let mut json = Vec::new();
     gz.read_to_end(&mut json).ok()?;
-    let raw: RawRelease = serde_json::from_slice(&json).ok()?;
+    Some(json)
+}
 
-    let last_deployed_secs = raw
-        .info
-        .last_deployed
-        .as_deref()
-        .and_then(|s| s.parse::<Timestamp>().ok())
-        .map(|ts| ts.as_second());
+fn last_deployed_secs(raw: Option<&str>) -> Option<i64> {
+    raw.and_then(|s| s.parse::<Timestamp>().ok())
+        .map(|ts| ts.as_second())
+}
+
+/// Like [`decode`], but only the columns the release list shows. Half of a
+/// decode is the JSON parse, and most of that is the `manifest` string and the
+/// `config` DOM — neither of which the list reads. Use [`decode`] wherever
+/// they are.
+pub fn decode_summary(secret: &DynamicObject) -> Option<Summary> {
+    let json = release_json(secret)?;
+    let raw: RawSummary = serde_json::from_slice(&json).ok()?;
+    Some(Summary {
+        status: raw.info.status,
+        chart_name: raw.chart.metadata.name,
+        chart_version: raw.chart.metadata.version,
+        app_version: raw.chart.metadata.app_version,
+        description: raw.info.description,
+        last_deployed_secs: last_deployed_secs(raw.info.last_deployed.as_deref()),
+    })
+}
+
+/// Decode a release Secret into its `Release`. `None` if the secret doesn't
+/// carry a `data.release` payload or it can't be decoded (corrupt, unknown
+/// format, or not a Helm release secret at all) — callers treat that as
+/// "unrenderable", not a crash.
+pub fn decode(secret: &DynamicObject) -> Option<Release> {
+    let json = release_json(secret)?;
+    let raw: RawRelease = serde_json::from_slice(&json).ok()?;
+    let last_deployed_secs = last_deployed_secs(raw.info.last_deployed.as_deref());
 
     Some(Release {
         name: raw.name,
@@ -241,6 +306,51 @@ mod tests {
 
         assert_eq!(release_name(&secret), Some("myrelease"));
         assert_eq!(revision(&secret), Some(2));
+    }
+
+    /// `decode_summary` skips `manifest`/`config`/`notes` for speed, so the
+    /// fields it does return must still agree with the full decode — a
+    /// divergence here would show up as wrong cells in the release list.
+    #[test]
+    fn summary_decode_agrees_with_the_full_decode() {
+        let secret = fixture_secret(
+            r#"{
+                "name": "myrelease",
+                "version": 2,
+                "info": {
+                    "status": "deployed",
+                    "description": "Upgrade complete",
+                    "last_deployed": "2024-01-15T10:30:00Z",
+                    "notes": "Thanks for installing!"
+                },
+                "chart": {
+                    "metadata": { "name": "mychart", "version": "1.2.3", "appVersion": "4.5.6" }
+                },
+                "config": { "replicaCount": 3 },
+                "manifest": "apiVersion: v1\nkind: ConfigMap\n"
+            }"#,
+        );
+
+        let full = decode(&secret).expect("should decode");
+        let brief = decode_summary(&secret).expect("should decode");
+        assert_eq!(brief.status, full.status);
+        assert_eq!(brief.chart_name, full.chart_name);
+        assert_eq!(brief.chart_version, full.chart_version);
+        assert_eq!(brief.app_version, full.app_version);
+        assert_eq!(brief.description, full.description);
+        assert_eq!(brief.last_deployed_secs, full.last_deployed_secs);
+    }
+
+    #[test]
+    fn summary_decode_returns_none_for_non_release_secret() {
+        let data: Value = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "not-a-release", "namespace": "default" },
+            "data": {},
+        });
+        let secret: DynamicObject = serde_json::from_value(data).unwrap();
+        assert!(decode_summary(&secret).is_none());
     }
 
     #[test]

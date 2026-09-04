@@ -1,5 +1,19 @@
 use super::*;
 
+/// Fallback delay if the watcher backoff ever runs out of steps. `DefaultBackoff`
+/// is unbounded in attempts, so this is belt and braces rather than a real path.
+const NODE_PODS_BACKOFF_CEILING: Duration = Duration::from_secs(30);
+
+fn node_pods_watch_forbidden(error: &watcher::Error) -> bool {
+    match error {
+        watcher::Error::InitialListFailed(kube::Error::Api(status))
+        | watcher::Error::WatchStartFailed(kube::Error::Api(status))
+        | watcher::Error::WatchFailed(kube::Error::Api(status)) => status.is_forbidden(),
+        watcher::Error::WatchError(status) => status.is_forbidden(),
+        _ => false,
+    }
+}
+
 impl App {
     // ----- navigation ----------------------------------------------------
 
@@ -564,10 +578,15 @@ impl App {
         self.tasks.push(handle);
     }
 
-    /// Poll the pods API for the nodes view: pod count per node (the PODS
+    /// Watch the pods API for the nodes view: pod count per node (the PODS
     /// column). Counts non-terminated pods — Succeeded/Failed pods hold no
-    /// node resources — mirroring `kubectl describe node`. List failures
-    /// (e.g. no cluster-wide pod list permission) leave the column at "-".
+    /// node resources — mirroring `kubectl describe node`. Replaces a full
+    /// cluster-wide pod re-list every 10s with one watch, kept incrementally
+    /// up to date and coalesced to at most one `Msg::NodePods` per second.
+    ///
+    /// RBAC granting `list` but not `watch` still works: a refused watch falls
+    /// back to the old 10-second list poll. Other transient watcher failures
+    /// use client-go's backoff while the stream heals itself.
     pub(super) fn spawn_node_pods_poll(&mut self) {
         let Some(pkind) = self.cluster.resolve("pods") else {
             return;
@@ -579,13 +598,155 @@ impl App {
         let ar = pkind.ar.clone();
 
         let handle = tokio::spawn(async move {
+            let api: Api<DynamicObject> = Api::all_with(client, &ar);
+            let cfg = watcher::Config::default()
+                .any_semantic()
+                .fields("status.phase!=Succeeded,status.phase!=Failed");
+            // `watcher` re-lists as fast as the stream is polled, so an error
+            // that does not clear itself would hammer the API server —
+            // measured at ~9,800 requests a second against a test server.
+            //
+            // The pacing is driven here rather than through `.default_backoff()`
+            // because that wrapper resets on *any* `Ok` item, and `watcher`
+            // emits `Ok(Event::Init)` before every list attempt. A failing
+            // initial list therefore cycles `Init -> error -> minimum delay`
+            // forever and never escalates, which is worse than the 10s list
+            // poll it replaced. The strategy is still client-go's — 800ms
+            // doubling to 30s, jittered, self-resetting after 2 minutes of
+            // quiet — but it is reset only once the stream has actually got
+            // somewhere: see `established` below.
+            let mut stream = watcher(api.clone(), cfg).boxed();
+            let mut backoff = watcher::DefaultBackoff::default();
+            // Node per pod, kept incrementally so per-node counts never need
+            // a full rescan of the cluster's pods.
+            let mut pod_nodes: HashMap<String, String> = HashMap::new();
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            let mut dirty = false;
+            // The initial list arrives as a stream of `InitApply`s, so the
+            // counts are incomplete until `InitDone`. Publishing mid-init
+            // would walk the PODS column up from zero on every (re)sync —
+            // the old full-list poll only ever emitted complete counts.
+            let mut synced = false;
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut poll_fallback = false;
+            loop {
+                tokio::select! {
+                    maybe_event = stream.next() => {
+                        let Some(event) = maybe_event else { break };
+                        if flag.load(Ordering::SeqCst) != genr {
+                            break;
+                        }
+                        let retire = |node: &str, counts: &mut HashMap<String, usize>| {
+                            if let Some(c) = counts.get_mut(node) {
+                                *c = c.saturating_sub(1);
+                                if *c == 0 {
+                                    counts.remove(node);
+                                }
+                            }
+                        };
+                        // Progress, as opposed to another doomed list attempt.
+                        // `Init` and the `InitApply`s behind it are replayed on
+                        // every attempt, so resetting on those is exactly the
+                        // mistake `.default_backoff()` makes.
+                        let established = matches!(
+                            event,
+                            Ok(watcher::Event::Apply(_)
+                                | watcher::Event::Delete(_)
+                                | watcher::Event::InitDone)
+                        );
+                        if established {
+                            backoff.reset();
+                        }
+                        match event {
+                            Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
+                                let key = row_key(&obj);
+                                let new_node = obj
+                                    .data
+                                    .pointer("/spec/nodeName")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_string);
+                                let old_node = match &new_node {
+                                    Some(n) => pod_nodes.insert(key, n.clone()),
+                                    None => pod_nodes.remove(&key),
+                                };
+                                if old_node != new_node {
+                                    if let Some(old) = &old_node {
+                                        retire(old, &mut counts);
+                                    }
+                                    if let Some(new) = &new_node {
+                                        *counts.entry(new.clone()).or_insert(0) += 1;
+                                    }
+                                    dirty = true;
+                                }
+                            }
+                            Ok(watcher::Event::Delete(obj)) => {
+                                if let Some(old) = pod_nodes.remove(&row_key(&obj)) {
+                                    retire(&old, &mut counts);
+                                    dirty = true;
+                                }
+                            }
+                            Ok(watcher::Event::Init) => {
+                                pod_nodes.clear();
+                                counts.clear();
+                                synced = false;
+                            }
+                            Ok(watcher::Event::InitDone) => {
+                                synced = true;
+                                dirty = true;
+                            }
+                            // A list-only RBAC grant cannot maintain counts via
+                            // this watcher: after a refused watch, kube retries
+                            // that watch from the same resourceVersion rather
+                            // than re-listing. Restore the periodic list path in
+                            // that case.
+                            Err(error) if node_pods_watch_forbidden(&error) => {
+                                poll_fallback = true;
+                                break;
+                            }
+                            // Everything else is transient and the stream heals
+                            // itself, so pace the next attempt and stay on the
+                            // watch. Sleeping here also stops publishing while
+                            // the counts are going nowhere; `dirty` survives, so
+                            // the next tick after recovery still emits.
+                            Err(_) => {
+                                let delay =
+                                    backoff.next().unwrap_or(NODE_PODS_BACKOFF_CEILING);
+                                tokio::time::sleep(delay).await;
+                            }
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        if flag.load(Ordering::SeqCst) != genr {
+                            break;
+                        }
+                        if dirty && synced {
+                            if tx
+                                .send(Msg::NodePods {
+                                    generation: genr,
+                                    counts: counts.clone(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                            dirty = false;
+                        }
+                    }
+                }
+            }
+
+            if !poll_fallback {
+                return;
+            }
+
             let params =
                 ListParams::default().fields("status.phase!=Succeeded,status.phase!=Failed");
             loop {
                 if flag.load(Ordering::SeqCst) != genr {
                     break;
                 }
-                let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
                 if let Ok(list) = api.list(&params).await {
                     let mut counts: HashMap<String, usize> = HashMap::new();
                     for item in list {

@@ -94,7 +94,9 @@ pub enum CmpValue {
     Mem(i64),
     /// Duration in seconds (`age<2h`).
     Duration(i64),
-    /// Anything else: case-insensitive text comparison.
+    /// Anything else: case-insensitive text comparison. Stored pre-folded to
+    /// lowercase — the comparison runs per object per rebuild, so folding the
+    /// needle once at parse time keeps it out of that loop.
     Str(String),
 }
 
@@ -261,6 +263,34 @@ fn split_cmp(tok: &str) -> Option<(&str, Op, &str)> {
     Some((key, op, value))
 }
 
+/// Fold a comparison needle once at parse time.
+///
+/// Whole-string lowercasing is required for non-ASCII text because it applies
+/// context-sensitive mappings such as Greek final sigma. ASCII uses its
+/// cheaper equivalent; the resulting `String` is retained in `CmpValue`.
+fn fold_lower(s: &str) -> String {
+    if s.is_ascii() {
+        s.to_ascii_lowercase()
+    } else {
+        s.to_lowercase()
+    }
+}
+
+/// Compare a cell with a needle already returned by [`fold_lower`].
+///
+/// The common ASCII path performs no per-cell allocation. If either operand is
+/// non-ASCII, use whole-string lowercasing to preserve the case-insensitive
+/// behavior that structured filters had before the ASCII optimization.
+pub fn cmp_folded_lower(cell: &str, want: &str) -> std::cmp::Ordering {
+    if cell.is_ascii() && want.is_ascii() {
+        cell.bytes()
+            .map(|byte| byte.to_ascii_lowercase())
+            .cmp(want.bytes())
+    } else {
+        cell.to_lowercase().as_str().cmp(want)
+    }
+}
+
 /// Type a comparison value from its key: quantities for `cpu`/`mem`/`memory`,
 /// durations for `age`, and number-or-text for everything else.
 fn typed_value(key: &str, raw: &str) -> Result<CmpValue, String> {
@@ -277,7 +307,7 @@ fn typed_value(key: &str, raw: &str) -> Result<CmpValue, String> {
         _ => Ok(raw
             .parse::<f64>()
             .map(CmpValue::Num)
-            .unwrap_or_else(|_| CmpValue::Str(raw.to_string()))),
+            .unwrap_or_else(|_| CmpValue::Str(fold_lower(raw)))),
     }
 }
 
@@ -412,6 +442,9 @@ mod tests {
         assert!(s.terms.is_empty());
     }
 
+    /// `CmpValue::Str` is stored pre-folded: the comparison is
+    /// case-insensitive, so the needle is lowercased once here rather than
+    /// once per object per rebuild.
     #[test]
     fn status_equality_and_inequality() {
         let s = structured("status=CrashLoopBackOff");
@@ -420,7 +453,7 @@ mod tests {
             vec![Term::Cmp(Cmp {
                 key: "status".into(),
                 op: Op::Eq,
-                value: CmpValue::Str("CrashLoopBackOff".into()),
+                value: CmpValue::Str("crashloopbackoff".into()),
             })]
         );
 
@@ -430,7 +463,7 @@ mod tests {
             vec![Term::Cmp(Cmp {
                 key: "status".into(),
                 op: Op::Ne,
-                value: CmpValue::Str("Running".into()),
+                value: CmpValue::Str("running".into()),
             })]
         );
     }
@@ -549,7 +582,7 @@ mod tests {
                 Term::Cmp(Cmp {
                     key: "status".into(),
                     op: Op::Eq,
-                    value: CmpValue::Str("Running".into()),
+                    value: CmpValue::Str("running".into()),
                 }),
             ]
         );
@@ -585,6 +618,31 @@ mod tests {
         assert_eq!(parse("").fuzzy_needle(), None);
         assert_eq!(parse("!x khc status=Running").fuzzy_needle(), Some("khc"));
         assert_eq!(parse("-l app=api").fuzzy_needle(), None);
+    }
+
+    #[test]
+    fn unicode_comparisons_fold_mixed_case_in_both_directions() {
+        for (cell, raw_needle) in [("ΟΔΟΣ", "οδος"), ("οδος", "ΟΔΟΣ")] {
+            let CmpValue::Str(needle) = typed_value("name", raw_needle).expect("typed") else {
+                panic!("expected a text comparison");
+            };
+            assert_eq!(
+                cmp_folded_lower(cell, &needle),
+                std::cmp::Ordering::Equal,
+                "cell={cell:?}, needle={raw_needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ascii_comparisons_remain_case_insensitive() {
+        let CmpValue::Str(needle) = typed_value("status", "rUnNiNg").expect("typed") else {
+            panic!("expected a text comparison");
+        };
+        assert_eq!(
+            cmp_folded_lower("RUNNING", &needle),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]
