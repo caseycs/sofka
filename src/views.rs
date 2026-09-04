@@ -142,10 +142,14 @@ fn unknown_placeholders(template: &str) -> Vec<String> {
 /// no drill-down of its own). Data, not control flow: a kind common enough to
 /// ship gets a row here — the treatment `FLUX_OBJECT_COLUMNS` gives Flux —
 /// and `[views."…"].node` overrides a row or adds a kind without one.
+///
+/// Keyed like `[views."…"]` and matched against the same keys, so a row can be
+/// as specific as it needs to be: `group/plural` here, because a plural alone
+/// would hand Karpenter's pointer to any other group's `nodeclaims`.
 const NODE_REFS: &[(&str, &str)] = &[
-    ("pods", "/spec/nodeName"),
+    ("v1/pods", "/spec/nodeName"),
     // Karpenter writes the node's name onto the claim once it registers.
-    ("nodeclaims", "/status/nodeName"),
+    ("karpenter.sh/nodeclaims", "/status/nodeName"),
 ];
 
 /// A per-kind setting, resolved key by key in [`lookup`]'s precedence rather
@@ -175,11 +179,12 @@ pub fn node_pointer<'a>(views: &'a HashMap<String, View>, ar: &ApiResource) -> O
     if let Some(pointer) = setting(views, ar, |v| v.node.as_deref()) {
         return Some(pointer);
     }
-    let plural = ar.plural.to_lowercase();
-    NODE_REFS
-        .iter()
-        .find(|(kind, _)| *kind == plural)
-        .map(|(_, pointer)| *pointer)
+    lookup_keys(ar).into_iter().find_map(|key| {
+        NODE_REFS
+            .iter()
+            .find(|(row, _)| *row == key)
+            .map(|(_, pointer)| *pointer)
+    })
 }
 
 /// A comparable cell value for typed sorting, mirrored into the app's private
@@ -990,6 +995,12 @@ mod tests {
         // A kind the table doesn't list names no node until config says where.
         let pools = ar("karpenter.sh", "NodePool", "nodepools");
         assert_eq!(node_pointer(&views, &pools), None);
+        // Rows are scoped to their group: a same-named plural elsewhere
+        // (or PodMetrics, whose plural is also `pods`) gets nothing.
+        let other_claims = ar("example.com", "NodeClaim", "nodeclaims");
+        assert_eq!(node_pointer(&views, &other_claims), None);
+        let pod_metrics = ar("metrics.k8s.io", "PodMetrics", "pods");
+        assert_eq!(node_pointer(&views, &pod_metrics), None);
 
         let (configured, warnings) = compile_toml(
             r#"
