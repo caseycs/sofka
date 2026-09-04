@@ -421,6 +421,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
             hint_line(&[("s", "scale"), ("r", "restart"), ("i", "image")]),
             hint_line(&[("y", "yaml"), ("d", "describe"), ("e", "edit")]),
             hint_line(&[("X", "explain"), ("T", "timeline"), ("f", "port-fwd")]),
+            hint_line(&[("^d", "delete")]),
         ],
         "daemonsets" => vec![
             hint_line(&[("⏎", "pods"), ("l", "logs"), ("E", "events")]),
@@ -441,6 +442,7 @@ fn header_hints(app: &App) -> Vec<Line<'static>> {
         "nodes" => vec![
             hint_line(&[("⏎", "pods"), ("y", "yaml"), ("d", "describe")]),
             hint_line(&[("C", "cordon"), ("U", "uncordon"), ("D", "drain")]),
+            hint_line(&[("^d", "delete")]),
         ],
         "namespaces" => vec![
             hint_line(&[("⏎", "switch to"), ("y", "yaml"), ("d", "describe")]),
