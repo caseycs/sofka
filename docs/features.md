@@ -194,6 +194,8 @@ The full list. For how sofka compares to k9s, see [vs k9s](vs-k9s.md).
   text, JSON, or YAML, then browse and open saved captures. See
   [Snapshots](debugging.md#snapshots).
 - **Runtime diagnostics** (`:info`, or `sofka --info`) - version and build,
-  config sources, live context/cluster/API server, discovery and Metrics API
-  status, watch error counts, and the state/snapshot/bundle directories.
+  config sources, live context/cluster/API server and Kubernetes revision,
+  discovery and Metrics API status, watch error counts, and the
+  state/snapshot/bundle directories. The connected Kubernetes revision also
+  stays visible in the main header.
   Identifiers and counts only, never credentials, tokens, or Secret values.

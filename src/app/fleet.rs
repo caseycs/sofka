@@ -191,12 +191,12 @@ async fn gather_context(ctx: &str, readonly: bool) -> FleetRow {
             return row;
         }
     };
-    let client = cluster.client.clone();
-
-    row.version = match client.apiserver_version().await {
-        Ok(info) => info.git_version,
-        Err(_) => "?".into(),
+    row.version = if cluster.server_version.is_empty() {
+        "?".into()
+    } else {
+        cluster.server_version.clone()
     };
+    let client = cluster.client.clone();
 
     // A failed list must not summarize as "0 unhealthy" — record it and mark
     // the row, keeping whatever partial counts did arrive.

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -58,6 +59,9 @@ pub struct Cluster {
     /// e.g. in-cluster). Keys per-cluster config overrides.
     pub cluster_name: String,
     pub cluster_url: String,
+    /// Kubernetes API-server revision (`gitVersion` from `/version`). Empty
+    /// when disconnected or when the optional version request fails.
+    pub server_version: String,
     pub default_namespace: String,
     /// Context name to pass to `kubectl` shell-outs (`--context`). `None` when
     /// we connected without a named kubeconfig context (e.g. in-cluster), in
@@ -80,6 +84,19 @@ pub struct Cluster {
 const STREAMING_UNKNOWN: u8 = 0;
 const STREAMING_SUPPORTED: u8 = 1;
 const STREAMING_UNSUPPORTED: u8 = 2;
+#[cfg(not(test))]
+const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const VERSION_TIMEOUT: Duration = Duration::from_millis(50);
+const SERVER_VERSION_MAX_CHARS: usize = 128;
+
+/// API metadata is remote input and reaches both the TUI and plain terminal
+/// output. Drop terminal control characters once at ingestion, then bound the
+/// value so every downstream sink can safely render the stored revision.
+fn sanitize_server_version(version: &str) -> String {
+    let visible: String = version.chars().filter(|c| !c.is_control()).collect();
+    crate::text::ellipsize(&visible, SERVER_VERSION_MAX_CHARS)
+}
 
 impl Cluster {
     pub async fn connect() -> Result<Self> {
@@ -115,6 +132,7 @@ impl Cluster {
         let cluster_url = config.cluster_url.to_string();
         let default_namespace = config.default_namespace.clone();
         let client = Client::try_from(config).context("building kube client")?;
+        let version_client = client.clone();
 
         let cluster_name = cluster_name_for(&context).unwrap_or_default();
         let mut cluster = Self {
@@ -122,6 +140,7 @@ impl Cluster {
             context,
             cluster_name,
             cluster_url,
+            server_version: String::new(),
             default_namespace,
             cli_context,
             registry: HashMap::new(),
@@ -129,7 +148,15 @@ impl Cluster {
             connected: true,
             streaming_lists: Arc::new(AtomicU8::new(STREAMING_UNKNOWN)),
         };
-        cluster.discover().await?;
+        // Version is useful metadata, not a connectivity prerequisite. Fetch
+        // it alongside discovery so it adds no serial startup latency, and
+        // keep the cluster usable if an unusual API proxy rejects `/version`.
+        let version = tokio::time::timeout(VERSION_TIMEOUT, version_client.apiserver_version());
+        let (discovery, version) = tokio::join!(cluster.discover(), version);
+        discovery?;
+        if let Ok(Ok(info)) = version {
+            cluster.server_version = sanitize_server_version(&info.git_version);
+        }
         Ok(cluster)
     }
 
@@ -180,6 +207,7 @@ impl Cluster {
             context,
             cluster_name,
             cluster_url,
+            server_version: String::new(),
             default_namespace: "default".into(),
             registry: HashMap::new(),
             catalog: Vec::new(),
@@ -672,6 +700,7 @@ impl Cluster {
             context: "test".into(),
             cluster_name: "test-cluster".into(),
             cluster_url: "https://127.0.0.1:6443".into(),
+            server_version: String::new(),
             default_namespace: "default".into(),
             cli_context: Some("test".into()),
             connected: true,
@@ -888,7 +917,11 @@ mod tests {
     /// entry), and the core group (pods). When `supports_aggregated` is
     /// false it behaves like a pre-1.26 server and answers the aggregated
     /// request with the legacy document.
-    async fn mock_apiserver(supports_aggregated: bool, include_broken: bool) -> String {
+    async fn mock_apiserver(
+        supports_aggregated: bool,
+        include_broken: bool,
+        serve_version: bool,
+    ) -> String {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -906,6 +939,10 @@ mod tests {
             let mixed_v2 = r#",{"metadata":{"name":"mixed.example.com"},"versions":[{"version":"v1","resources":[{"resource":"widgets","responseKind":{"group":"mixed.example.com","version":"v1","kind":"Widget"},"scope":"Namespaced","singularResource":"widget","verbs":["get","list","watch"]}],"freshness":"Current"},{"version":"v1alpha1","resources":[{"resource":"gadgets","responseKind":{"group":"mixed.example.com","version":"v1alpha1","kind":"Gadget"},"scope":"Namespaced","singularResource":"gadget","verbs":["get","list","watch"]}],"freshness":"Current"}]}"#;
             let mixed_legacy = r#",{"name":"mixed.example.com","versions":[{"groupVersion":"mixed.example.com/v1","version":"v1"},{"groupVersion":"mixed.example.com/v1alpha1","version":"v1alpha1"}],"preferredVersion":{"groupVersion":"mixed.example.com/v1","version":"v1"}}"#;
             match (path, aggregated) {
+                ("/version", _) => (
+                    "200 OK",
+                    r#"{"major":"1","minor":"36","gitVersion":"v1.36.2-eks-bca9cf6","gitCommit":"abc123","gitTreeState":"clean","buildDate":"2026-08-20T00:00:00Z","goVersion":"go1.25.0","compiler":"gc","platform":"linux/amd64"}"#.into(),
+                ),
                 ("/apis", true) => (
                     "200 OK",
                     format!(
@@ -987,6 +1024,12 @@ mod tests {
                                 wants_aggregated = true;
                             }
                         }
+                        // Leave the version request unanswered to prove the
+                        // optional lookup has its own deadline and cannot
+                        // hold an otherwise healthy connection open.
+                        if path == "/version" && !serve_version {
+                            continue;
+                        }
                         let (status, body) = route(
                             &path,
                             wants_aggregated && supports_aggregated,
@@ -1020,11 +1063,43 @@ mod tests {
         // A dead aggregated API backend (e.g. metrics-server) must not make
         // the whole cluster unconnectable: aggregated discovery serves the
         // broken group as stale instead of 503ing.
-        let url = mock_apiserver(true, true).await;
+        let url = mock_apiserver(true, true, true).await;
         let cluster = connect_mock(url)
             .await
             .expect("connect with broken APIService");
         assert!(cluster.resolve("deployments").is_some());
+        assert!(cluster.resolve("pods").is_some());
+    }
+
+    #[test]
+    fn server_version_is_terminal_safe_and_bounded() {
+        assert_eq!(
+            sanitize_server_version("v1.36.2\u{1b}[31m\nforged\u{7}"),
+            "v1.36.2[31mforged"
+        );
+        let long = "v".repeat(SERVER_VERSION_MAX_CHARS + 20);
+        let clean = sanitize_server_version(&long);
+        assert_eq!(clean.chars().count(), SERVER_VERSION_MAX_CHARS);
+        assert!(clean.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn connection_captures_apiserver_version() {
+        let url = mock_apiserver(true, false, true).await;
+        let cluster = connect_mock(url)
+            .await
+            .expect("connect to versioned server");
+        assert_eq!(cluster.server_version, "v1.36.2-eks-bca9cf6");
+    }
+
+    #[tokio::test]
+    async fn version_timeout_does_not_block_an_otherwise_healthy_connection() {
+        let url = mock_apiserver(true, false, false).await;
+        let cluster = tokio::time::timeout(Duration::from_secs(1), connect_mock(url))
+            .await
+            .expect("optional version lookup must be bounded")
+            .expect("discovery still succeeds");
+        assert!(cluster.server_version.is_empty());
         assert!(cluster.resolve("pods").is_some());
     }
 
@@ -1033,7 +1108,7 @@ mod tests {
         // Pre-1.26 servers answer the aggregated request with the legacy
         // document, which deserializes as an *empty* group list (not an
         // error) — discovery must detect that and take the per-group walk.
-        let url = mock_apiserver(false, false).await;
+        let url = mock_apiserver(false, false, true).await;
         let cluster = connect_mock(url)
             .await
             .expect("connect via legacy discovery walk");
@@ -1060,14 +1135,14 @@ mod tests {
 
     #[tokio::test]
     async fn aggregated_discovery_includes_non_preferred_versions() {
-        let url = mock_apiserver(true, false).await;
+        let url = mock_apiserver(true, false, true).await;
         let cluster = connect_mock(url).await.expect("connect aggregated");
         assert_mixed_group(&cluster);
     }
 
     #[tokio::test]
     async fn legacy_discovery_includes_non_preferred_versions() {
-        let url = mock_apiserver(false, false).await;
+        let url = mock_apiserver(false, false, true).await;
         let cluster = connect_mock(url).await.expect("connect legacy");
         assert_mixed_group(&cluster);
     }
@@ -1079,7 +1154,7 @@ mod tests {
         // (after ~4 minutes of client-side 503 retries with the default
         // config). If kube-rs ever makes run() tolerant, this starts failing
         // and the aggregated workaround can be simplified.
-        let url = mock_apiserver(false, true).await;
+        let url = mock_apiserver(false, true, true).await;
         assert!(connect_mock(url).await.is_err());
     }
 }

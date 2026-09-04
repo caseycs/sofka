@@ -201,6 +201,19 @@ const HEADER_HINTS_WIDTH: u16 = 44;
 /// Minimum width the info cluster keeps before the hint column may appear.
 const HEADER_INFO_MIN: u16 = 44;
 
+fn header_title(server_version: &str) -> Line<'static> {
+    let mut spans = vec![Span::styled(" sofka ", theme::title())];
+    if !server_version.is_empty() {
+        spans.push(Span::styled("· K8s Rev: ", theme::dim()));
+        spans.push(Span::styled(
+            server_version.to_string(),
+            Style::default().fg(theme::sapphire()),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
+}
+
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -247,7 +260,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border())
-        .title(Span::styled(" sofka ", theme::title()));
+        .title(header_title(&app.cluster.server_version));
     let inner = block.inner(cols[0]);
     frame.render_widget(block, cols[0]);
 
@@ -3529,6 +3542,15 @@ mod tests {
         );
         // Events are watch-backed, genuinely live.
         assert_eq!(sync_indicator(Mode::Events, Mode::Detail, true).0, "● live");
+    }
+
+    #[test]
+    fn header_title_shows_connected_kubernetes_revision() {
+        assert_eq!(line_text(&header_title("")), " sofka ");
+        assert_eq!(
+            line_text(&header_title("v1.36.2-eks-bca9cf6")),
+            " sofka · K8s Rev: v1.36.2-eks-bca9cf6 "
+        );
     }
 
     /// Deficit: a Flex column whose content fits inside its weight-share takes
