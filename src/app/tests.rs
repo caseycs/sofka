@@ -6691,6 +6691,68 @@ async fn user_view_overlays_columns_and_applies_initial_sort() {
 }
 
 #[tokio::test]
+async fn user_view_adds_provider_label_columns_to_curated_nodes() {
+    let (mut app, _rx) = test_app();
+    install_views(
+        &mut app,
+        r#"
+        [[views."v1/nodes".columns]]
+        name = "NODEPOOL"
+        path = "/metadata/labels/karpenter.sh~1nodepool"
+
+        [[views."v1/nodes".columns]]
+        name = "ZONE"
+        path = "/metadata/labels/topology.kubernetes.io~1zone"
+
+        [[views."v1/nodes".columns]]
+        name = "INSTANCE"
+        path = "/metadata/labels/node.kubernetes.io~1instance-type"
+
+        [[views."v1/nodes".columns]]
+        name = "TYPE"
+        path = "/metadata/labels/karpenter.sh~1capacity-type"
+        "#,
+    );
+    app.switch_kind("nodes");
+
+    assert_eq!(
+        app.display_headers(),
+        [
+            "NAME", "STATUS", "ROLES", "TAINTS", "VERSION", "NODEPOOL", "ZONE", "INSTANCE", "TYPE",
+            "AGE", "PODS", "CPU", "MEM", "%CPU", "%MEM"
+        ]
+    );
+
+    apply(
+        &mut app,
+        json!({
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": {
+                "name": "worker-1",
+                "labels": {
+                    "karpenter.sh/nodepool": "general",
+                    "topology.kubernetes.io/zone": "eu-west-1a",
+                    "node.kubernetes.io/instance-type": "m7i.large",
+                    "karpenter.sh/capacity-type": "spot"
+                }
+            },
+            "status": {
+                "nodeInfo": {"kubeletVersion": "v1.33.4"}
+            }
+        }),
+    );
+
+    let rows = app.rows();
+    app.ensure_table_cell_cache(&rows);
+    let key = row_key(rows[0]);
+    let cache = app.table_cell_cache();
+    let (cells, _) = cache.get(&key).unwrap();
+    assert_eq!(cells[4], "v1.33.4");
+    assert_eq!(&cells[5..9], ["general", "eu-west-1a", "m7i.large", "spot"]);
+}
+
+#[tokio::test]
 async fn user_view_replace_swaps_out_curated_columns() {
     let (mut app, _rx) = test_app();
     install_views(
