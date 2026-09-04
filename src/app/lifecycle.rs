@@ -842,23 +842,11 @@ impl App {
             }
             Msg::Flash {
                 generation,
+                claim,
                 message,
                 err,
             } if generation == self.generation => {
-                // Two actions started close together share a generation, so a
-                // slower one can land after a faster one already failed. An
-                // error on the bar is the newer, more important news and now
-                // never expires, so a late success must not be what erases it.
-                // Starting the next action clears `flash_err` through its own
-                // progress flash, so this only ever suppresses a result that
-                // raced an error — never the ordinary one-action flow.
-                if err || !self.flash_err {
-                    // Through the setter, so re-running an action inside the
-                    // expiry window restarts the timer on an identical message
-                    // instead of letting it vanish a moment later.
-                    self.set_flash(message);
-                    self.flash_err = err;
-                }
+                self.set_claimed_status(claim, message, err);
             }
             Msg::Panic(error) => {
                 self.last_error = Some(error.clone());
@@ -987,6 +975,7 @@ impl App {
             }
             Msg::Explain {
                 generation,
+                claim,
                 title,
                 findings,
             } if generation == self.generation => {
@@ -1003,10 +992,11 @@ impl App {
                 self.mode = Mode::Explain;
                 // As in the `Msg::Gitops` arm below: the "explaining X…"
                 // progress flash has done its job now the findings are up.
-                self.clear_progress_flash();
+                self.clear_claimed_status(claim);
             }
             Msg::Gitops {
                 generation,
+                claim,
                 title,
                 findings,
             } if generation == self.generation => {
@@ -1020,7 +1010,7 @@ impl App {
                 self.gitops_state
                     .select((!self.gitops_items.is_empty()).then_some(first));
                 self.mode = Mode::Gitops;
-                self.clear_progress_flash();
+                self.clear_claimed_status(claim);
             }
             Msg::PluginOutput {
                 generation,
@@ -1123,6 +1113,7 @@ impl App {
             }
             Msg::Detail {
                 generation,
+                claim,
                 title,
                 lines,
                 warn,
@@ -1134,10 +1125,10 @@ impl App {
                 };
                 self.mode = Mode::Detail;
                 match warn {
-                    Some(w) => self.flash_warn(&w),
+                    Some(w) => self.set_claimed_status(claim, w, true),
                     // The "describing X…" progress flash has served its
                     // purpose once the document arrives.
-                    None => self.clear_progress_flash(),
+                    None => self.clear_claimed_status(claim),
                 }
             }
             Msg::Events {

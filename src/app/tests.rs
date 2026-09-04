@@ -1984,9 +1984,10 @@ async fn restart_key_opens_confirm() {
 #[tokio::test]
 async fn detail_arrival_clears_progress_flash() {
     let (mut app, _rx) = test_app();
-    app.flash = "describing web…".into();
+    let claim = app.claim_status("describing web…");
     app.handle_msg(Msg::Detail {
         generation: app.generation,
+        claim,
         title: "web — describe".into(),
         lines: vec!["Name: web".into()],
         warn: None,
@@ -1995,9 +1996,10 @@ async fn detail_arrival_clears_progress_flash() {
     assert!(app.flash.is_empty(), "{}", app.flash);
 
     // A fallback warning still replaces the progress flash.
-    app.flash = "describing web…".into();
+    let claim = app.claim_status("describing web…");
     app.handle_msg(Msg::Detail {
         generation: app.generation,
+        claim,
         title: "web — YAML".into(),
         lines: vec!["kind: Pod".into()],
         warn: Some("kubectl not found; showing YAML".into()),
@@ -2057,7 +2059,7 @@ async fn successful_transient_flash_expires() {
 #[tokio::test]
 async fn progress_flash_outlives_the_expiry_window() {
     let (mut app, _rx) = test_app();
-    app.flash = "draining 3 nodes…".into();
+    let claim = app.claim_status("draining 3 nodes…");
 
     // A drain or a bulk delete easily runs past 8s; blanking the bar
     // mid-flight would read as though nothing were happening.
@@ -2069,6 +2071,7 @@ async fn progress_flash_outlives_the_expiry_window() {
     // The result replaces it, and that one does expire on schedule.
     app.handle_msg(Msg::Flash {
         generation: app.generation,
+        claim,
         message: "drain requested: 3 nodes".into(),
         err: false,
     });
@@ -2083,7 +2086,7 @@ async fn progress_flash_outlives_the_expiry_window() {
 async fn refreshing_mid_action_drops_the_orphaned_progress_flash() {
     let (mut app, _rx) = test_app();
     app.switch_kind("pods");
-    app.flash = "deleting 3 pods…".into();
+    let claim = app.claim_status("deleting 3 pods…");
     let stale = app.generation;
 
     // `r` restarts the watch, which bumps the generation, so the delete's
@@ -2097,6 +2100,7 @@ async fn refreshing_mid_action_drops_the_orphaned_progress_flash() {
     // The orphaned result is still dropped, not shown late.
     app.handle_msg(Msg::Flash {
         generation: stale,
+        claim,
         message: "deleted 3 pods".into(),
         err: false,
     });
@@ -2146,12 +2150,13 @@ async fn action_progress_flashes_keep_the_ellipsis_convention() {
 #[tokio::test]
 async fn explain_findings_clear_the_progress_flash() {
     let (mut app, _rx) = test_app();
-    app.flash = "explaining web…".into();
+    let claim = app.claim_status("explaining web…");
 
     // Nothing else replaces this one, and `expire_flash` won't time a `…` out,
     // so the handler has to clear it — as the `Msg::Gitops` arm does.
     app.handle_msg(Msg::Explain {
         generation: app.generation,
+        claim,
         title: "explain — web".into(),
         findings: Vec::new(),
     });
@@ -2176,35 +2181,43 @@ async fn an_action_with_no_targets_claims_nothing() {
 }
 
 #[tokio::test]
-async fn a_finished_report_does_not_erase_a_concurrent_action_result() {
+async fn a_finished_report_only_clears_its_own_status_claim() {
     let (mut app, _rx) = test_app();
 
-    // A describe and a delete share a generation. The delete lands first and
-    // claims the bar; the report is done with its own progress message, but
-    // clearing unconditionally would wipe the confirmation and show nothing.
-    app.flash = "describing web…".into();
-    app.handle_msg(Msg::Flash {
-        generation: app.generation,
-        message: "deleted 3 pods".into(),
-        err: false,
-    });
+    // A describe and a delete share a generation. The delete claims the bar
+    // after describe; the older report must not clear that in-flight progress.
+    let describe_claim = app.claim_status("describing web…");
+    let delete_claim = app.claim_status("deleting 3 pods…");
     app.handle_msg(Msg::Detail {
         generation: app.generation,
+        claim: describe_claim,
         title: "web — describe".into(),
         lines: vec!["Name: web".into()],
         warn: None,
+    });
+    assert_eq!(app.flash, "deleting 3 pods…");
+
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: delete_claim,
+        message: "deleted 3 pods".into(),
+        err: false,
     });
     assert_eq!(app.flash, "deleted 3 pods");
 
     // Same for an error, which no longer expires on its own — losing it here
     // would lose it for good.
-    app.flash = "explaining web…".into();
-    app.handle_msg(Msg::Error {
+    let explain_claim = app.claim_status("explaining web…");
+    let delete_claim = app.claim_status("deleting web…");
+    app.handle_msg(Msg::Flash {
         generation: app.generation,
-        error: "delete web failed: forbidden".into(),
+        claim: delete_claim,
+        message: "delete web failed: forbidden".into(),
+        err: true,
     });
     app.handle_msg(Msg::Explain {
         generation: app.generation,
+        claim: explain_claim,
         title: "explain — web".into(),
         findings: Vec::new(),
     });
@@ -2214,44 +2227,63 @@ async fn a_finished_report_does_not_erase_a_concurrent_action_result() {
 }
 
 #[tokio::test]
-async fn a_late_success_does_not_erase_an_error() {
+async fn an_older_action_result_cannot_overwrite_a_newer_action() {
     let (mut app, _rx) = test_app();
 
-    // Two actions started close together share a generation, so a slower one
-    // can report success after a faster one has already failed.
-    app.flash = "deleting 3 pods…".into();
-    app.handle_msg(Msg::Error {
-        generation: app.generation,
-        error: "scale web failed: forbidden".into(),
-    });
+    let old = app.claim_status("deleting 3 pods…");
+    let new = app.claim_status("scaling web → 3…");
     app.handle_msg(Msg::Flash {
         generation: app.generation,
+        claim: old,
         message: "deleted 3 pods".into(),
         err: false,
+    });
+    assert_eq!(app.flash, "scaling web → 3…");
+
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim: new,
+        message: "scale web failed: forbidden".into(),
+        err: true,
     });
     assert!(app.flash_err);
     assert!(app.flash.contains("scale web failed"), "{}", app.flash);
 
-    // The next action clears the error through its own progress flash, so
-    // ordinary results are unaffected.
-    app.flash = "deleting 2 pods…".into();
-    app.flash_err = false;
+    // An older error also cannot erase a newer successful result.
+    let old = app.claim_status("deleting api…");
+    let new = app.claim_status("scaling worker → 2…");
     app.handle_msg(Msg::Flash {
         generation: app.generation,
-        message: "deleted 2 pods".into(),
+        claim: new,
+        message: "scaled worker → 2".into(),
         err: false,
     });
-    assert_eq!(app.flash, "deleted 2 pods");
-
-    // A `:can-i` verdict answers a question the user just asked, so it lands
-    // even over an error.
-    app.flash_err = true;
     app.handle_msg(Msg::Flash {
         generation: app.generation,
-        message: "✗ no — cannot delete pods".into(),
+        claim: old,
+        message: "delete api failed: forbidden".into(),
         err: true,
     });
-    assert_eq!(app.flash, "✗ no — cannot delete pods");
+    assert_eq!(app.flash, "scaled worker → 2");
+    assert!(!app.flash_err);
+}
+
+#[tokio::test]
+async fn an_unclaimed_status_update_invalidates_the_current_claim() {
+    let (mut app, _rx) = test_app();
+    let claim = app.claim_status("deleting api…");
+
+    // Most existing synchronous status updates assign `flash` directly. The
+    // expected-text half of ownership makes those safe without migrating every
+    // call site in this fix.
+    app.flash = "namespace: prod".into();
+    app.handle_msg(Msg::Flash {
+        generation: app.generation,
+        claim,
+        message: "deleted api".into(),
+        err: false,
+    });
+    assert_eq!(app.flash, "namespace: prod");
 }
 
 #[tokio::test]
@@ -2260,8 +2292,10 @@ async fn can_i_verdict_arrives_as_a_flash() {
     // `:can-i` shares `Msg::Flash` with the action results. A denial is an
     // answer, not a failure, so it doesn't go through `Msg::Error` — but it
     // still reads as an error and sticks around like one.
+    let claim = app.claim_status("can-i delete pods…");
     app.handle_msg(Msg::Flash {
         generation: app.generation,
+        claim,
         message: "✗ no — cannot delete pods".into(),
         err: true,
     });

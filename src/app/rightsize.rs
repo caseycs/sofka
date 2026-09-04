@@ -50,8 +50,7 @@ impl App {
             .as_ref()
             .map(|k| k.ar.kind.clone())
             .unwrap_or_else(|| self.kind_plural.clone());
-        self.flash = format!("right-sizing {name} over {}…", provider.window);
-        self.flash_err = false;
+        let claim = self.claim_status(format!("right-sizing {name} over {}…", provider.window));
 
         tokio::spawn(async move {
             let title = format!("right-size — {kind_name}/{name}");
@@ -63,6 +62,7 @@ impl App {
                         let _ = tx
                             .send(Msg::Detail {
                                 generation: genr,
+                                claim,
                                 title,
                                 lines: vec![format!("no metrics backend: {e}")],
                                 warn: Some("right-size needs Prometheus/VictoriaMetrics".into()),
@@ -98,6 +98,7 @@ impl App {
             let _ = tx
                 .send(Msg::Detail {
                     generation: genr,
+                    claim,
                     title,
                     lines,
                     warn,

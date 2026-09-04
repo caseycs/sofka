@@ -6,6 +6,10 @@ use std::sync::Arc;
 
 use kube::core::DynamicObject;
 
+/// Identity of an asynchronous operation's claim on the shared status bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusClaim(pub(crate) u64);
+
 /// Messages flowing from watch tasks to the UI loop. Tagged with a
 /// `generation` so messages from a superseded watch can be discarded.
 pub enum Msg {
@@ -69,12 +73,14 @@ pub enum Msg {
     /// Findings for the explain-unhealthy view, gathered off-thread.
     Explain {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         findings: Vec<crate::explain::Finding>,
     },
     /// Reconciliation-chain findings for the GitOps view, gathered off-thread.
     Gitops {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         findings: Vec<crate::explain::Finding>,
     },
@@ -97,6 +103,7 @@ pub enum Msg {
     /// Result of an off-thread `kubectl describe` (or its YAML fallback).
     Detail {
         generation: u64,
+        claim: StatusClaim,
         title: String,
         lines: Vec<String>,
         /// Set when describe failed and we fell back to YAML.
@@ -214,11 +221,11 @@ pub enum Msg {
     /// from an off-thread task.
     Flash {
         generation: u64,
+        claim: StatusClaim,
         message: String,
-        /// Render in the error style. Action results never set this — a failed
-        /// action reports through [`Msg::Error`] instead — but a `:can-i`
-        /// denial is a legitimate answer rather than a failure, and still
-        /// wants to read as a "no".
+        /// Render in the error style. This covers both action failures and a
+        /// `:can-i` denial, which is an answer rather than a watch error but
+        /// still wants to read as a "no".
         err: bool,
     },
     /// A panic in a background task, reported by the process panic hook.

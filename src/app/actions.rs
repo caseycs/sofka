@@ -82,6 +82,7 @@ impl App {
         kind: Kind,
         targets: Vec<(String, String)>,
         patch: Patch<Value>,
+        claim: StatusClaim,
         ok_message: String,
         error_message: F,
     ) where
@@ -101,9 +102,11 @@ impl App {
                 if let Err(e) = api.patch(&name, &PatchParams::default(), &patch).await {
                     failed = true;
                     let _ = tx
-                        .send(Msg::Error {
+                        .send(Msg::Flash {
                             generation: genr,
-                            error: error_message(&name, e),
+                            claim,
+                            message: error_message(&name, e),
+                            err: true,
                         })
                         .await;
                 }
@@ -112,6 +115,7 @@ impl App {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
+                        claim,
                         message: ok_message,
                         err: false,
                     })
@@ -134,12 +138,12 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
-        self.flash = if targets.len() == 1 {
+        let progress = if targets.len() == 1 {
             format!("deleting {}…", targets[0].0)
         } else {
             format!("deleting {} {}…", targets.len(), self.kind_plural)
         };
-        self.flash_err = false;
+        let claim = self.claim_status(progress);
         let done_label = if targets.len() == 1 {
             format!("deleted {}", targets[0].0)
         } else {
@@ -163,9 +167,11 @@ impl App {
                 if let Err(e) = api.delete(&name, &dp).await {
                     failed = true;
                     let _ = tx
-                        .send(Msg::Error {
+                        .send(Msg::Flash {
                             generation: genr,
-                            error: format!("delete {name} failed: {e}"),
+                            claim,
+                            message: format!("delete {name} failed: {e}"),
+                            err: true,
                         })
                         .await;
                 }
@@ -174,6 +180,7 @@ impl App {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
+                        claim,
                         message: done_label,
                         err: false,
                     })
@@ -210,12 +217,12 @@ impl App {
         } else {
             "uncordoning"
         };
-        self.flash = if targets.len() == 1 {
+        let progress = if targets.len() == 1 {
             format!("{verb} {}…", targets[0])
         } else {
             format!("{verb} {} nodes…", targets.len())
         };
-        self.flash_err = false;
+        let claim = self.claim_status(progress);
         let verb_done = if unschedulable {
             "cordoned"
         } else {
@@ -235,6 +242,7 @@ impl App {
             kind,
             targets,
             Patch::Merge(node_unschedulable_patch(unschedulable)),
+            claim,
             ok_message,
             move |name, e| format!("{verb} {name} failed: {e}"),
         );
@@ -282,12 +290,12 @@ impl App {
         let client = self.cluster.client.clone();
         let tx = self.tx.clone();
         let genr = self.generation;
-        self.flash = if targets.len() == 1 {
+        let progress = if targets.len() == 1 {
             format!("draining {}…", targets[0])
         } else {
             format!("draining {} nodes…", targets.len())
         };
-        self.flash_err = false;
+        let claim = self.claim_status(progress);
         // Not "drained": the task is done once the API accepts the evictions,
         // but the pods are still terminating at that point (real `kubectl
         // drain` blocks until they're gone).
@@ -308,9 +316,11 @@ impl App {
                 {
                     failed = true;
                     let _ = tx
-                        .send(Msg::Error {
+                        .send(Msg::Flash {
                             generation: genr,
-                            error: format!("drain {node}: cordon failed: {e}"),
+                            claim,
+                            message: format!("drain {node}: cordon failed: {e}"),
+                            err: true,
                         })
                         .await;
                     continue;
@@ -324,9 +334,11 @@ impl App {
                     Err(e) => {
                         failed = true;
                         let _ = tx
-                            .send(Msg::Error {
+                            .send(Msg::Flash {
                                 generation: genr,
-                                error: format!("drain {node}: list pods failed: {e}"),
+                                claim,
+                                message: format!("drain {node}: list pods failed: {e}"),
+                                err: true,
                             })
                             .await;
                         continue;
@@ -351,11 +363,13 @@ impl App {
                             {
                                 failed = true;
                                 let _ = tx
-                                    .send(Msg::Error {
+                                    .send(Msg::Flash {
                                         generation: genr,
-                                        error: format!(
+                                        claim,
+                                        message: format!(
                                             "drain {node}: delete {ns}/{name} failed after eviction fallback: {delete_err}"
                                         ),
+                                        err: true,
                                     })
                                     .await;
                             }
@@ -363,9 +377,11 @@ impl App {
                         Err(e) => {
                             failed = true;
                             let _ = tx
-                                .send(Msg::Error {
+                                .send(Msg::Flash {
                                     generation: genr,
-                                    error: format!("drain {node}: evict {ns}/{name} failed: {e}"),
+                                    claim,
+                                    message: format!("drain {node}: evict {ns}/{name} failed: {e}"),
+                                    err: true,
                                 })
                                 .await;
                         }
@@ -376,6 +392,7 @@ impl App {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
+                        claim,
                         message: done_label,
                         err: false,
                     })
@@ -651,13 +668,13 @@ impl App {
     pub(super) fn do_restart(&mut self, kind: Kind, name: String, ns: String) {
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
         self.note_action("restart", format!("{name} in {ns}"));
-        self.flash = format!("restarting {name}…");
-        self.flash_err = false;
+        let claim = self.claim_status(format!("restarting {name}…"));
         let ok_message = format!("restarted {name}");
         self.spawn_patch_action(
             kind,
             vec![(name, ns)],
             Patch::Strategic(restart_patch(&now)),
+            claim,
             ok_message,
             |_, e| format!("restart failed: {e}"),
         );
@@ -766,13 +783,13 @@ impl App {
             format!("set-image {container}={image}"),
             format!("{name} in {ns}"),
         );
-        self.flash = format!("setting image: {container} → {image}…");
-        self.flash_err = false;
+        let claim = self.claim_status(format!("setting image: {container} → {image}…"));
         let ok_message = format!("image set: {container} → {image}");
         self.spawn_patch_action(
             kind,
             vec![(name, ns)],
             Patch::Strategic(set_image_patch(&plural, &container, &image)),
+            claim,
             ok_message,
             |_, e| format!("set image failed: {e}"),
         );
@@ -1541,7 +1558,7 @@ impl App {
         };
         let label = self.action_label(&targets);
         self.note_action(format!("scale to {replicas}"), label);
-        self.flash = if let [(name, _)] = targets.as_slice() {
+        let progress = if let [(name, _)] = targets.as_slice() {
             format!("scaling {name} → {replicas}…")
         } else {
             format!(
@@ -1550,7 +1567,7 @@ impl App {
                 self.kind_plural
             )
         };
-        self.flash_err = false;
+        let claim = self.claim_status(progress);
         self.marked.clear();
         let ok_message = if let [(name, _)] = targets.as_slice() {
             format!("scaled {name} → {replicas}")
@@ -1561,6 +1578,7 @@ impl App {
             kind,
             targets,
             Patch::Merge(scale_patch(replicas)),
+            claim,
             ok_message,
             |name, e| format!("scale {name} failed: {e}"),
         );
@@ -1857,12 +1875,12 @@ impl App {
         self.note_action(if suspend { "suspend" } else { "resume" }, label);
         let verb = if suspend { "suspending" } else { "resuming" };
         let verb_done = if suspend { "suspended" } else { "resumed" };
-        self.flash = if targets.len() == 1 {
+        let progress = if targets.len() == 1 {
             format!("{verb} {}…", targets[0].0)
         } else {
             format!("{verb} {} {}…", targets.len(), self.kind_plural)
         };
-        self.flash_err = false;
+        let claim = self.claim_status(progress);
         self.marked.clear();
         let ok_message = if targets.len() == 1 {
             format!("{verb_done} {}", targets[0].0)
@@ -1873,6 +1891,7 @@ impl App {
             kind,
             targets,
             Patch::Merge(suspend_patch(suspend)),
+            claim,
             ok_message,
             move |name, e| format!("{verb} {name} failed: {e}"),
         );
@@ -1891,12 +1910,12 @@ impl App {
         let now = k8s_openapi::jiff::Timestamp::now().to_string();
         let label = self.action_label(&targets);
         self.note_action("reconcile", label);
-        self.flash = if targets.len() == 1 {
+        let progress = if targets.len() == 1 {
             format!("reconciling {}…", targets[0].0)
         } else {
             format!("reconciling {} {}…", targets.len(), self.kind_plural)
         };
-        self.flash_err = false;
+        let claim = self.claim_status(progress);
         self.marked.clear();
         // Same overclaim as "drained": `reconcile_patch` only stamps
         // `reconcile.fluxcd.io/requestedAt`, and the Flux controller acts on it
@@ -1914,6 +1933,7 @@ impl App {
             kind,
             targets,
             Patch::Merge(reconcile_patch(&now)),
+            claim,
             ok_message,
             |name, e| format!("reconcile {name} failed: {e}"),
         );
@@ -1948,12 +1968,12 @@ impl App {
             .collect();
         let label = self.action_label(&targets);
         self.note_action("trigger", label);
-        self.flash = if jobs.len() == 1 {
+        let progress = if jobs.len() == 1 {
             format!("triggering {}…", jobs[0].0)
         } else {
             format!("triggering {} {}…", jobs.len(), self.kind_plural)
         };
-        self.flash_err = false;
+        let claim = self.claim_status(progress);
         self.marked.clear();
         let done_label = if jobs.len() == 1 {
             format!("triggered {}", jobs[0].0)
@@ -1979,9 +1999,11 @@ impl App {
                     Err(e) => {
                         failed = true;
                         let _ = tx
-                            .send(Msg::Error {
+                            .send(Msg::Flash {
                                 generation: genr,
-                                error: format!("trigger {name} failed: {e}"),
+                                claim,
+                                message: format!("trigger {name} failed: {e}"),
+                                err: true,
                             })
                             .await;
                         continue;
@@ -1990,9 +2012,11 @@ impl App {
                 if let Err(e) = api.create(&PostParams::default(), &job).await {
                     failed = true;
                     let _ = tx
-                        .send(Msg::Error {
+                        .send(Msg::Flash {
                             generation: genr,
-                            error: format!("trigger {name} failed: {e}"),
+                            claim,
+                            message: format!("trigger {name} failed: {e}"),
+                            err: true,
                         })
                         .await;
                 }
@@ -2001,6 +2025,7 @@ impl App {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
+                        claim,
                         message: done_label,
                         err: false,
                     })
@@ -2038,12 +2063,12 @@ impl App {
         let now = k8s_openapi::jiff::Timestamp::now().as_second().to_string();
         let label = self.action_label(&targets);
         self.note_action("refresh", label);
-        self.flash = if targets.len() == 1 {
+        let progress = if targets.len() == 1 {
             format!("refreshing {}…", targets[0].0)
         } else {
             format!("refreshing {} {}…", targets.len(), self.kind_plural)
         };
-        self.flash_err = false;
+        let claim = self.claim_status(progress);
         self.marked.clear();
         // Likewise a request: the `force-sync` annotation is picked up by the
         // operator on its next pass, so the secret isn't refreshed yet.
@@ -2056,6 +2081,7 @@ impl App {
             kind,
             targets,
             Patch::Merge(external_secret_refresh_patch(&now)),
+            claim,
             ok_message,
             |name, e| format!("refresh {name} failed: {e}"),
         );
@@ -2073,6 +2099,7 @@ impl App {
     pub(super) fn flash_warn(&mut self, msg: &str) {
         self.flash = msg.to_string();
         self.flash_err = true;
+        self.status_claim = None;
     }
 
     /// Set the status bar to a successful transient message and (re)start its
@@ -2085,27 +2112,69 @@ impl App {
         self.flash = msg.into();
         self.flash_err = false;
         self.flash_sticky = false;
+        self.status_claim = None;
         self.flash_seen.clone_from(&self.flash);
         self.flash_since = std::time::Instant::now();
     }
 
-    /// Take an in-flight progress message off the bar — but only if that is
-    /// still what the bar is showing. The trailing `…` is the test, the same
-    /// convention [`App::expire_flash`] reads.
-    ///
-    /// Two callers, one rule. A generation bump orphans the task that would
-    /// have replaced "deleting 3 pods…" with its result, and `expire_flash`
-    /// deliberately never times a progress message out, so without this a
-    /// refresh (`r`) during a bulk delete strands that message for good. And a
-    /// document/report task finishing (`Msg::Detail`/`Explain`/`Gitops`) is
-    /// done with its own "describing web…", but a concurrent action may have
-    /// claimed the bar since — clearing unconditionally would wipe that
-    /// action's confirmation, or a sticky error, and leave nothing behind.
+    /// Put an asynchronous operation's progress on the shared status bar and
+    /// return the claim its eventual result must present.
+    pub(super) fn claim_status(&mut self, msg: impl Into<String>) -> StatusClaim {
+        self.next_status_claim = self.next_status_claim.wrapping_add(1);
+        let claim = StatusClaim(self.next_status_claim);
+        let message = msg.into();
+        self.set_flash(message.clone());
+        self.status_claim = Some((claim, message));
+        claim
+    }
+
+    /// Replace the status owned by `claim`. A newer operation or any direct
+    /// status assignment makes the old result a no-op.
+    pub(super) fn set_claimed_status(
+        &mut self,
+        claim: StatusClaim,
+        msg: impl Into<String>,
+        err: bool,
+    ) {
+        if !self
+            .status_claim
+            .as_ref()
+            .is_some_and(|(owner, text)| *owner == claim && self.flash == *text)
+        {
+            return;
+        }
+        let message = msg.into();
+        self.set_flash(message.clone());
+        self.flash_err = err;
+        self.status_claim = Some((claim, message));
+    }
+
+    /// Clear a completed operation's progress only while it still owns the
+    /// bar. Its document/result may still be applied after ownership moves.
+    pub(super) fn clear_claimed_status(&mut self, claim: StatusClaim) {
+        if self
+            .status_claim
+            .as_ref()
+            .is_some_and(|(owner, text)| *owner == claim && self.flash == *text)
+        {
+            self.flash.clear();
+            self.flash_err = false;
+            self.flash_seen.clear();
+            self.flash_sticky = false;
+            self.status_claim = None;
+        }
+    }
+
+    /// Take an in-flight progress message off the bar when its generation is
+    /// abandoned. The trailing `…` is the same progress convention
+    /// [`App::expire_flash`] reads. Normal completions use their operation
+    /// token through [`Self::clear_claimed_status`] instead.
     pub(super) fn clear_progress_flash(&mut self) {
         if self.flash.ends_with('…') {
             self.flash.clear();
             self.flash_err = false;
         }
+        self.status_claim = None;
     }
 
     /// Auto-clear a *finished* transient flash [`FLASH_TTL`] after it last
@@ -2122,6 +2191,7 @@ impl App {
     /// end in `…` by convention, which is what marks them here.
     pub fn expire_flash(&mut self) {
         if self.flash != self.flash_seen {
+            self.status_claim = None;
             self.flash_seen.clone_from(&self.flash);
             self.flash_since = std::time::Instant::now();
             self.flash_sticky = false;
@@ -2135,6 +2205,7 @@ impl App {
         {
             self.flash.clear();
             self.flash_seen.clear();
+            self.status_claim = None;
         }
     }
 
@@ -2208,8 +2279,7 @@ impl App {
             "-n".to_string(),
             ns,
         ]);
-        self.flash = format!("rolling back {name} to revision {revision}…");
-        self.flash_err = false;
+        let claim = self.claim_status(format!("rolling back {name} to revision {revision}…"));
         let tx = self.tx.clone();
         let genr = self.generation;
         // No manual re-watch on success: the live `secrets` watch backing the
@@ -2220,6 +2290,7 @@ impl App {
                     let _ = tx
                         .send(Msg::Flash {
                             generation: genr,
+                            claim,
                             message: format!("rolled back {name} to revision {revision}"),
                             err: false,
                         })
@@ -2227,9 +2298,11 @@ impl App {
                 }
                 Err(e) => {
                     let _ = tx
-                        .send(Msg::Error {
+                        .send(Msg::Flash {
                             generation: genr,
-                            error: format!("helm rollback {name} failed: {e}"),
+                            claim,
+                            message: format!("helm rollback {name} failed: {e}"),
+                            err: true,
                         })
                         .await;
                 }
@@ -2268,12 +2341,12 @@ impl App {
             many => format!("{} Helm releases", many.len()),
         };
         self.note_action("helm uninstall", label);
-        self.flash = if targets.len() == 1 {
+        let progress = if targets.len() == 1 {
             format!("uninstalling {}…", targets[0].0)
         } else {
             format!("uninstalling {} Helm releases…", targets.len())
         };
-        self.flash_err = false;
+        let claim = self.claim_status(progress);
         let done_label = if targets.len() == 1 {
             format!("uninstalled {}", targets[0].0)
         } else {
@@ -2290,9 +2363,11 @@ impl App {
                 if let Err(e) = run_helm(&argv).await {
                     failed = true;
                     let _ = tx
-                        .send(Msg::Error {
+                        .send(Msg::Flash {
                             generation: genr,
-                            error: format!("helm uninstall {name} failed: {e}"),
+                            claim,
+                            message: format!("helm uninstall {name} failed: {e}"),
+                            err: true,
                         })
                         .await;
                 }
@@ -2301,6 +2376,7 @@ impl App {
                 let _ = tx
                     .send(Msg::Flash {
                         generation: genr,
+                        claim,
                         message: done_label,
                         err: false,
                     })

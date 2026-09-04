@@ -32,7 +32,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 use crate::k8s::{Cluster, Kind};
-use crate::store::{Msg, Pulse, RowKey, Store, StoreMutation, XrayItem, row_key};
+use crate::store::{Msg, Pulse, RowKey, StatusClaim, Store, StoreMutation, XrayItem, row_key};
 
 pub(crate) use guardrails::ConfirmLevel;
 
@@ -1220,6 +1220,12 @@ pub struct App {
     /// starts sticky; the first flash that replaces it clears the flag, so no
     /// call site has to.
     pub(super) flash_sticky: bool,
+    /// Monotonic source for asynchronous status-bar ownership claims.
+    pub(super) next_status_claim: u64,
+    /// Current claim and the exact text it owns. Comparing the text makes a
+    /// direct status assignment invalidate the claim even before the next
+    /// expiry tick observes that assignment.
+    pub(super) status_claim: Option<(StatusClaim, String)>,
 
     pub detail: Scrollable,
     /// Search query for the help view (`?`), which has no backing
@@ -1550,6 +1556,8 @@ impl App {
             flash_seen: WELCOME_FLASH.into(),
             flash_since: std::time::Instant::now(),
             flash_sticky: true,
+            next_status_claim: 0,
+            status_claim: None,
             detail: Scrollable::empty(),
             help_filter: String::new(),
             doc_filter_return: Mode::Detail,
