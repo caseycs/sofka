@@ -1,5 +1,9 @@
 use super::*;
 
+/// Fallback delay if the watcher backoff ever runs out of steps. `DefaultBackoff`
+/// is unbounded in attempts, so this is belt and braces rather than a real path.
+const NODE_PODS_BACKOFF_CEILING: Duration = Duration::from_secs(30);
+
 fn node_pods_watch_forbidden(error: &watcher::Error) -> bool {
     match error {
         watcher::Error::InitialListFailed(kube::Error::Api(status))
@@ -599,11 +603,20 @@ impl App {
                 .any_semantic()
                 .fields("status.phase!=Succeeded,status.phase!=Failed");
             // `watcher` re-lists as fast as the stream is polled, so an error
-            // that does not clear itself (a refused watch) would hammer the API
-            // server — measured at ~9,800 requests a second against a test
-            // server. `DefaultBackoff` is client-go's: 800ms doubling to 30s,
-            // jittered, reset after 2 minutes of quiet.
-            let mut stream = watcher(api.clone(), cfg).default_backoff().boxed();
+            // that does not clear itself would hammer the API server —
+            // measured at ~9,800 requests a second against a test server.
+            //
+            // The pacing is driven here rather than through `.default_backoff()`
+            // because that wrapper resets on *any* `Ok` item, and `watcher`
+            // emits `Ok(Event::Init)` before every list attempt. A failing
+            // initial list therefore cycles `Init -> error -> minimum delay`
+            // forever and never escalates, which is worse than the 10s list
+            // poll it replaced. The strategy is still client-go's — 800ms
+            // doubling to 30s, jittered, self-resetting after 2 minutes of
+            // quiet — but it is reset only once the stream has actually got
+            // somewhere: see `established` below.
+            let mut stream = watcher(api.clone(), cfg).boxed();
+            let mut backoff = watcher::DefaultBackoff::default();
             // Node per pod, kept incrementally so per-node counts never need
             // a full rescan of the cluster's pods.
             let mut pod_nodes: HashMap<String, String> = HashMap::new();
@@ -632,6 +645,19 @@ impl App {
                                 }
                             }
                         };
+                        // Progress, as opposed to another doomed list attempt.
+                        // `Init` and the `InitApply`s behind it are replayed on
+                        // every attempt, so resetting on those is exactly the
+                        // mistake `.default_backoff()` makes.
+                        let established = matches!(
+                            event,
+                            Ok(watcher::Event::Apply(_)
+                                | watcher::Event::Delete(_)
+                                | watcher::Event::InitDone)
+                        );
+                        if established {
+                            backoff.reset();
+                        }
                         match event {
                             Ok(watcher::Event::Apply(obj)) | Ok(watcher::Event::InitApply(obj)) => {
                                 let key = row_key(&obj);
@@ -673,16 +699,21 @@ impl App {
                             // this watcher: after a refused watch, kube retries
                             // that watch from the same resourceVersion rather
                             // than re-listing. Restore the periodic list path in
-                            // that case. This also paces a refused initial list,
-                            // whose preceding `Init` event would otherwise keep
-                            // resetting `DefaultBackoff` to its minimum delay.
+                            // that case.
                             Err(error) if node_pods_watch_forbidden(&error) => {
                                 poll_fallback = true;
                                 break;
                             }
-                            // The stream self-heals, and the backoff above
-                            // paces other transient failures.
-                            Err(_) => {}
+                            // Everything else is transient and the stream heals
+                            // itself, so pace the next attempt and stay on the
+                            // watch. Sleeping here also stops publishing while
+                            // the counts are going nowhere; `dirty` survives, so
+                            // the next tick after recovery still emits.
+                            Err(_) => {
+                                let delay =
+                                    backoff.next().unwrap_or(NODE_PODS_BACKOFF_CEILING);
+                                tokio::time::sleep(delay).await;
+                            }
                         }
                     }
                     _ = ticker.tick() => {

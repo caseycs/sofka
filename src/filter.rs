@@ -263,6 +263,17 @@ fn split_cmp(tok: &str) -> Option<(&str, Op, &str)> {
     Some((key, op, value))
 }
 
+/// Case-fold one string for a filter comparison, per `char`.
+///
+/// Deliberately not `str::to_lowercase`: the two disagree on Greek final sigma
+/// (`Σ` folds to `ς` at the end of a word through `str`, always to `σ` through
+/// `char`). The needle is folded once at parse time and each cell is folded
+/// lazily on every rebuild, so they must fold *identically* or a comparison
+/// silently misses — hence one function, used by both sides.
+pub fn fold_lower(s: &str) -> impl Iterator<Item = char> + '_ {
+    s.chars().flat_map(char::to_lowercase)
+}
+
 /// Type a comparison value from its key: quantities for `cpu`/`mem`/`memory`,
 /// durations for `age`, and number-or-text for everything else.
 fn typed_value(key: &str, raw: &str) -> Result<CmpValue, String> {
@@ -279,7 +290,7 @@ fn typed_value(key: &str, raw: &str) -> Result<CmpValue, String> {
         _ => Ok(raw
             .parse::<f64>()
             .map(CmpValue::Num)
-            .unwrap_or_else(|_| CmpValue::Str(raw.to_lowercase()))),
+            .unwrap_or_else(|_| CmpValue::Str(fold_lower(raw).collect()))),
     }
 }
 
@@ -590,6 +601,25 @@ mod tests {
         assert_eq!(parse("").fuzzy_needle(), None);
         assert_eq!(parse("!x khc status=Running").fuzzy_needle(), Some("khc"));
         assert_eq!(parse("-l app=api").fuzzy_needle(), None);
+    }
+
+    /// The needle is folded once at parse time and each cell is folded on every
+    /// rebuild. `str::to_lowercase` applies the Greek final-sigma rule and
+    /// `char::to_lowercase` does not, so folding the two sides with different
+    /// functions makes a comparison silently miss. Both go through
+    /// `fold_lower`; this pins that down at the one place they could drift.
+    #[test]
+    fn both_sides_of_a_comparison_fold_the_same_way() {
+        let cell = "ΟΔΟΣ";
+        // The divergence is real, not theoretical.
+        assert_eq!(cell.to_lowercase(), "οδος");
+        assert_eq!(fold_lower(cell).collect::<String>(), "οδοσ");
+
+        // What matters is that the stored needle and the folded cell agree.
+        let CmpValue::Str(needle) = typed_value("name", cell).expect("typed") else {
+            panic!("expected a text comparison");
+        };
+        assert!(fold_lower(cell).eq(needle.chars()));
     }
 
     #[test]

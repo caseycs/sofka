@@ -129,10 +129,6 @@ pub fn parse_release_json(json: &[u8]) -> bool {
     serde_json::from_slice::<RawRelease>(json).is_ok()
 }
 
-/// Decode a release Secret into its `Release`. `None` if the secret doesn't
-/// carry a `data.release` payload or it can't be decoded (corrupt, unknown
-/// format, or not a Helm release secret at all) — callers treat that as
-/// "unrenderable", not a crash.
 /// The release payload as JSON: `data.release` is base64 twice over, then
 /// gzipped. Shared by [`decode`] and [`decode_summary`].
 fn release_json(secret: &DynamicObject) -> Option<Vec<u8>> {
@@ -167,6 +163,10 @@ pub fn decode_summary(secret: &DynamicObject) -> Option<Summary> {
     })
 }
 
+/// Decode a release Secret into its `Release`. `None` if the secret doesn't
+/// carry a `data.release` payload or it can't be decoded (corrupt, unknown
+/// format, or not a Helm release secret at all) — callers treat that as
+/// "unrenderable", not a crash.
 pub fn decode(secret: &DynamicObject) -> Option<Release> {
     let json = release_json(secret)?;
     let raw: RawRelease = serde_json::from_slice(&json).ok()?;

@@ -193,14 +193,15 @@ impl App {
                     .eval(crate::columns::parse_leading_num(&cell).total_cmp(want)),
                 None => false,
             },
-            // `want` is already case-folded by the parser and the cell is
-            // folded lazily through the iterator, so a text comparison
-            // allocates nothing per object. UTF-8 orders by code point, so
-            // comparing `char`s matches what comparing the folded `str`s did.
+            // `want` was folded once at parse time and the cell is folded
+            // lazily through the iterator, so a text comparison allocates
+            // nothing per object. UTF-8 orders by code point, so comparing
+            // `char`s matches what comparing the folded `str`s did. Both sides
+            // go through `fold_lower` — see there for why that matters.
             CmpValue::Str(want) => match self.column_cell(o, &cmp.key) {
                 Some(cell) => cmp
                     .op
-                    .eval(cell.chars().flat_map(char::to_lowercase).cmp(want.chars())),
+                    .eval(crate::filter::fold_lower(&cell).cmp(want.chars())),
                 None => false,
             },
         }
