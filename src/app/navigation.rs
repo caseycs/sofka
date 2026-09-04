@@ -8,6 +8,9 @@ impl App {
         let name = obj.metadata.name.clone().unwrap_or_default();
         let ns = obj.metadata.namespace.clone().unwrap_or_default();
 
+        // The literal arms are listed in `views::BUILTIN_DRILLS`, which is
+        // how `compile` knows to warn about a `drill` configured on one of
+        // them. Add a kind here, add it there.
         match self.kind_plural.as_str() {
             "namespaces" => self.set_namespace_and_return(&name),
             "nodes" => self.drill_to_pods(

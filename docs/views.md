@@ -133,8 +133,8 @@ kind warns and stays put. A namespaced target opens in the row's namespace; a
 cluster-scoped one ignores it.
 
 Kinds with a built-in drill-down keep it - a `drill` on pods won't replace the
-container picker. When a view sets both `drill` and `node`, `enter` drills and
-`o` still jumps to the node.
+container picker, and `:config` warns that the stanza is ignored. When a view
+sets both `drill` and `node`, `enter` drills and `o` still jumps to the node.
 
 Both settings are resolved key by key across the view keys for a kind
 (`apiVersion/plural`, `group/plural`, plural, kind), not off the single most

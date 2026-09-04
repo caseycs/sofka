@@ -2101,6 +2101,44 @@ async fn enter_on_externalsecret_opens_the_secret_it_writes() {
     assert_eq!(app.scope_label.as_deref(), Some("externalsecret/db-creds"));
 }
 
+/// `views::BUILTIN_DRILLS` is what `compile` warns from, so a plural listed
+/// there must really have a built-in arm: a drill smuggled past `compile` for
+/// each listed kind the fixture knows must never be honoured. (Kinds the
+/// fixture can't switch to are skipped rather than faked.)
+#[tokio::test]
+async fn builtin_drill_list_matches_the_enter_arms() {
+    for plural in crate::views::BUILTIN_DRILLS {
+        let (mut app, _rx) = test_app();
+        if app.cluster.resolve(plural).is_none() {
+            continue;
+        }
+        app.user_views = HashMap::from([(
+            plural.to_string(),
+            crate::views::View {
+                drill: Some(crate::views::Drill {
+                    kind: "secrets".to_string(),
+                    labels: None,
+                    fields: None,
+                }),
+                ..Default::default()
+            },
+        )]);
+        app.switch_kind(plural);
+        apply(
+            &mut app,
+            json!({"apiVersion": "v1", "kind": "Thing",
+                   "metadata": {"name": "a", "namespace": "default"}}),
+        );
+        app.table_state.select(Some(0));
+
+        app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_ne!(
+            app.kind_plural, "secrets",
+            "{plural} honoured a configured drill"
+        );
+    }
+}
+
 #[tokio::test]
 async fn configured_drill_to_an_unknown_kind_warns_and_stays() {
     let (mut app, _rx) = test_app();

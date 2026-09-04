@@ -121,6 +121,33 @@ fn fill_placeholders(template: &str, obj: &DynamicObject) -> String {
 /// The placeholders a drill's `labels` template may use.
 const DRILL_PLACEHOLDERS: &[&str] = &["name", "namespace"];
 
+/// Kinds whose `enter` has a built-in drill-down (the arms of `App::drill`),
+/// by plural. A configured `drill` on one of these would never be consulted,
+/// so [`compile`] rejects it with a warning instead of letting it sit there
+/// doing nothing. Keep in step with the match in `src/app/navigation.rs`.
+pub const BUILTIN_DRILLS: &[&str] = &[
+    "namespaces",
+    "nodes",
+    "deployments",
+    "statefulsets",
+    "daemonsets",
+    "replicasets",
+    "jobs",
+    "services",
+    "pods",
+    "customresourcedefinitions",
+    "helm",
+    "helmhistory",
+    "helmreleases",
+];
+
+/// The plural a view key names: the last segment of `apiVersion/plural`,
+/// `group/plural`, or a bare plural. A key that is a lowercased kind (`pod`)
+/// isn't a plural and won't match anything here.
+fn key_plural(key: &str) -> &str {
+    key.rsplit('/').next().unwrap_or(key)
+}
+
 /// The `{…}` tokens in a template that aren't in [`DRILL_PLACEHOLDERS`].
 fn unknown_placeholders(template: &str) -> Vec<String> {
     let mut unknown = Vec::new();
@@ -289,6 +316,15 @@ pub fn compile(
             None => None,
         };
         let drill = cfg.drill.as_ref().and_then(|d| {
+            let key_lc = key.to_lowercase();
+            let plural = key_plural(&key_lc);
+            if BUILTIN_DRILLS.contains(&plural) {
+                warnings.push(format!(
+                    "views.\"{key}\": drill is ignored — `enter` on {plural} has a \
+                     built-in drill-down that config doesn't replace"
+                ));
+                return None;
+            }
             let kind = d.kind.trim();
             if kind.is_empty() {
                 warnings.push(format!("views.\"{key}\": drill.kind is empty; ignored"));
@@ -1107,6 +1143,38 @@ mod tests {
         );
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(drill_for(&views, &pools).unwrap().labels_for(&pool), None);
+    }
+
+    #[test]
+    fn drill_on_a_kind_with_a_builtin_drilldown_warns() {
+        let (views, warnings) = compile_toml(
+            r#"
+            [views.pods]
+            drill = { kind = "secrets", fields = "metadata.name={name}" }
+
+            [views."apps/v1/deployments"]
+            drill = { kind = "pods" }
+
+            [views.helmreleases]
+            drill = { kind = "secrets" }
+            "#,
+        );
+        for key in ["pods", "apps/v1/deployments", "helmreleases"] {
+            assert_eq!(views[key].drill, None, "{key}");
+        }
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("views.\"pods\"") && w.contains("built-in drill-down")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("`enter` on deployments")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
